@@ -1,0 +1,259 @@
+package com.enterprise.xmldbtool.service;
+
+import com.enterprise.xmldbtool.batch.DatabaseErrorSkipListener;
+import com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter;
+import com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor;
+import com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller;
+import com.enterprise.xmldbtool.model.DatabaseRowPayload;
+import com.enterprise.xmldbtool.model.JobLaunchRequest;
+import com.enterprise.xmldbtool.model.JobLaunchResponse;
+import com.enterprise.xmldbtool.model.JobTelemetryResponse;
+import com.enterprise.xmldbtool.model.MigrationErrorRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.Job;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobParameters;
+import org.springframework.batch.core.JobParametersBuilder;
+import org.springframework.batch.core.Step;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.explore.JobExplorer;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.JobLauncher;
+import org.springframework.batch.core.launch.JobOperator;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.xml.StaxEventItemReader;
+import org.springframework.core.io.DefaultResourceLoader;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
+import java.io.File;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.format.DateTimeFormatter;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Service
+public class DynamicBatchJobService {
+
+    private static final Logger log = LoggerFactory.getLogger(DynamicBatchJobService.class);
+
+    private final JobRepository jobRepository;
+    private final JobLauncher jobLauncher;
+    private final JobExplorer jobExplorer;
+    private final PlatformTransactionManager transactionManager;
+    private final DynamicXmlUnmarshaller dynamicXmlUnmarshaller;
+    private final DynamicDataSourceService dataSourceService;
+    private final ResourceLoader resourceLoader = new DefaultResourceLoader();
+
+    // In-memory cache of active job listeners for real-time telemetry error reporting
+    private final Map<Long, DatabaseErrorSkipListener> skipListenerMap = new ConcurrentHashMap<>();
+
+    // Throughput rate calculation state
+    private final Map<Long, Long> previousWriteCounts = new ConcurrentHashMap<>();
+    private final Map<Long, Long> previousPollTimestamps = new ConcurrentHashMap<>();
+
+    public DynamicBatchJobService(JobRepository jobRepository,
+                                 JobLauncher jobLauncher,
+                                 JobExplorer jobExplorer,
+                                 PlatformTransactionManager transactionManager,
+                                 DynamicXmlUnmarshaller dynamicXmlUnmarshaller,
+                                 DynamicDataSourceService dataSourceService) {
+        this.jobRepository = jobRepository;
+        this.jobLauncher = jobLauncher;
+        this.jobExplorer = jobExplorer;
+        this.transactionManager = transactionManager;
+        this.dynamicXmlUnmarshaller = dynamicXmlUnmarshaller;
+        this.dataSourceService = dataSourceService;
+    }
+
+    /**
+     * Dynamically builds and launches Spring Batch Job for high-volume XML ingestion.
+     */
+    public JobLaunchResponse launchIngestionJob(JobLaunchRequest request) {
+        try {
+            long timestamp = System.currentTimeMillis();
+            String jobName = "dynamicXmlIngestJob_" + timestamp;
+
+            // Target DB DataSource
+            DataSource targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
+
+            // 1. StaxEventItemReader
+            Resource xmlResource = resolveXmlResource(request.getSourceXmlPath());
+            StaxEventItemReader<Map<String, Object>> reader = new StaxEventItemReader<>();
+            reader.setName("dynamicStaxEventReader_" + timestamp);
+            reader.setResource(xmlResource);
+            reader.setFragmentRootElementName(request.getRecordRootElement());
+            reader.setUnmarshaller(dynamicXmlUnmarshaller);
+
+            // 2. Dynamic ItemProcessor
+            DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor(
+                    request.getTargetTable(),
+                    request.getMappings()
+            );
+
+            // 3. Dynamic Pure JDBC Writer
+            DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(targetDataSource);
+
+            // 4. Temporary placeholder for SkipListener (attached to execution once launched)
+            int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
+
+            // We create a Step-level skip listener
+            DatabaseErrorSkipListener skipListener = new DatabaseErrorSkipListener(targetDataSource, timestamp, "dynamicIngestStep");
+
+            // Build Step with .faultTolerant().skipLimit(10000)
+            Step step = new StepBuilder("dynamicIngestStep", jobRepository)
+                    .<Map<String, Object>, DatabaseRowPayload>chunk(chunkSize, transactionManager)
+                    .reader(reader)
+                    .processor(processor)
+                    .writer(writer)
+                    .faultTolerant()
+                    .skipLimit(10000)
+                    .skip(Exception.class)
+                    .listener(skipListener)
+                    .build();
+
+            // Build Job
+            Job job = new JobBuilder(jobName, jobRepository)
+                    .start(step)
+                    .build();
+
+            // Job Parameters
+            JobParameters params = new JobParametersBuilder()
+                    .addString("sourceXmlPath", request.getSourceXmlPath())
+                    .addString("targetTable", request.getTargetTable() != null ? request.getTargetTable() : "MULTI_TABLE")
+                    .addLong("time", timestamp)
+                    .toJobParameters();
+
+            // Launch asynchronously using SimpleAsyncTaskExecutor so the HTTP request returns immediately
+            SimpleAsyncTaskExecutor asyncExecutor = new SimpleAsyncTaskExecutor("batch-exec-");
+            JobExecution[] executionHolder = new JobExecution[1];
+
+            // Launch in background
+            JobExecution jobExecution = jobRepository.createJobExecution(jobName, params);
+            skipListenerMap.put(jobExecution.getId(), skipListener);
+
+            asyncExecutor.execute(() -> {
+                try {
+                    job.execute(jobExecution);
+                } catch (Exception e) {
+                    log.error("Async execution of job {} failed: {}", jobName, e.getMessage(), e);
+                }
+            });
+
+            log.info("Successfully launched dynamic XML ingestion Job #{} for table '{}'",
+                    jobExecution.getId(), request.getTargetTable());
+
+            return new JobLaunchResponse(true, "Job launched successfully.", jobExecution.getId(), "STARTED");
+        } catch (Exception ex) {
+            log.error("Failed to launch batch ingestion job: {}", ex.getMessage(), ex);
+            return new JobLaunchResponse(false, "Job launch failed: " + ex.getMessage(), null, "FAILED");
+        }
+    }
+
+    /**
+     * Polls JobExplorer and StepExecution for live metrics & throughput calculation.
+     */
+    public JobTelemetryResponse getJobTelemetry(Long jobExecutionId) {
+        JobTelemetryResponse telemetry = new JobTelemetryResponse();
+        telemetry.setJobExecutionId(jobExecutionId);
+
+        JobExecution execution = jobExplorer.getJobExecution(jobExecutionId);
+        if (execution == null) {
+            telemetry.setStatus("UNKNOWN");
+            telemetry.setMessage("Job execution ID not found.");
+            return telemetry;
+        }
+
+        telemetry.setStatus(execution.getStatus().name());
+        telemetry.setExitCode(execution.getExitStatus() != null ? execution.getExitStatus().getExitCode() : "");
+
+        DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+        if (execution.getStartTime() != null) {
+            telemetry.setStartTime(execution.getStartTime().format(dtf));
+        }
+        if (execution.getEndTime() != null) {
+            telemetry.setEndTime(execution.getEndTime().format(dtf));
+        }
+
+        long totalRead = 0;
+        long totalWritten = 0;
+        long totalErrors = 0;
+
+        for (StepExecution step : execution.getStepExecutions()) {
+            totalRead += step.getReadCount();
+            totalWritten += step.getWriteCount();
+            totalErrors += (step.getReadSkipCount() + step.getProcessSkipCount() + step.getWriteSkipCount());
+        }
+
+        telemetry.setTotalRead(totalRead);
+        telemetry.setTotalWritten(totalWritten);
+        telemetry.setTotalErrors(totalErrors);
+
+        // Throughput calculation (records/second)
+        long now = System.currentTimeMillis();
+        Long prevTime = previousPollTimestamps.put(jobExecutionId, now);
+        Long prevCount = previousWriteCounts.put(jobExecutionId, totalWritten);
+
+        double recordsPerSec = 0.0;
+        if (prevTime != null && prevCount != null && now > prevTime) {
+            double deltaSec = (now - prevTime) / 1000.0;
+            long deltaRecords = totalWritten - prevCount;
+            if (deltaSec > 0 && deltaRecords >= 0) {
+                recordsPerSec = deltaRecords / deltaSec;
+            }
+        }
+        telemetry.setRecordsPerSecond(recordsPerSec);
+
+        // Retrieve recent errors from Step listener
+        DatabaseErrorSkipListener listener = skipListenerMap.get(jobExecutionId);
+        if (listener != null) {
+            telemetry.setRecentErrors(listener.getRecentErrors());
+        }
+
+        return telemetry;
+    }
+
+    /**
+     * Requests batch job termination.
+     */
+    public boolean stopJob(Long jobExecutionId) {
+        try {
+            JobExecution execution = jobExplorer.getJobExecution(jobExecutionId);
+            if (execution != null && execution.isRunning()) {
+                execution.setStatus(BatchStatus.STOPPING);
+                jobRepository.update(execution);
+                return true;
+            }
+        } catch (Exception ex) {
+            log.warn("Failed to stop job {}: {}", jobExecutionId, ex.getMessage());
+        }
+        return false;
+    }
+
+    private Resource resolveXmlResource(String sourcePath) {
+        Path directPath = Paths.get(sourcePath);
+        if (directPath.toFile().exists()) {
+            return new FileSystemResource(directPath.toFile());
+        }
+        Path relativePath = Paths.get("/home/sv/Projects/xmldbtool", sourcePath);
+        if (relativePath.toFile().exists()) {
+            return new FileSystemResource(relativePath.toFile());
+        }
+        Resource res = resourceLoader.getResource(sourcePath);
+        if (res.exists()) {
+            return res;
+        }
+        return new FileSystemResource(new File(sourcePath));
+    }
+}

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalog exportId="EXP-2026-X889" generatedAt="2026-10-22T12:00:00Z" version="2.4">
+    <record id="1001" status="ACTIVE" region="US-EAST" priority="HIGH">
+        <sku>SKU-99214-A</sku>
+        <productName>Enterprise Server Blade Gen11</productName>
+        <category>Hardware</category>
+        <unitPrice>4899.50</unitPrice>
+        <quantity>12</quantity>
+        <supplierCode>SUPP-DELL-88</supplierCode>
+        <warehouseLocation>WH-VA-04</warehouseLocation>
+        <createdAt>2026-10-01 09:15:00</createdAt>
+    </record>
+    <record id="1002" status="PENDING" region="EU-CENTRAL" priority="MEDIUM">
+        <sku>SKU-88320-B</sku>
+        <productName>100GbE QSFP28 Optical Transceiver</productName>
+        <category>Networking</category>
+        <unitPrice>450.00</unitPrice>
+        <quantity>64</quantity>
+        <supplierCode>SUPP-CISCO-12</supplierCode>
+        <warehouseLocation>WH-FRA-01</warehouseLocation>
+        <createdAt>2026-10-02 11:30:20</createdAt>
+    </record>
+    <record id="1003" status="ACTIVE" region="APAC-SOUTH" priority="CRITICAL">
+        <sku>SKU-77401-C</sku>
+        <productName>PCIe NVMe Enterprise SSD 7.68TB</productName>
+        <category>Storage</category>
+        <unitPrice>1120.75</unitPrice>
+        <quantity>30</quantity>
+        <supplierCode>SUPP-SAMS-05</supplierCode>
+        <warehouseLocation>WH-SIN-02</warehouseLocation>
+        <createdAt>2026-10-03 14:45:10</createdAt>
+    </record>
+    <record id="1004" status="INACTIVE" region="US-WEST" priority="LOW">
+        <sku>SKU-66512-D</sku>
+        <productName>Smart PDU Rack Power Distribution 30A</productName>
+        <category>Power</category>
+        <unitPrice>780.00</unitPrice>
+        <quantity>8</quantity>
+        <supplierCode>SUPP-APC-22</supplierCode>
+        <warehouseLocation>WH-CA-03</warehouseLocation>
+        <createdAt>2026-10-04 08:20:00</createdAt>
+    </record>
+    <record id="1005" status="ACTIVE" region="US-EAST" priority="HIGH">
+        <sku>SKU-55419-E</sku>
+        <productName>DDR5 Registered ECC Memory 64GB</productName>
+        <category>Memory</category>
+        <unitPrice>320.50</unitPrice>
+        <quantity>128</quantity>
+        <supplierCode>SUPP-MICR-44</supplierCode>
+        <warehouseLocation>WH-VA-04</warehouseLocation>
+        <createdAt>2026-10-05 16:10:45</createdAt>
+    </record>
+    <record id="1006" status="ACTIVE" region="EU-WEST" priority="MEDIUM">
+        <sku>SKU-44391-F</sku>
+        <productName>2U Rackmount Chassis Hot-Swap</productName>
+        <category>Hardware</category>
+        <unitPrice>650.00</unitPrice>
+        <quantity>20</quantity>
+        <supplierCode>SUPP-SUPER-09</supplierCode>
+        <warehouseLocation>WH-LON-01</warehouseLocation>
+        <createdAt>2026-10-06 10:05:15</createdAt>
+    </record>
+</catalog>

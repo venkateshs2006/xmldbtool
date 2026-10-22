@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XMLDbTool - Enterprise XML Ingestion Platform</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome 6 Icons -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" rel="stylesheet">
+    <!-- Google Fonts: Open Sans & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        bnp: {
+                            emerald: '#00965e',
+                            dark: '#333333',
+                            light: '#f4f4f4',
+                            hover: '#007a4c'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['"Open Sans"', 'system-ui', 'sans-serif'],
+                        mono: ['"JetBrains Mono"', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        :root {
+            --bnp-emerald: #00965e;
+            --bnp-hover: #007a4c;
+            --bnp-dark-grey: #333333;
+            --bnp-light-grey: #f4f4f4;
+            --white: #ffffff;
+            --text-main: #4a4a4a;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Open Sans', sans-serif;
+            background-color: var(--bnp-light-grey);
+            color: var(--text-main);
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        /* Top Header in BNP Style */
+        header {
+            border-top: 5px solid var(--bnp-emerald);
+            padding: 14px 6%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #ffffff;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        nav ul {
+            display: flex;
+            list-style: none;
+            align-items: center;
+            margin: 0;
+            padding: 0;
+        }
+        nav ul li { margin-left: 20px; }
+        nav ul li a, nav ul li button {
+            text-decoration: none;
+            color: var(--bnp-dark-grey);
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            transition: color 0.2s;
+            background: none;
+            border: none;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+        }
+        nav ul li a:hover, nav ul li button:hover { color: var(--bnp-emerald); }
+        nav ul li a.active {
+            color: var(--bnp-emerald);
+            border-bottom: 2px solid var(--bnp-emerald);
+            padding-bottom: 4px;
+            font-weight: 700;
+        }
+
+        /* Stepper matching workflow.html */
+        .stepper-item {
+            flex: 1;
+            text-align: center;
+            position: relative;
+            cursor: pointer;
+        }
+        .stepper-item::after {
+            content: '';
+            position: absolute;
+            top: 17px;
+            left: 50%;
+            width: 100%;
+            height: 2px;
+            background-color: #cbd5e1;
+            z-index: 1;
+            transition: background-color 0.3s;
+        }
+        .stepper-item:last-child::after { display: none; }
+        .stepper-item.completed::after { background-color: var(--bnp-emerald); }
+        .stepper-circle {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background-color: #ffffff;
+            border: 2px solid #cbd5e1;
+            color: #94a3b8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            margin: 0 auto;
+            position: relative;
+            z-index: 2;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.03);
+            font-size: 0.85rem;
+        }
+        .stepper-item.active .stepper-circle {
+            border-color: var(--bnp-emerald);
+            color: var(--bnp-emerald);
+            background-color: #ffffff;
+            box-shadow: 0 0 0 4px rgba(0, 150, 94, 0.15);
+        }
+        .stepper-item.completed .stepper-circle {
+            background-color: var(--bnp-emerald);
+            border-color: var(--bnp-emerald);
+            color: #ffffff;
+        }
+        .stepper-label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: #64748b;
+            margin-top: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .stepper-item.active .stepper-label { color: var(--bnp-emerald); font-weight: 700; }
+        .stepper-item.completed .stepper-label { color: var(--bnp-dark-grey); }
+
+        /* Card Styles */
+        .card {
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            border: 1px solid #e2e8f0;
+        }
+
+        /* Form Inputs */
+        .input-field {
+            width: 100%;
+            padding: 0.65rem 1rem;
+            border-radius: 8px;
+            border: 1px solid #cbd5e1;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+            background-color: #f8fafc;
+            color: #334155;
+        }
+        .input-field:focus {
+            outline: none;
+            border-color: var(--bnp-emerald);
+            box-shadow: 0 0 0 3px rgba(0, 150, 94, 0.15);
+            background-color: #ffffff;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 0.65rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+        .btn-primary {
+            background-color: var(--bnp-emerald);
+            color: #ffffff;
+            border: 1px solid transparent;
+        }
+        .btn-primary:hover:not(:disabled) {
+            background-color: var(--bnp-hover);
+            box-shadow: 0 4px 6px rgba(0, 150, 94, 0.2);
+            transform: translateY(-1px);
+        }
+        .btn-secondary {
+            background-color: #ffffff;
+            color: #475569;
+            border: 1px solid #cbd5e1;
+        }
+        .btn-secondary:hover:not(:disabled) {
+            background-color: #f1f5f9;
+            color: #0f172a;
+            border-color: #94a3b8;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        footer {
+            background: var(--bnp-dark-grey);
+            color: #ffffff;
+            padding: 30px 6%;
+            font-size: 0.8rem;
+            margin-top: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Toast Notification Container (Positioned well below header with highest z-index) -->
+    <div id="toast-container" class="fixed top-24 right-6 z-[9999] flex flex-col gap-2 max-w-md w-full pointer-events-none"></div>
+
+    <!-- Connection Validation Modal Dialog (Centered, z-[9999] above sticky header) -->
+    <div id="connValidationModal" class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-[9999] hidden p-4">
+        <div class="card max-w-lg w-full overflow-hidden shadow-2xl border border-gray-200 animate-fadeIn" onclick="event.stopPropagation()">
+            <!-- Modal Header -->
+            <div id="connModalHeaderBg" class="p-6 text-center border-b border-gray-100 bg-gray-50/80">
+                <div id="connModalIconWrapper" class="w-16 h-16 rounded-full mx-auto flex items-center justify-center text-2xl shadow-sm mb-3 bg-emerald-50 text-bnp-emerald border border-emerald-200">
+                    <i id="connModalIcon" class="fas fa-plug"></i>
+                </div>
+                <h3 id="connModalTitle" class="text-xl font-bold text-gray-900">Validating Connection...</h3>
+                <p id="connModalSubtitle" class="text-xs text-gray-500 mt-1">Connecting to target database and verifying credentials</p>
+            </div>
+
+            <!-- Modal Content Body -->
+            <div class="p-6 space-y-4">
+                <!-- Details Grid -->
+                <div id="connModalDetails" class="bg-gray-50 rounded-xl p-4 border border-gray-200 text-xs space-y-2.5">
+                    <div class="flex justify-between items-center">
+                        <span class="font-semibold text-gray-500">Database Engine:</span>
+                        <span id="connModalEngine" class="font-bold text-gray-800">--</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="font-semibold text-gray-500">Database Product:</span>
+                        <span id="connModalProduct" class="font-bold text-bnp-emerald">--</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="font-semibold text-gray-500">Version:</span>
+                        <span id="connModalVersion" class="font-mono text-gray-700">--</span>
+                    </div>
+                    <div class="flex justify-between items-start pt-2 border-t border-gray-200">
+                        <span class="font-semibold text-gray-500">JDBC URL:</span>
+                        <span id="connModalUrl" class="font-mono text-[11px] text-gray-700 break-all text-right max-w-[280px]">--</span>
+                    </div>
+                </div>
+
+                <!-- Error Message Box (Hidden unless error) -->
+                <div id="connModalErrorMessage" class="hidden p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 font-mono break-all max-h-40 overflow-y-auto">
+                    <!-- Dynamic error details -->
+                </div>
+            </div>
+
+            <!-- Modal Actions Footer -->
+            <div class="px-6 py-4 bg-gray-50 border-t border-gray-100 flex items-center justify-end gap-3">
+                <button type="button" id="btn-close-conn-modal" class="btn btn-secondary text-xs py-2 px-4">
+                    Close
+                </button>
+                <button type="button" id="btn-proceed-conn-modal" class="hidden btn btn-primary text-xs py-2 px-4">
+                    <span>Proceed to Step 2</span>
+                    <i class="fas fa-arrow-right ml-1.5"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- BNP Paribas Corporate Header -->
+    <header>
+        <div class="flex items-center">
+            <a href="/" class="logo-link mr-6 flex items-center">
+                <img src="https://cdn-group.bnpparibas.com/build/images/logo-bnp.svg" alt="BNP Paribas Logo" class="bnp-logo" style="height: 48px;">
+            </a>
+            <div class="hidden md:block border-l border-gray-300 pl-6">
+                <h1 class="text-xl font-bold text-[#333333] tracking-tight leading-none">XML<span class="text-bnp-emerald">DbTool</span></h1>
+                <p class="text-[10px] text-gray-500 font-semibold uppercase tracking-widest mt-0.5">Enterprise Dynamic Ingestion</p>
+            </div>
+        </div>
+
+        <nav>
+            <ul>
+                <li>
+                    <div id="db-status-pill" class="flex items-center space-x-2 px-3 py-1 rounded-full bg-slate-100 border border-slate-200 text-xs text-slate-600 font-semibold">
+                        <span id="db-status-dot" class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse"></span>
+                        <span id="db-status-text">Database Disconnected</span>
+                    </div>
+                </li>
+            </ul>
+        </nav>
+    </header>
+
+    <!-- Main Stepper & Content Workspace -->
+    <main class="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-8">
+
+        <!-- Top Title & Subtitle -->
+        <div class="mb-8 text-center">
+            <h2 class="text-3xl font-bold text-gray-900">Dynamic XML-to-Database Ingestion</h2>
+            <p class="text-sm text-gray-500 mt-2">Configure target database, discover XML fragment schema, auto-align columns, and monitor live batch execution in 6 steps.</p>
+        </div>
+
+        <!-- 6-Step Connected Stepper -->
+        <div class="flex items-start mb-8 px-2 max-w-4xl mx-auto">
+            <!-- Step 1 Indicator -->
+            <div class="stepper-item active" data-step="1" id="step1-indicator">
+                <div class="stepper-circle"><i class="fas fa-plug text-xs"></i></div>
+                <div class="stepper-label">Target DB</div>
+            </div>
+            <!-- Step 2 Indicator -->
+            <div class="stepper-item" data-step="2" id="step2-indicator">
+                <div class="stepper-circle"><i class="fas fa-file-alt text-xs"></i></div>
+                <div class="stepper-label">Source XML</div>
+            </div>
+            <!-- Step 3 Indicator -->
+            <div class="stepper-item" data-step="3" id="step3-indicator">
+                <div class="stepper-circle"><i class="fas fa-search text-xs"></i></div>
+                <div class="stepper-label">Discovery</div>
+            </div>
+            <!-- Step 4 Indicator -->
+            <div class="stepper-item" data-step="4" id="step4-indicator">
+                <div class="stepper-circle"><i class="fas fa-project-diagram text-xs"></i></div>
+                <div class="stepper-label">Mapping</div>
+            </div>
+            <!-- Step 5 Indicator -->
+            <div class="stepper-item" data-step="5" id="step5-indicator">
+                <div class="stepper-circle"><i class="fas fa-table text-xs"></i></div>
+                <div class="stepper-label">Preview</div>
+            </div>
+            <!-- Step 6 Indicator -->
+            <div class="stepper-item" data-step="6" id="step6-indicator">
+                <div class="stepper-circle"><i class="fas fa-chart-line text-xs"></i></div>
+                <div class="stepper-label">Telemetry</div>
+            </div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- STEP 1: TARGET DATABASE CONNECTION         -->
+        <!-- ========================================== -->
+        <section id="step-section-1" class="step-content card p-6 sm:p-8">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-100 gap-3">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
+                        <i class="fas fa-database text-lg"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-800">Target Database Connection</h3>
+                        <p class="text-xs text-gray-500">Pure JDBC batch writer connection for PostgreSQL or Oracle database.</p>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button type="button" id="btn-preset-pg" class="btn btn-secondary text-xs py-1.5 px-3">
+                        <i class="fas fa-server mr-1.5 text-slate-500"></i> Preset: PostgreSQL
+                    </button>
+                    <button type="button" id="btn-preset-oracle" class="btn text-xs py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
+                        <i class="fas fa-database mr-1.5"></i> Preset: Oracle DB
+                    </button>
+                </div>
+            </div>
+
+            <form id="db-connection-form" class="space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">Target Engine</label>
+                        <select id="db-type" class="input-field font-medium">
+                            <option value="POSTGRESQL">PostgreSQL (12+)</option>
+                            <option value="ORACLE">Oracle Database (19c/21c/23c)</option>
+                        </select>
+                    </div>
+
+                    <div class="md:col-span-2">
+                        <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">JDBC Connection URL</label>
+                        <input type="text" id="db-url" required
+                               placeholder="jdbc:postgresql://localhost:5432/enterprise_db"
+                               value="jdbc:postgresql://localhost:5432/enterprise_db"
+                               class="input-field font-mono text-xs">
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">Database Username</label>
+                        <input type="text" id="db-username" required
+                               placeholder="postgres"
+                               value="postgres"
+                               class="input-field">
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">Database Password</label>
+                        <input type="password" id="db-password"
+                               placeholder="••••••••••••"
+                               class="input-field">
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">Target Schema (Optional)</label>
+                        <input type="text" id="db-schema"
+                               placeholder="public"
+                               value="public"
+                               class="input-field">
+                    </div>
+                </div>
+
+                <div class="pt-6 flex items-center justify-between border-t border-gray-100">
+                    <button type="button" id="btn-test-db" class="btn btn-secondary">
+                        <i class="fas fa-plug mr-2 text-bnp-emerald"></i>
+                        <span>Test & Validate Credentials</span>
+                    </button>
+
+                    <button type="button" id="btn-step1-next" class="btn btn-primary">
+                        <span>Next: Source Selection</span>
+                        <i class="fas fa-arrow-right ml-2"></i>
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- ========================================== -->
+        <!-- STEP 2: SOURCE XML SELECTION               -->
+        <!-- ========================================== -->
+        <section id="step-section-2" class="step-content hidden card p-6 sm:p-8">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-100 gap-3">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
+                        <i class="fas fa-file-code text-lg"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-800">Source XML Specification (6GB+ Ready)</h3>
+                        <p class="text-xs text-gray-500">Specify local XML file path or Cloud Object Storage (COS) URI with bounded StAX memory streaming.</p>
+                    </div>
+                </div>
+                <button type="button" id="btn-use-sample-xml" class="btn text-xs py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
+                    <i class="fas fa-folder-open mr-1.5"></i> Load Built-in Demo XML
+                </button>
+            </div>
+
+            <form id="xml-source-form" class="space-y-6">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">XML Source Path or Cloud Object Storage URI</label>
+                    <div class="relative">
+                        <input type="text" id="xml-file-path" required
+                               placeholder="/path/to/enterprise-dump-6gb.xml or cos://bucket/transactions.xml"
+                               class="input-field font-mono text-xs pl-10">
+                        <i class="fas fa-hard-drive absolute left-3.5 top-3 text-gray-400 text-sm"></i>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1.5">Supports local filesystem paths, S3/COS URIs, or standard URLs. StAX streaming guarantees constant memory consumption.</p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">XML Fragment Record Element (Root Tag)</label>
+                        <input type="text" id="xml-root-element" required
+                               placeholder="record"
+                               value="record"
+                               class="input-field font-mono text-xs">
+                        <p class="text-xs text-gray-500 mt-1.5">The repeating XML element tag to unmarshal as records (e.g., <code>record</code>, <code>transaction</code>).</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">Batch Commit Chunk Size</label>
+                        <input type="number" id="batch-chunk-size" min="100" max="10000" step="100"
+                               value="1000"
+                               class="input-field font-mono text-xs">
+                        <p class="text-xs text-gray-500 mt-1.5">Recommended 1,000 - 5,000 records for optimal JDBC batch throughput.</p>
+                    </div>
+                </div>
+
+                <div class="pt-6 flex items-center justify-between border-t border-gray-100">
+                    <button type="button" class="btn btn-secondary btn-prev-step" data-to="1">
+                        <i class="fas fa-arrow-left mr-2"></i>
+                        <span>Back</span>
+                    </button>
+
+                    <button type="button" id="btn-step2-next" class="btn btn-primary">
+                        <span>Run Schema Discovery</span>
+                        <i class="fas fa-arrow-right ml-2"></i>
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- ========================================== -->
+        <!-- STEP 3: SCHEMA DISCOVERY                   -->
+        <!-- ========================================== -->
+        <section id="step-section-3" class="step-content hidden card p-6 sm:p-8">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-100 gap-3">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
+                        <i class="fas fa-search text-lg"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-800">Schema Discovery Results</h3>
+                        <p class="text-xs text-gray-500">StAX sampled the first 1,000 lines of XML and queried target database metadata.</p>
+                    </div>
+                </div>
+                <button type="button" id="btn-rescan" class="btn btn-secondary text-xs py-1.5 px-3">
+                    <i class="fas fa-sync-alt mr-1.5 text-bnp-emerald"></i> Re-Scan
+                </button>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                <!-- Discovered XML Tags & @Attributes -->
+                <div class="bg-gray-50 rounded-xl p-4 border border-gray-200 flex flex-col h-96">
+                    <div class="flex items-center justify-between pb-3 border-b border-gray-200">
+                        <h4 class="text-xs font-bold text-gray-700 uppercase tracking-wider flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-bnp-emerald"></span>
+                            Discovered XML Tags & Attributes
+                        </h4>
+                        <span id="xml-tag-count" class="text-xs font-mono font-bold text-bnp-emerald bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">0 Items</span>
+                    </div>
+                    <div id="xml-tags-container" class="flex-1 overflow-y-auto mt-3 pr-2 space-y-2">
+                        <div class="text-center py-12 text-gray-400 text-xs">Waiting for schema discovery...</div>
+                    </div>
+                </div>
+
+                <!-- Discovered Database Tables & Columns -->
+                <div class="bg-gray-50 rounded-xl p-4 border border-gray-200 flex flex-col h-96">
+                    <div class="flex items-center justify-between pb-3 border-b border-gray-200">
+                        <h4 class="text-xs font-bold text-gray-700 uppercase tracking-wider flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
+                            Target Database Tables & Columns
+                        </h4>
+                        <span id="db-table-count" class="text-xs font-mono font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">0 Tables</span>
+                    </div>
+                    <div id="db-tables-container" class="flex-1 overflow-y-auto mt-3 pr-2 space-y-3">
+                        <div class="text-center py-12 text-gray-400 text-xs">Waiting for database metadata...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="pt-6 flex items-center justify-between border-t border-gray-100">
+                <button type="button" class="btn btn-secondary btn-prev-step" data-to="2">
+                    <i class="fas fa-arrow-left mr-2"></i>
+                    <span>Back</span>
+                </button>
+
+                <button type="button" id="btn-step3-next" class="btn btn-primary">
+                    <span>Proceed to Field Mapping</span>
+                    <i class="fas fa-arrow-right ml-2"></i>
+                </button>
+            </div>
+        </section>
+
+        <!-- ========================================== -->
+        <!-- STEP 4: MAPPING CONFIGURATION              -->
+        <!-- ========================================== -->
+        <section id="step-section-4" class="step-content hidden card p-6 sm:p-8">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-100 gap-4">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
+                        <i class="fas fa-project-diagram text-lg"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-800">Dynamic XML-to-Database Mapping</h3>
+                        <p class="text-xs text-gray-500">Map unmarshalled XML tags and flattened attributes (<code>@attr</code>) to target SQL table columns.</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="button" id="btn-smart-match" class="btn text-xs py-2 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
+                        <i class="fas fa-magic mr-1.5"></i> Smart Match Auto-Align
+                    </button>
+                    <button type="button" id="btn-clear-mapping" class="btn btn-secondary text-xs py-2 px-3">
+                        Clear All
+                    </button>
+                </div>
+            </div>
+
+            <!-- Target Table Selector Box & Multi-Table Info -->
+            <div class="mb-6 p-4 rounded-xl bg-gray-50 border border-gray-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <i class="fas fa-sitemap text-bnp-emerald text-xl"></i>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <label class="block text-xs font-bold text-gray-700 uppercase">Default Target Database Table</label>
+                            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-bnp-emerald">1-to-Many Multi-Table Enabled</span>
+                        </div>
+                        <span class="text-xs text-gray-500">Each mapping row below can target any table in your schema (e.g. parent & child tables).</span>
+                    </div>
+                </div>
+                <div class="w-full md:w-80">
+                    <select id="mapping-target-table" class="input-field font-semibold text-bnp-emerald">
+                        <option value="">-- Select Default Table --</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Mapping Grid Header -->
+            <div class="hidden sm:grid grid-cols-12 gap-3 px-4 py-2.5 rounded-lg bg-gray-100 border border-gray-200 text-xs font-bold uppercase tracking-wider text-gray-600 mb-3">
+                <div class="col-span-4">Source XML Field / Attribute</div>
+                <div class="col-span-3">Target Database Table</div>
+                <div class="col-span-3">Destination Table Column</div>
+                <div class="col-span-1 text-center">Transform</div>
+                <div class="col-span-1 text-right">Actions</div>
+            </div>
+
+            <!-- Mapping Rows Container -->
+            <div id="mapping-rows-container" class="space-y-2.5 max-h-[460px] overflow-y-auto pr-2">
+                <!-- Dynamically populated by JS -->
+            </div>
+
+            <div class="mt-4 flex flex-col sm:flex-row justify-between items-center gap-2 pt-2">
+                <button type="button" id="btn-add-mapping-row" class="btn btn-secondary text-xs py-1.5 px-3">
+                    <i class="fas fa-plus mr-1.5 text-bnp-emerald"></i> Add Mapping Row
+                </button>
+                <div id="mapping-summary-text" class="text-xs font-bold text-bnp-emerald">0 active mappings across 0 tables</div>
+            </div>
+
+            <div class="pt-6 mt-6 flex items-center justify-between border-t border-gray-100">
+                <button type="button" class="btn btn-secondary btn-prev-step" data-to="3">
+                    <i class="fas fa-arrow-left mr-2"></i>
+                    <span>Back</span>
+                </button>
+
+                <button type="button" id="btn-step4-next" class="btn btn-primary">
+                    <span>Generate Data Preview</span>
+                    <i class="fas fa-arrow-right ml-2"></i>
+                </button>
+            </div>
+        </section>
+
+        <!-- ========================================== -->
+        <!-- STEP 5: DATA PREVIEW                       -->
+        <!-- ========================================== -->
+        <section id="step-section-5" class="step-content hidden card p-6 sm:p-8">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-4 border-b border-gray-100 gap-3">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
+                        <i class="fas fa-table-list text-lg"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-800">Dry-Run Data Preview (First 5 Records)</h3>
+                        <p class="text-xs text-gray-500">Backend parsed first 5 records with StAX using your multi-table mapping. Validate columns and types before batch execution.</p>
+                    </div>
+                </div>
+                <span id="preview-record-count-badge" class="px-3 py-1 rounded-md text-xs font-mono font-bold bg-emerald-50 text-bnp-emerald border border-emerald-300">5 Records Tested</span>
+            </div>
+
+            <!-- Multi-Table Preview Selector Tabs -->
+            <div id="preview-table-tabs" class="flex flex-wrap gap-2 mb-4 border-b border-gray-200 pb-3">
+                <!-- Populated dynamically if multiple tables are mapped -->
+            </div>
+
+            <!-- Preview HTML Table -->
+            <div class="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+                <table id="preview-table" class="min-w-full divide-y divide-gray-200 text-left text-xs font-mono">
+                    <thead id="preview-table-head" class="bg-gray-50 text-gray-700">
+                        <!-- Dynamic Head -->
+                    </thead>
+                    <tbody id="preview-table-body" class="divide-y divide-gray-200 text-gray-800">
+                        <!-- Dynamic Rows -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Prepared SQL Statement Preview -->
+            <div class="mt-6 p-4 rounded-xl bg-gray-50 border border-gray-200">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-bold uppercase text-gray-600 tracking-wider">Dynamic SQL Prepared Statement (<span id="preview-active-table-name" class="text-bnp-emerald font-bold">--</span>)</span>
+                    <span class="text-[10px] text-bnp-emerald font-mono font-bold">NamedParameterJdbcTemplate.batchUpdate</span>
+                </div>
+                <pre id="preview-sql-template" class="text-xs font-mono text-gray-800 overflow-x-auto p-3 bg-white rounded-lg border border-gray-200">-- SQL template will be rendered here --</pre>
+            </div>
+
+            <div class="pt-6 mt-6 flex items-center justify-between border-t border-gray-100">
+                <button type="button" class="btn btn-secondary btn-prev-step" data-to="4">
+                    <i class="fas fa-arrow-left mr-2"></i>
+                    <span>Adjust Mapping</span>
+                </button>
+
+                <button type="button" id="btn-start-ingestion" class="btn btn-primary text-sm px-6 py-2.5">
+                    <i class="fas fa-play mr-2"></i>
+                    <span>Launch 6GB+ Dynamic Ingestion Job</span>
+                </button>
+            </div>
+        </section>
+
+        <!-- ========================================== -->
+        <!-- STEP 6: LIVE TELEMETRY DASHBOARD           -->
+        <!-- ========================================== -->
+        <section id="step-section-6" class="step-content hidden space-y-6">
+
+            <!-- Execution Header Status Card -->
+            <div class="card p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div class="flex items-center space-x-4">
+                    <div id="job-status-icon-wrapper" class="w-12 h-12 rounded-xl bg-emerald-50 border border-emerald-300 flex items-center justify-center text-bnp-emerald text-xl">
+                        <i class="fas fa-heartbeat animate-pulse"></i>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-3">
+                            <h3 class="text-lg font-bold text-gray-800">Spring Batch Live Ingestion Telemetry</h3>
+                            <span id="telemetry-status-badge" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-emerald-50 text-bnp-emerald border border-emerald-300">INITIALIZING</span>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-0.5">Job Execution ID: <span id="telemetry-job-id" class="font-mono font-semibold text-bnp-emerald">--</span> | Target Table: <span id="telemetry-target-table" class="font-mono font-semibold text-gray-800">--</span></p>
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-3">
+                    <button type="button" id="btn-stop-job" class="hidden btn text-xs py-2 px-3 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200">
+                        <i class="fas fa-stop mr-1.5"></i> Cancel Ingestion
+                    </button>
+                    <button type="button" id="btn-new-job" class="btn btn-secondary text-xs py-2 px-3">
+                        <i class="fas fa-plus-circle mr-1.5 text-bnp-emerald"></i> New Job
+                    </button>
+                </div>
+            </div>
+
+            <!-- KPI Metric Cards Grid -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <!-- Total Read -->
+                <div class="card p-5 flex items-center justify-between">
+                    <div>
+                        <p class="text-xs font-bold uppercase tracking-wider text-gray-500">Total Records Read</p>
+                        <h4 id="kpi-total-read" class="text-3xl font-extrabold text-gray-900 mt-1 font-mono">0</h4>
+                        <p class="text-[11px] text-gray-500 mt-1 flex items-center gap-1">
+                            <i class="fas fa-stream text-bnp-emerald"></i> StAX Stream Source
+                        </p>
+                    </div>
+                    <div class="w-12 h-12 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-600 text-lg">
+                        <i class="fas fa-file-import"></i>
+                    </div>
+                </div>
+
+                <!-- Total Written -->
+                <div class="card p-5 flex items-center justify-between border-l-4 border-l-bnp-emerald">
+                    <div>
+                        <p class="text-xs font-bold uppercase tracking-wider text-gray-500">Total Rows Written</p>
+                        <h4 id="kpi-total-written" class="text-3xl font-extrabold text-bnp-emerald mt-1 font-mono">0</h4>
+                        <p class="text-[11px] text-emerald-600 mt-1 flex items-center gap-1">
+                            <i class="fas fa-check-circle"></i> Committed to Target DB
+                        </p>
+                    </div>
+                    <div class="w-12 h-12 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald text-lg">
+                        <i class="fas fa-database"></i>
+                    </div>
+                </div>
+
+                <!-- Errors / Skips -->
+                <div class="card p-5 flex items-center justify-between border-l-4 border-l-red-500">
+                    <div>
+                        <p class="text-xs font-bold uppercase tracking-wider text-gray-500">Errors (Skipped Rows)</p>
+                        <h4 id="kpi-total-errors" class="text-3xl font-extrabold text-red-600 mt-1 font-mono">0</h4>
+                        <p class="text-[11px] text-red-500 mt-1 flex items-center gap-1">
+                            <i class="fas fa-exclamation-triangle"></i> In migration_errors
+                        </p>
+                    </div>
+                    <div class="w-12 h-12 rounded-xl bg-red-50 border border-red-200 flex items-center justify-center text-red-500 text-lg">
+                        <i class="fas fa-shield-alt"></i>
+                    </div>
+                </div>
+
+                <!-- Throughput Velocity -->
+                <div class="card p-5 flex items-center justify-between">
+                    <div>
+                        <p class="text-xs font-bold uppercase tracking-wider text-gray-500">Throughput Velocity</p>
+                        <h4 id="kpi-throughput" class="text-3xl font-extrabold text-gray-900 mt-1 font-mono">0 <span class="text-xs font-normal text-gray-500">rec/s</span></h4>
+                        <p id="kpi-elapsed-time" class="text-[11px] text-gray-500 mt-1 font-mono">Elapsed: 00:00:00</p>
+                    </div>
+                    <div class="w-12 h-12 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-600 text-lg">
+                        <i class="fas fa-tachometer-alt"></i>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts: Line Chart & Doughnut Chart -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Line Chart: Processing Velocity -->
+                <div class="lg:col-span-2 card p-6 flex flex-col">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h4 class="text-sm font-bold text-gray-800 flex items-center gap-2">
+                                <i class="fas fa-chart-line text-bnp-emerald"></i>
+                                Real-Time Processing Speed (Records / Sec)
+                            </h4>
+                            <p class="text-xs text-gray-500">Live 3-second polling interval (smooth, jitter-free update)</p>
+                        </div>
+                        <span class="text-xs font-mono text-bnp-emerald px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200">Tension 0.4 Cubic</span>
+                    </div>
+                    <div class="relative flex-1 w-full min-h-[280px]">
+                        <canvas id="speedLineChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Doughnut Chart: Success vs Errors -->
+                <div class="card p-6 flex flex-col">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h4 class="text-sm font-bold text-gray-800 flex items-center gap-2">
+                                <i class="fas fa-chart-pie text-bnp-emerald"></i>
+                                Ingestion Quality Ratio
+                            </h4>
+                            <p class="text-xs text-gray-500">Success vs Fault-Tolerant Skips</p>
+                        </div>
+                        <span class="text-xs font-mono text-gray-500 px-2 py-0.5 rounded bg-gray-100">80% Cutout</span>
+                    </div>
+                    <div class="relative flex-1 w-full min-h-[220px] flex items-center justify-center">
+                        <canvas id="qualityDoughnutChart"></canvas>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 mt-4 pt-3 border-t border-gray-100 text-center text-xs">
+                        <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-2">
+                            <span class="text-gray-600">Committed</span>
+                            <p id="doughnut-committed-val" class="font-mono font-bold text-bnp-emerald text-sm mt-0.5">0</p>
+                        </div>
+                        <div class="bg-red-50 border border-red-200 rounded-lg p-2">
+                            <span class="text-gray-600">Skipped Errors</span>
+                            <p id="doughnut-errors-val" class="font-mono font-bold text-red-600 text-sm mt-0.5">0</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Migration Errors Table (Fault Tolerance Monitoring) -->
+            <div class="card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div>
+                        <h4 class="text-sm font-bold text-gray-800 flex items-center gap-2">
+                            <i class="fas fa-exclamation-triangle text-red-500"></i>
+                            Target DB `migration_errors` Table (JSONB Saved Records)
+                        </h4>
+                        <p class="text-xs text-gray-500">Rows failing SQL constraints or types are safely skipped and persisted without halting the 6GB batch.</p>
+                    </div>
+                    <span id="errors-count-badge" class="text-xs font-mono font-bold text-red-600 bg-red-50 px-2.5 py-1 rounded-md border border-red-200">0 Errors Logged</span>
+                </div>
+                <div class="overflow-x-auto rounded-xl border border-gray-200 bg-white max-h-60">
+                    <table class="min-w-full divide-y divide-gray-200 text-left text-xs font-mono">
+                        <thead class="bg-gray-50 text-gray-600 sticky top-0">
+                            <tr>
+                                <th class="px-4 py-2.5">Time</th>
+                                <th class="px-4 py-2.5">Phase</th>
+                                <th class="px-4 py-2.5">Error Message</th>
+                                <th class="px-4 py-2.5">Failed Record Payload (JSONB)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="errors-table-body" class="divide-y divide-gray-200 text-gray-700">
+                            <tr>
+                                <td colspan="4" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No errors recorded. All batches committing cleanly.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer matching workflow.html -->
+    <footer>
+        <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div>
+                <span class="font-bold tracking-tight text-white">XML<span class="text-bnp-emerald">DbTool</span></span>
+                <span class="text-gray-400 ml-2">&bull; Enterprise Dynamic Ingestion Engine</span>
+            </div>
+            <div class="flex items-center space-x-4 text-gray-400 text-xs">
+                <span>Spring Boot 3.3.4</span>
+                <span>&bull;</span>
+                <span>Spring Batch 5.1.2</span>
+                <span>&bull;</span>
+                <span>Pure JDBC</span>
+            </div>
+        </div>
+    </footer>
+
+    <!-- App JavaScript -->
+    <script src="/js/app.js"></script>
+</body>
+</html>
