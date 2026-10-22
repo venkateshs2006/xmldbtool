@@ -75,7 +75,8 @@ public class DatabaseErrorSkipListener implements SkipListener<Map<String, Objec
     }
 
     private void persistError(String phase, String recordDataJson, Throwable t) {
-        String errorMsg = t != null ? t.getMessage() : "Unknown batch exception";
+        Throwable root = t != null ? org.springframework.core.NestedExceptionUtils.getMostSpecificCause(t) : null;
+        String errorMsg = root != null ? root.getMessage() : (t != null ? t.getMessage() : "Unknown batch exception");
         String stackTrace = extractStackTrace(t);
         String nowStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
 

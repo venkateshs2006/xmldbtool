@@ -112,9 +112,15 @@ public class DynamicDataSourceService {
             hikariConfig.setIdleTimeout(30000);
             hikariConfig.setPoolName("TargetDB-Pool-" + System.currentTimeMillis());
 
-            // Auto-detect driver class
+            if (config.getSchema() != null && !config.getSchema().trim().isEmpty()) {
+                hikariConfig.setSchema(config.getSchema().trim());
+            }
+
+            // Auto-detect driver class and optimizations
             if (config.getUrl().contains(":postgresql:")) {
                 hikariConfig.setDriverClassName("org.postgresql.Driver");
+                // Allows PostgreSQL to infer parameter types without casting errors (e.g. timestamps, uuids, ints)
+                hikariConfig.addDataSourceProperty("stringtype", "unspecified");
             } else if (config.getUrl().contains(":oracle:")) {
                 hikariConfig.setDriverClassName("oracle.jdbc.OracleDriver");
             }

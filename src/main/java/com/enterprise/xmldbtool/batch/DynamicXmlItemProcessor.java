@@ -128,6 +128,14 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
         }
 
+        if (normField.contains("sku") || normTarget.contains("sku")) {
+            for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                if (normalize(entry.getKey()).contains("sku")) {
+                    return entry.getValue();
+                }
+            }
+        }
+
         return null;
     }
 

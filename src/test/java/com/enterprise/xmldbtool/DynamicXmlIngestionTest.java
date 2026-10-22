@@ -114,6 +114,40 @@ class DynamicXmlIngestionTest {
     }
 
     @Test
+    @DisplayName("Verify sku is strictly distinguished from productName to preserve FK constraints")
+    void testSkuResolutionDistinction() throws Exception {
+        Map<String, Object> xmlRecord = Map.of(
+                "sku", "SKU-44391-F",
+                "productName", "2U Rackmount Chassis Hot-Swap"
+        );
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("sku", "inventory_records", "sku", "NONE")
+        );
+
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor("inventory_records", mappings);
+        DatabaseRowPayload payload = processor.process(xmlRecord);
+
+        assertNotNull(payload);
+        var invData = payload.getMultiTablePayloads().get("inventory_records");
+        assertNotNull(invData);
+        assertEquals("SKU-44391-F", invData.get("sku"), "Column sku must resolve to actual SKU code, not product name");
+    }
+
+    @Test
+    @DisplayName("Verify autoConvertType converts strings to SQL Timestamp, Integer, and BigDecimal")
+    void testAutoConvertType() {
+        Object ts = com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter.autoConvertType("2026-10-01 09:15:00", "created_at");
+        assertTrue(ts instanceof java.sql.Timestamp, "Timestamp string should convert to java.sql.Timestamp");
+
+        Object intVal = com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter.autoConvertType("12", "quantity");
+        assertEquals(12, intVal);
+
+        Object priceVal = com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter.autoConvertType("4899.50", "unit_price");
+        assertTrue(priceVal instanceof java.math.BigDecimal);
+    }
+
+    @Test
     @DisplayName("Verify Schema Discovery reads sample XML and discovers tags and attributes")
     void testSampleXmlDiscovery() throws Exception {
         List<DiscoveredElement> elements = discoveryService.discoverXmlElements("sample-data/large-sample.xml", 1000);

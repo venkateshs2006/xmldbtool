@@ -60,7 +60,8 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
 
                     MapSqlParameterSource paramSource = new MapSqlParameterSource();
                     for (Map.Entry<String, Object> colEntry : colVals.entrySet()) {
-                        paramSource.addValue(colEntry.getKey(), colEntry.getValue());
+                        Object converted = autoConvertType(colEntry.getValue(), colEntry.getKey());
+                        paramSource.addValue(colEntry.getKey(), converted);
                     }
                     tableBatchMap.computeIfAbsent(tableName, k -> new ArrayList<>()).add(paramSource);
                 }
@@ -99,11 +100,78 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
                     log.debug("Batch written {} rows to table '{}'", updateCounts.length, tableName);
                 }
             } catch (Exception ex) {
-                log.error("Batch write failed for table '{}' with {} items. Reason: {}",
-                        tableName, batchParams.size(), ex.getMessage());
+                Throwable root = org.springframework.core.NestedExceptionUtils.getMostSpecificCause(ex);
+                String rootMsg = root != null ? root.getMessage() : ex.getMessage();
+                log.error("Batch write failed for table '{}' with {} items. Root database reason: {}",
+                        tableName, batchParams.size(), rootMsg);
                 throw ex;
             }
         }
+    }
+
+    /**
+     * Converts String values from XML into appropriate Java SQL types
+     * (Timestamp, Integer/Long, BigDecimal, Boolean) to prevent SQL type mismatch errors.
+     */
+    public static Object autoConvertType(Object value, String columnName) {
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof String strVal)) {
+            return value;
+        }
+        String s = strVal.trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+
+        String normCol = columnName != null ? columnName.toLowerCase() : "";
+
+        // 1. Timestamp / Date conversion (e.g. created_at, "2026-10-01 09:15:00")
+        if (normCol.contains("date") || normCol.contains("time") || normCol.contains("at") || normCol.contains("timestamp")
+                || s.matches("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}.*") || s.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
+            try {
+                if (s.matches("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}(\\.\\d+)?$")) {
+                    return java.sql.Timestamp.valueOf(s);
+                }
+                if (s.contains("T")) {
+                    java.time.Instant instant = java.time.Instant.parse(s.endsWith("Z") ? s : s + "Z");
+                    return java.sql.Timestamp.from(instant);
+                }
+                if (s.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
+                    return java.sql.Date.valueOf(s);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 2. Integer / Long conversion (e.g. id, quantity)
+        if (normCol.contains("id") || normCol.contains("quantity") || normCol.contains("qty") || normCol.contains("count") || normCol.contains("num")) {
+            if (s.matches("^-?\\d+$")) {
+                try {
+                    long l = Long.parseLong(s);
+                    if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
+                        return (int) l;
+                    }
+                    return l;
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // 3. Numeric / Decimal / Price conversion (e.g. unit_price)
+        if (normCol.contains("price") || normCol.contains("cost") || normCol.contains("amount") || normCol.contains("rate") || normCol.contains("total")) {
+            if (s.matches("^-?\\d+(\\.\\d+)?$")) {
+                try {
+                    return new java.math.BigDecimal(s);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // 4. Boolean conversion
+        if ("true".equalsIgnoreCase(s) || "false".equalsIgnoreCase(s)) {
+            return Boolean.valueOf(s);
+        }
+
+        return s;
     }
 
     /**

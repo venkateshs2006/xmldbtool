@@ -829,11 +829,20 @@ function addManualMappingRow() {
 
 function isSmartFieldMatch(srcNorm, colNorm) {
     if (srcNorm === colNorm) return true;
+
+    // SKU must strictly match SKU or SKU variants, never descriptive product names
+    if (srcNorm.includes('sku') || colNorm.includes('sku')) {
+        const skuVariants = ['sku', 'productsku', 'itemsku', 'skucode', 'partnumber', 'partnum'];
+        const isSrcSku = skuVariants.some(s => srcNorm === s || srcNorm.includes(s));
+        const isColSku = skuVariants.some(c => colNorm === c || colNorm.includes(c));
+        return isSrcSku && isColSku;
+    }
+
     if (srcNorm.length >= 4 && colNorm.length >= 4 && (srcNorm.includes(colNorm) || colNorm.includes(srcNorm))) return true;
 
     const synonymGroups = [
         ['warehouselocation', 'locationcode', 'location', 'warehousecode', 'whlocation', 'warehouseid', 'warehousename'],
-        ['productname', 'name', 'product', 'itemname', 'title', 'sku'],
+        ['productname', 'name', 'product', 'itemname', 'title', 'description'],
         ['unitprice', 'price', 'unitcost', 'cost', 'amount'],
         ['suppliercode', 'supplier', 'supplierid', 'vendorcode', 'vendor'],
         ['createdat', 'creationdate', 'createddate', 'createdtime', 'timestamp', 'date'],
