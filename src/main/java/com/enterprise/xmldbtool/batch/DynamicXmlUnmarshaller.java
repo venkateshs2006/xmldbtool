@@ -145,13 +145,15 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 tagStack.push(localName);
                 currentText.setLength(0); // reset character buffer
 
-                // Extract all attributes and prefix with '@'
+                // Extract all attributes and record both qualified (tag/@attr) and unqualified (@attr, attr)
                 Iterator<?> attributes = startElement.getAttributes();
                 while (attributes.hasNext()) {
                     Attribute attr = (Attribute) attributes.next();
-                    String attrName = "@" + attr.getName().getLocalPart();
+                    String rawAttrName = attr.getName().getLocalPart();
                     String attrValue = attr.getValue();
-                    recordMap.put(attrName, attrValue);
+                    recordMap.put(localName + "/@" + rawAttrName, attrValue);
+                    recordMap.put("@" + rawAttrName, attrValue);
+                    recordMap.put(rawAttrName, attrValue);
                 }
             } else if (event.isCharacters()) {
                 Characters characters = event.asCharacters();
@@ -207,12 +209,14 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 tagStack.push(localName);
                 currentText.setLength(0);
 
-                // Flatten attributes with @
+                // Flatten attributes with both qualified tag/@attr and @attr
                 int attrCount = reader.getAttributeCount();
                 for (int i = 0; i < attrCount; i++) {
-                    String attrName = "@" + reader.getAttributeLocalName(i);
+                    String rawAttrName = reader.getAttributeLocalName(i);
                     String attrValue = reader.getAttributeValue(i);
-                    recordMap.put(attrName, attrValue);
+                    recordMap.put(localName + "/@" + rawAttrName, attrValue);
+                    recordMap.put("@" + rawAttrName, attrValue);
+                    recordMap.put(rawAttrName, attrValue);
                 }
             } else if (event == XMLStreamConstants.CHARACTERS || event == XMLStreamConstants.CDATA) {
                 if (!reader.isWhiteSpace()) {

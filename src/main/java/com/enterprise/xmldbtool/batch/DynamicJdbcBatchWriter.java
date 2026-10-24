@@ -9,7 +9,11 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -18,23 +22,118 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Dynamic Pure-JDBC Batch Item Writer.
- * Uses NamedParameterJdbcTemplate.batchUpdate() for high-throughput multi-row INSERTs
- * without JPA or Hibernate overhead.
+ * Dynamic Pure-JDBC Batch Item Writer with automated UPSERT support.
+ * Executes high-throughput batch updates (INSERT ON CONFLICT DO UPDATE)
+ * without JPA or Hibernate overhead, automatically resolving duplicate key collisions.
  */
 public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicJdbcBatchWriter.class);
 
+    private final DataSource dataSource;
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final Map<String, String> sqlCache = new ConcurrentHashMap<>();
+    private final Map<String, Set<String>> pkCache = new ConcurrentHashMap<>();
+    private String databaseProductName = null;
+    private List<String> tableOrder = new ArrayList<>();
+
+    private boolean continueOnTableError = true;
+    private DatabaseErrorSkipListener skipListener;
 
     public DynamicJdbcBatchWriter(DataSource dataSource) {
+        this(dataSource, Collections.emptyList());
+    }
+
+    public DynamicJdbcBatchWriter(DataSource dataSource, List<String> tableOrder) {
+        this(dataSource, tableOrder, null);
+    }
+
+    public DynamicJdbcBatchWriter(DataSource dataSource, List<String> tableOrder, DatabaseErrorSkipListener skipListener) {
+        this.dataSource = dataSource;
         this.jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);
+        this.tableOrder = tableOrder != null ? new ArrayList<>(tableOrder) : new ArrayList<>();
+        this.skipListener = skipListener;
+        detectDatabaseProduct(dataSource);
     }
 
     public DynamicJdbcBatchWriter(NamedParameterJdbcTemplate jdbcTemplate) {
+        this(jdbcTemplate, Collections.emptyList());
+    }
+
+    public DynamicJdbcBatchWriter(NamedParameterJdbcTemplate jdbcTemplate, List<String> tableOrder) {
+        this(jdbcTemplate, tableOrder, null);
+    }
+
+    public DynamicJdbcBatchWriter(NamedParameterJdbcTemplate jdbcTemplate, List<String> tableOrder, DatabaseErrorSkipListener skipListener) {
         this.jdbcTemplate = jdbcTemplate;
+        this.dataSource = (jdbcTemplate != null && jdbcTemplate.getJdbcTemplate() != null)
+                ? jdbcTemplate.getJdbcTemplate().getDataSource() : null;
+        this.tableOrder = tableOrder != null ? new ArrayList<>(tableOrder) : new ArrayList<>();
+        this.skipListener = skipListener;
+        if (this.dataSource != null) {
+            detectDatabaseProduct(this.dataSource);
+        }
+    }
+
+    public boolean isContinueOnTableError() {
+        return continueOnTableError;
+    }
+
+    public void setContinueOnTableError(boolean continueOnTableError) {
+        this.continueOnTableError = continueOnTableError;
+    }
+
+    public DatabaseErrorSkipListener getSkipListener() {
+        return skipListener;
+    }
+
+    public void setSkipListener(DatabaseErrorSkipListener skipListener) {
+        this.skipListener = skipListener;
+    }
+
+    public List<String> getTableOrder() {
+        return tableOrder;
+    }
+
+    public void setTableOrder(List<String> tableOrder) {
+        this.tableOrder = tableOrder != null ? new ArrayList<>(tableOrder) : new ArrayList<>();
+    }
+
+    /**
+     * Helper to compute deterministic table execution order sequence based on tag appearance in mappings.
+     */
+    public static List<String> determineTableOrder(List<String> explicitOrder, List<com.enterprise.xmldbtool.model.FieldMapping> mappings, String defaultTable) {
+        Set<String> ordered = new LinkedHashSet<>();
+        if (explicitOrder != null) {
+            for (String t : explicitOrder) {
+                if (t != null && !t.trim().isEmpty()) {
+                    ordered.add(t.trim());
+                }
+            }
+        }
+        if (mappings != null) {
+            for (com.enterprise.xmldbtool.model.FieldMapping m : mappings) {
+                String tbl = m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()
+                        ? m.getTargetTable().trim() : defaultTable;
+                if (tbl != null && !tbl.trim().isEmpty()) {
+                    ordered.add(tbl);
+                }
+            }
+        }
+        if (ordered.isEmpty() && defaultTable != null && !defaultTable.trim().isEmpty()) {
+            ordered.add(defaultTable.trim());
+        }
+        return new ArrayList<>(ordered);
+    }
+
+    private void detectDatabaseProduct(DataSource ds) {
+        if (ds == null) return;
+        try (Connection conn = ds.getConnection()) {
+            this.databaseProductName = conn.getMetaData().getDatabaseProductName();
+            log.info("DynamicJdbcBatchWriter detected target database engine: {}", this.databaseProductName);
+        } catch (Exception ex) {
+            log.warn("Could not determine database product name: {}", ex.getMessage());
+        }
     }
 
     @Override
@@ -72,10 +171,25 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
             return;
         }
 
-        // Execute batchUpdate for each target table in order
-        for (Map.Entry<String, List<MapSqlParameterSource>> entry : tableBatchMap.entrySet()) {
-            String tableName = entry.getKey();
-            List<MapSqlParameterSource> batchParams = entry.getValue();
+        // Determine table execution order sequence based on tag order sequence
+        List<String> executionOrder = new ArrayList<>();
+        if (this.tableOrder != null && !this.tableOrder.isEmpty()) {
+            for (String tbl : this.tableOrder) {
+                if (tableBatchMap.containsKey(tbl)) {
+                    executionOrder.add(tbl);
+                }
+            }
+        }
+        for (String tbl : tableBatchMap.keySet()) {
+            if (!executionOrder.contains(tbl)) {
+                executionOrder.add(tbl);
+            }
+        }
+
+        // Execute batchUpdate for each target table strictly in the tag order sequence
+        for (int i = 0; i < executionOrder.size(); i++) {
+            String tableName = executionOrder.get(i);
+            List<MapSqlParameterSource> batchParams = tableBatchMap.get(tableName);
             Set<String> columnNames = tableColumnsMap.get(tableName);
 
             if (batchParams.isEmpty() || columnNames == null || columnNames.isEmpty()) {
@@ -91,20 +205,57 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
                 }
             }
 
-            String insertSql = getOrCreateInsertSql(tableName, columnNames);
+            java.sql.Connection conn = null;
+            java.sql.Savepoint savepoint = null;
+            if (this.dataSource != null) {
+                try {
+                    conn = org.springframework.jdbc.datasource.DataSourceUtils.getConnection(this.dataSource);
+                    if (!conn.getAutoCommit()) {
+                        savepoint = conn.setSavepoint("sp_" + tableName.replaceAll("[^a-zA-Z0-9_]", "_") + "_" + i);
+                    }
+                } catch (Exception ignored) {
+                    // Savepoints might not be supported on all drivers/modes
+                }
+            }
+            String insertOrUpsertSql = getOrCreateInsertSql(tableName, columnNames);
 
             try {
                 MapSqlParameterSource[] batchArray = batchParams.toArray(new MapSqlParameterSource[0]);
-                int[] updateCounts = jdbcTemplate.batchUpdate(insertSql, batchArray);
+                int[] updateCounts = jdbcTemplate.batchUpdate(insertOrUpsertSql, batchArray);
                 if (log.isDebugEnabled()) {
-                    log.debug("Batch written {} rows to table '{}'", updateCounts.length, tableName);
+                    log.debug("Batch written {} rows to table '{}' (Sequence #{} of {})",
+                            updateCounts.length, tableName, (i + 1), executionOrder.size());
+                }
+                if (savepoint != null && conn != null) {
+                    try {
+                        conn.releaseSavepoint(savepoint);
+                    } catch (Exception ignored) {}
                 }
             } catch (Exception ex) {
+                if (savepoint != null && conn != null) {
+                    try {
+                        conn.rollback(savepoint);
+                    } catch (Exception rbEx) {
+                        log.warn("Rollback to savepoint for table '{}' failed: {}", tableName, rbEx.getMessage());
+                    }
+                }
                 Throwable root = org.springframework.core.NestedExceptionUtils.getMostSpecificCause(ex);
                 String rootMsg = root != null ? root.getMessage() : ex.getMessage();
-                log.error("Batch write failed for table '{}' with {} items. Root database reason: {}",
-                        tableName, batchParams.size(), rootMsg);
-                throw ex;
+                log.error("Batch write failed for table '{}' (Sequence #{}) with {} items. Root database reason: {}. Continuing with remaining tables...",
+                        tableName, (i + 1), batchParams.size(), rootMsg);
+
+                if (this.skipListener != null) {
+                    this.skipListener.recordTableWriteFailure(tableName, (i + 1), batchParams.size(), rootMsg, ex);
+                }
+
+                if (!this.continueOnTableError) {
+                    throw ex;
+                }
+                // Do not rethrow: Continue with other tables in executionOrder
+            } finally {
+                if (conn != null && this.dataSource != null) {
+                    org.springframework.jdbc.datasource.DataSourceUtils.releaseConnection(conn, this.dataSource);
+                }
             }
         }
     }
@@ -175,31 +326,210 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
     }
 
     /**
-     * Constructs and caches dynamic SQL INSERT statement.
-     * Example: INSERT INTO products (id, name, price) VALUES (:id, :name, :price)
+     * Constructs and caches dynamic SQL UPSERT statement (INSERT ... ON CONFLICT DO UPDATE).
+     * If the record already exists, updates non-primary key columns; otherwise inserts.
      */
-    private String getOrCreateInsertSql(String tableName, Set<String> columns) {
+    public String getOrCreateInsertSql(String tableName, Set<String> columns) {
         String cacheKey = tableName + ":" + String.join(",", columns);
         return sqlCache.computeIfAbsent(cacheKey, k -> {
-            StringBuilder sql = new StringBuilder("INSERT INTO ").append(tableName).append(" (");
-            StringBuilder placeholders = new StringBuilder(" VALUES (");
-
-            int idx = 0;
-            for (String col : columns) {
-                if (idx > 0) {
-                    sql.append(", ");
-                    placeholders.append(", ");
-                }
-                sql.append(col);
-                placeholders.append(":").append(col);
-                idx++;
-            }
-
-            sql.append(")").append(placeholders).append(")");
-            String generated = sql.toString();
-            log.info("Constructed dynamic batch INSERT statement: {}", generated);
+            Set<String> pkColumns = findPrimaryKeys(tableName, columns);
+            String generated = constructUpsertSql(tableName, columns, pkColumns, this.databaseProductName);
+            log.info("Constructed dynamic batch UPSERT statement for table '{}': {}", tableName, generated);
             return generated;
         });
+    }
+
+    /**
+     * Retrieves or infers primary key column names for the given target table.
+     */
+    public Set<String> findPrimaryKeys(String tableName, Set<String> mappedColumns) {
+        if (tableName == null) return Collections.emptySet();
+
+        return pkCache.computeIfAbsent(tableName.toLowerCase(), tblKey -> {
+            Set<String> pks = new LinkedHashSet<>();
+            if (dataSource != null) {
+                try (Connection conn = dataSource.getConnection()) {
+                    DatabaseMetaData meta = conn.getMetaData();
+                    String schema = null;
+                    try {
+                        schema = conn.getSchema();
+                    } catch (Throwable ignored) {}
+
+                    // 1. Try explicit primary keys from database metadata
+                    for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                        try (ResultSet rs = meta.getPrimaryKeys(null, schema, tName)) {
+                            while (rs.next()) {
+                                String pkCol = rs.getString("COLUMN_NAME");
+                                if (pkCol != null && !pkCol.isEmpty()) {
+                                    pks.add(pkCol.toLowerCase());
+                                }
+                            }
+                        }
+                        if (!pks.isEmpty()) break;
+                    }
+
+                    // 2. If no PK found, try unique indexes
+                    if (pks.isEmpty()) {
+                        for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                            try (ResultSet rs = meta.getIndexInfo(null, schema, tName, true, false)) {
+                                while (rs.next()) {
+                                    String idxCol = rs.getString("COLUMN_NAME");
+                                    if (idxCol != null && !idxCol.isEmpty()) {
+                                        pks.add(idxCol.toLowerCase());
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!pks.isEmpty()) break;
+                        }
+                    }
+                } catch (Exception ex) {
+                    log.warn("Could not query primary keys for table '{}': {}", tableName, ex.getMessage());
+                }
+            }
+
+            // 3. Fallback: infer from mapped column naming conventions
+            if (pks.isEmpty() && mappedColumns != null) {
+                pks.addAll(inferPrimaryKeys(tableName, mappedColumns));
+            }
+
+            return pks;
+        });
+    }
+
+    /**
+     * Infers likely primary key / unique constraint columns from column names.
+     */
+    public static Set<String> inferPrimaryKeys(String tableName, Set<String> columns) {
+        Set<String> inferred = new LinkedHashSet<>();
+        if (columns == null || columns.isEmpty()) return inferred;
+
+        String normTable = tableName != null ? tableName.toLowerCase() : "";
+
+        // Check common identifier column names
+        for (String col : columns) {
+            String norm = col.toLowerCase();
+            if (norm.equals("id") || norm.equals(normTable + "_id") || norm.equals(normTable + "id")
+                    || norm.equals("sku") || norm.equals("location_code") || norm.equals("order_id")
+                    || norm.equals("code") || norm.endsWith("_id") || norm.endsWith("_pk") || norm.endsWith("_code")) {
+                inferred.add(norm);
+                break;
+            }
+        }
+
+        // If none found by convention, use first column as primary identifier
+        if (inferred.isEmpty() && !columns.isEmpty()) {
+            inferred.add(columns.iterator().next().toLowerCase());
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Constructs cross-database UPSERT SQL statement (INSERT ... ON CONFLICT DO UPDATE).
+     */
+    public static String constructUpsertSql(String tableName, Set<String> columns, Set<String> pkColumns, String dbProduct) {
+        if (tableName == null || columns == null || columns.isEmpty()) {
+            throw new IllegalArgumentException("Table name and columns cannot be empty");
+        }
+
+        Set<String> matchedPks = new LinkedHashSet<>();
+        Set<String> nonPkCols = new LinkedHashSet<>();
+
+        for (String col : columns) {
+            if (pkColumns != null && (pkColumns.contains(col.toLowerCase()) || pkColumns.contains(col))) {
+                matchedPks.add(col);
+            } else {
+                nonPkCols.add(col);
+            }
+        }
+
+        // Base INSERT statement
+        StringBuilder insertSql = new StringBuilder("INSERT INTO ").append(tableName).append(" (");
+        StringBuilder placeholders = new StringBuilder(" VALUES (");
+
+        int idx = 0;
+        for (String col : columns) {
+            if (idx > 0) {
+                insertSql.append(", ");
+                placeholders.append(", ");
+            }
+            insertSql.append(col);
+            placeholders.append(":").append(col);
+            idx++;
+        }
+        insertSql.append(")").append(placeholders).append(")");
+
+        // If no primary key could be identified, fallback to standard INSERT
+        if (matchedPks.isEmpty()) {
+            return insertSql.toString();
+        }
+
+        String db = dbProduct != null ? dbProduct.toLowerCase() : "";
+
+        // 1. MySQL / MariaDB (ON DUPLICATE KEY UPDATE)
+        if (db.contains("mysql") || db.contains("mariadb")) {
+            if (nonPkCols.isEmpty()) {
+                return insertSql.toString().replaceFirst("(?i)INSERT INTO", "INSERT IGNORE INTO");
+            }
+            StringBuilder onDup = new StringBuilder(" ON DUPLICATE KEY UPDATE ");
+            int uIdx = 0;
+            for (String col : nonPkCols) {
+                if (uIdx > 0) onDup.append(", ");
+                onDup.append(col).append(" = VALUES(").append(col).append(")");
+                uIdx++;
+            }
+            return insertSql.append(onDup).toString();
+        }
+
+        // 2. H2 Database (MERGE INTO tableName (...) KEY (...) VALUES (...))
+        if (db.contains("h2")) {
+            StringBuilder mergeSql = new StringBuilder("MERGE INTO ").append(tableName).append(" (");
+            StringBuilder mPlaceholders = new StringBuilder(" VALUES (");
+            int mIdx = 0;
+            for (String col : columns) {
+                if (mIdx > 0) {
+                    mergeSql.append(", ");
+                    mPlaceholders.append(", ");
+                }
+                mergeSql.append(col);
+                mPlaceholders.append(":").append(col);
+                mIdx++;
+            }
+            mergeSql.append(") KEY (");
+            int kIdx = 0;
+            for (String pk : matchedPks) {
+                if (kIdx > 0) mergeSql.append(", ");
+                mergeSql.append(pk);
+                kIdx++;
+            }
+            mergeSql.append(")").append(mPlaceholders).append(")");
+            return mergeSql.toString();
+        }
+
+        // 3. PostgreSQL / SQLite / ANSI: ON CONFLICT (pk...) DO UPDATE SET col = EXCLUDED.col
+        StringBuilder onConflict = new StringBuilder(" ON CONFLICT (");
+        int pkIdx = 0;
+        for (String pk : matchedPks) {
+            if (pkIdx > 0) onConflict.append(", ");
+            onConflict.append(pk);
+            pkIdx++;
+        }
+        onConflict.append(")");
+
+        if (nonPkCols.isEmpty()) {
+            onConflict.append(" DO NOTHING");
+        } else {
+            onConflict.append(" DO UPDATE SET ");
+            int uIdx = 0;
+            for (String col : nonPkCols) {
+                if (uIdx > 0) onConflict.append(", ");
+                onConflict.append(col).append(" = EXCLUDED.").append(col);
+                uIdx++;
+            }
+        }
+
+        return insertSql.append(onConflict).toString();
     }
 
     public NamedParameterJdbcTemplate getJdbcTemplate() {

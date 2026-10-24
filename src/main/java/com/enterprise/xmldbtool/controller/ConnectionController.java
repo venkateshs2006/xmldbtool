@@ -10,7 +10,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/db")
+@RequestMapping({"/api/db", "/api/connection"})
 public class ConnectionController {
 
     private final DynamicDataSourceService dataSourceService;

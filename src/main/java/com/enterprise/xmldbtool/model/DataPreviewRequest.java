@@ -9,6 +9,7 @@ public class DataPreviewRequest {
     private String recordRootElement = "record";
     private String targetTable;
     private List<FieldMapping> mappings = new ArrayList<>();
+    private List<String> tableOrder = new ArrayList<>();
     private int previewLimit = 5;
 
     public DataPreviewRequest() {}
@@ -27,6 +28,9 @@ public class DataPreviewRequest {
 
     public List<FieldMapping> getMappings() { return mappings; }
     public void setMappings(List<FieldMapping> mappings) { this.mappings = mappings; }
+
+    public List<String> getTableOrder() { return tableOrder; }
+    public void setTableOrder(List<String> tableOrder) { this.tableOrder = tableOrder; }
 
     public int getPreviewLimit() { return previewLimit; }
     public void setPreviewLimit(int previewLimit) { this.previewLimit = previewLimit; }

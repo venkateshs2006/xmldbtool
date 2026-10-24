@@ -28,12 +28,20 @@ public class DynamicDataSourceService {
     private final Map<String, HikariDataSource> poolCache = new ConcurrentHashMap<>();
 
     /**
-     * Tests and validates connection parameters.
+     * Tests and validates connection parameters using a temporary connection pool.
      */
     public DbTestResponse testConnection(DbConnectionConfig config) {
+        HikariDataSource testDs = null;
         try {
-            DataSource ds = getOrCreateDataSource(config);
-            try (Connection conn = ds.getConnection()) {
+            HikariConfig hikariConfig = buildHikariConfig(config);
+            hikariConfig.setMaximumPoolSize(2);
+            hikariConfig.setMinimumIdle(1);
+            hikariConfig.setConnectionTimeout(4000);
+            hikariConfig.setInitializationFailTimeout(4000);
+            hikariConfig.setPoolName("TestConnection-Pool-" + System.currentTimeMillis());
+
+            testDs = new HikariDataSource(hikariConfig);
+            try (Connection conn = testDs.getConnection()) {
                 DatabaseMetaData meta = conn.getMetaData();
                 String prodName = meta.getDatabaseProductName();
                 String prodVersion = meta.getDatabaseProductVersion();
@@ -41,8 +49,21 @@ public class DynamicDataSourceService {
                 return new DbTestResponse(true, "Successfully connected to " + prodName, prodName, prodVersion);
             }
         } catch (Exception ex) {
-            log.error("Failed to connect to database: {}", ex.getMessage());
-            return new DbTestResponse(false, "Connection error: " + ex.getMessage(), null, null);
+            log.error("Failed to connect to database at {}: {}", config.getUrl(), ex.getMessage());
+            String detail = ex.getMessage();
+            if (ex.getCause() != null && ex.getCause().getMessage() != null) {
+                detail += " -> " + ex.getCause().getMessage();
+            }
+            if (detail != null && (detail.contains("Connection refused") || detail.contains("Communications link failure"))) {
+                detail += " (Target host/port unreachable. Check if database service is running, or use 'Preset: Embedded Test DB' for instant in-memory testing).";
+            }
+            return new DbTestResponse(false, detail, null, null);
+        } finally {
+            if (testDs != null && !testDs.isClosed()) {
+                try {
+                    testDs.close();
+                } catch (Exception ignored) {}
+            }
         }
     }
 
@@ -97,33 +118,45 @@ public class DynamicDataSourceService {
     }
 
     /**
+     * Builds standard HikariConfig for the given DbConnectionConfig.
+     */
+    public HikariConfig buildHikariConfig(DbConnectionConfig config) {
+        HikariConfig hikariConfig = new HikariConfig();
+        hikariConfig.setJdbcUrl(config.getUrl());
+        hikariConfig.setUsername(config.getUsername());
+        hikariConfig.setPassword(config.getPassword() != null ? config.getPassword() : "");
+
+        if (config.getSchema() != null && !config.getSchema().trim().isEmpty()) {
+            hikariConfig.setSchema(config.getSchema().trim());
+        }
+
+        // Auto-detect driver class and optimizations
+        String url = config.getUrl().toLowerCase();
+        if (url.contains(":postgresql:")) {
+            hikariConfig.setDriverClassName("org.postgresql.Driver");
+            // Allows PostgreSQL to infer parameter types without casting errors (e.g. timestamps, uuids, ints)
+            hikariConfig.addDataSourceProperty("stringtype", "unspecified");
+        } else if (url.contains(":oracle:")) {
+            hikariConfig.setDriverClassName("oracle.jdbc.OracleDriver");
+        } else if (url.contains(":h2:")) {
+            hikariConfig.setDriverClassName("org.h2.Driver");
+        }
+
+        return hikariConfig;
+    }
+
+    /**
      * Gets or creates a pooled HikariDataSource for the target database.
      */
     public DataSource getOrCreateDataSource(DbConnectionConfig config) {
         String cacheKey = config.getUrl() + ":" + config.getUsername();
         return poolCache.computeIfAbsent(cacheKey, k -> {
-            HikariConfig hikariConfig = new HikariConfig();
-            hikariConfig.setJdbcUrl(config.getUrl());
-            hikariConfig.setUsername(config.getUsername());
-            hikariConfig.setPassword(config.getPassword() != null ? config.getPassword() : "");
+            HikariConfig hikariConfig = buildHikariConfig(config);
             hikariConfig.setMaximumPoolSize(10);
             hikariConfig.setMinimumIdle(2);
             hikariConfig.setConnectionTimeout(10000);
             hikariConfig.setIdleTimeout(30000);
             hikariConfig.setPoolName("TargetDB-Pool-" + System.currentTimeMillis());
-
-            if (config.getSchema() != null && !config.getSchema().trim().isEmpty()) {
-                hikariConfig.setSchema(config.getSchema().trim());
-            }
-
-            // Auto-detect driver class and optimizations
-            if (config.getUrl().contains(":postgresql:")) {
-                hikariConfig.setDriverClassName("org.postgresql.Driver");
-                // Allows PostgreSQL to infer parameter types without casting errors (e.g. timestamps, uuids, ints)
-                hikariConfig.addDataSourceProperty("stringtype", "unspecified");
-            } else if (config.getUrl().contains(":oracle:")) {
-                hikariConfig.setDriverClassName("oracle.jdbc.OracleDriver");
-            }
 
             log.info("Initialized dynamic Hikari connection pool for target URL: {}", config.getUrl());
             return new HikariDataSource(hikariConfig);

@@ -14,6 +14,7 @@ public class DataPreviewResponse {
 
     // Multi-table previews: TableName -> TablePreviewData
     private Map<String, TablePreviewData> tablePreviews = new LinkedHashMap<>();
+    private List<String> tableOrder = new ArrayList<>();
 
     public DataPreviewResponse() {}
 
@@ -39,4 +40,28 @@ public class DataPreviewResponse {
 
     public Map<String, TablePreviewData> getTablePreviews() { return tablePreviews; }
     public void setTablePreviews(Map<String, TablePreviewData> tablePreviews) { this.tablePreviews = tablePreviews; }
+
+    public List<String> getTableOrder() { return tableOrder; }
+    public void setTableOrder(List<String> tableOrder) { this.tableOrder = tableOrder; }
+
+    private boolean previewSkipped;
+    private boolean dummyData;
+    private long fileSizeBytes;
+    private String fileSizeFormatted;
+    private String skipReason;
+
+    public boolean isPreviewSkipped() { return previewSkipped; }
+    public void setPreviewSkipped(boolean previewSkipped) { this.previewSkipped = previewSkipped; }
+
+    public boolean isDummyData() { return dummyData; }
+    public void setDummyData(boolean dummyData) { this.dummyData = dummyData; }
+
+    public long getFileSizeBytes() { return fileSizeBytes; }
+    public void setFileSizeBytes(long fileSizeBytes) { this.fileSizeBytes = fileSizeBytes; }
+
+    public String getFileSizeFormatted() { return fileSizeFormatted; }
+    public void setFileSizeFormatted(String fileSizeFormatted) { this.fileSizeFormatted = fileSizeFormatted; }
+
+    public String getSkipReason() { return skipReason; }
+    public void setSkipReason(String skipReason) { this.skipReason = skipReason; }
 }

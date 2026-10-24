@@ -21,10 +21,24 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
 
     private final String defaultTargetTable;
     private final List<FieldMapping> mappings;
+    private final Map<String, Object> rootAttributes;
+    private final List<String> tableOrder;
 
     public DynamicXmlItemProcessor(String defaultTargetTable, List<FieldMapping> mappings) {
+        this(defaultTargetTable, mappings, java.util.Collections.emptyMap(), java.util.Collections.emptyList());
+    }
+
+    public DynamicXmlItemProcessor(String defaultTargetTable, List<FieldMapping> mappings, Map<String, Object> rootAttributes) {
+        this(defaultTargetTable, mappings, rootAttributes, java.util.Collections.emptyList());
+    }
+
+    public DynamicXmlItemProcessor(String defaultTargetTable, List<FieldMapping> mappings, Map<String, Object> rootAttributes, List<String> tableOrder) {
         this.defaultTargetTable = defaultTargetTable;
         this.mappings = mappings;
+        this.rootAttributes = rootAttributes != null ? rootAttributes : java.util.Collections.emptyMap();
+        this.tableOrder = (tableOrder != null && !tableOrder.isEmpty())
+                ? new java.util.ArrayList<>(tableOrder)
+                : DynamicJdbcBatchWriter.determineTableOrder(null, mappings, defaultTargetTable);
     }
 
     @Override
@@ -33,7 +47,18 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             return null;
         }
 
+        // Merge document-level root attributes (e.g. catalog/@exportId) into record
+        if (rootAttributes != null && !rootAttributes.isEmpty()) {
+            for (Map.Entry<String, Object> entry : rootAttributes.entrySet()) {
+                xmlRecord.putIfAbsent(entry.getKey(), entry.getValue());
+            }
+        }
+
         Map<String, Map<String, Object>> multiTableData = new LinkedHashMap<>();
+        // Pre-seed table keys in exact tag order sequence
+        for (String tbl : tableOrder) {
+            multiTableData.put(tbl, new LinkedHashMap<>());
+        }
 
         for (FieldMapping mapping : mappings) {
             String xmlField = mapping.getXmlField();
@@ -48,9 +73,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
         }
 
-        // Remove any target table payload if ALL mapped column values in this record are null or empty
+        // Remove any target table payload if it has no columns or ALL mapped column values in this record are null or empty
         multiTableData.entrySet().removeIf(entry ->
-                entry.getValue().values().stream().allMatch(val -> val == null || (val instanceof String s && s.trim().isEmpty()))
+                entry.getValue().isEmpty() || entry.getValue().values().stream().allMatch(val -> val == null || (val instanceof String s && s.trim().isEmpty()))
         );
 
         if (multiTableData.isEmpty()) {
@@ -90,8 +115,18 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
         }
 
-        // 3. Attribute prefix toggle (e.g. "@region" vs "region")
-        String altKey = xmlField.startsWith("@") ? xmlField.substring(1) : "@" + xmlField;
+        // 3. Strip parent tag if qualified (e.g. "record/@id" -> "@id" and "id", or "catalog/@exportId")
+        String stripped = xmlField;
+        if (xmlField.contains("/@")) {
+            stripped = "@" + xmlField.substring(xmlField.indexOf("/@") + 2);
+        } else if (xmlField.contains("/")) {
+            stripped = xmlField.substring(xmlField.indexOf("/") + 1);
+        }
+        val = xmlRecord.get(stripped);
+        if (val != null) return val;
+
+        // 4. Attribute prefix toggle (e.g. "@region" vs "region")
+        String altKey = stripped.startsWith("@") ? stripped.substring(1) : "@" + stripped;
         val = xmlRecord.get(altKey);
         if (val != null) return val;
         for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
@@ -100,7 +135,15 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
         }
 
-        // 4. Normalized match (strip '@', '-', '_', case-insensitive)
+        // 5. Look up by attribute name suffix (e.g. entry ends with "/@id" or ends with "/@" + stripped)
+        String rawAttr = stripped.startsWith("@") ? stripped.substring(1) : stripped;
+        for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+            if (entry.getKey().endsWith("/@" + rawAttr) || entry.getKey().equalsIgnoreCase("@" + rawAttr) || entry.getKey().equalsIgnoreCase(rawAttr)) {
+                return entry.getValue();
+            }
+        }
+
+        // 6. Normalized match (strip '@', '-', '_', case-insensitive)
         String normField = normalize(xmlField);
         for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
             if (normalize(entry.getKey()).equals(normField)) {

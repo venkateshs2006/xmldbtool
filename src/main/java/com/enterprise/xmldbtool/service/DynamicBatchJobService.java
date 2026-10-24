@@ -54,6 +54,7 @@ public class DynamicBatchJobService {
     private final PlatformTransactionManager transactionManager;
     private final DynamicXmlUnmarshaller dynamicXmlUnmarshaller;
     private final DynamicDataSourceService dataSourceService;
+    private final XmlSchemaDiscoveryService discoveryService;
     private final ResourceLoader resourceLoader = new DefaultResourceLoader();
 
     // In-memory cache of active job listeners for real-time telemetry error reporting
@@ -68,13 +69,15 @@ public class DynamicBatchJobService {
                                  JobExplorer jobExplorer,
                                  PlatformTransactionManager transactionManager,
                                  DynamicXmlUnmarshaller dynamicXmlUnmarshaller,
-                                 DynamicDataSourceService dataSourceService) {
+                                 DynamicDataSourceService dataSourceService,
+                                 XmlSchemaDiscoveryService discoveryService) {
         this.jobRepository = jobRepository;
         this.jobLauncher = jobLauncher;
         this.jobExplorer = jobExplorer;
         this.transactionManager = transactionManager;
         this.dynamicXmlUnmarshaller = dynamicXmlUnmarshaller;
         this.dataSourceService = dataSourceService;
+        this.discoveryService = discoveryService;
     }
 
     /**
@@ -96,20 +99,35 @@ public class DynamicBatchJobService {
             reader.setFragmentRootElementName(request.getRecordRootElement());
             reader.setUnmarshaller(dynamicXmlUnmarshaller);
 
+            // Extract document root attributes (e.g. catalog/@exportId, catalog/@version)
+            Map<String, Object> rootAttrs = discoveryService.extractDocumentRootAttributes(
+                    request.getSourceXmlPath(),
+                    request.getRecordRootElement()
+            );
+
+            // Determine table insertion order sequence based on tag appearance in mappings
+            List<String> tableOrder = DynamicJdbcBatchWriter.determineTableOrder(
+                    request.getTableOrder(),
+                    request.getMappings(),
+                    request.getTargetTable()
+            );
+            log.info("Configured table insertion order sequence based on tag sequence: {}", tableOrder);
+
             // 2. Dynamic ItemProcessor
             DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor(
                     request.getTargetTable(),
-                    request.getMappings()
+                    request.getMappings(),
+                    rootAttrs,
+                    tableOrder
             );
 
-            // 3. Dynamic Pure JDBC Writer
-            DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(targetDataSource);
-
-            // 4. Temporary placeholder for SkipListener (attached to execution once launched)
-            int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
-
-            // We create a Step-level skip listener
+            // 3. Step-level skip listener
             DatabaseErrorSkipListener skipListener = new DatabaseErrorSkipListener(targetDataSource, timestamp, "dynamicIngestStep");
+
+            // 4. Dynamic Pure JDBC Writer with skip listener & fault tolerance
+            DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(targetDataSource, tableOrder, skipListener);
+
+            int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
 
             // Build Step with .faultTolerant().skipLimit(10000)
             Step step = new StepBuilder("dynamicIngestStep", jobRepository)
@@ -196,6 +214,13 @@ public class DynamicBatchJobService {
             totalErrors += (step.getReadSkipCount() + step.getProcessSkipCount() + step.getWriteSkipCount());
         }
 
+        // Retrieve recent errors from Step listener
+        DatabaseErrorSkipListener listener = skipListenerMap.get(jobExecutionId);
+        if (listener != null) {
+            telemetry.setRecentErrors(listener.getRecentErrors());
+            totalErrors += listener.getTableErrorCount();
+        }
+
         telemetry.setTotalRead(totalRead);
         telemetry.setTotalWritten(totalWritten);
         telemetry.setTotalErrors(totalErrors);
@@ -215,13 +240,75 @@ public class DynamicBatchJobService {
         }
         telemetry.setRecordsPerSecond(recordsPerSec);
 
-        // Retrieve recent errors from Step listener
-        DatabaseErrorSkipListener listener = skipListenerMap.get(jobExecutionId);
-        if (listener != null) {
-            telemetry.setRecentErrors(listener.getRecentErrors());
+        return telemetry;
+    }
+
+    /**
+     * Retrieves all past and currently executing Spring Batch job executions with metrics.
+     */
+    public List<com.enterprise.xmldbtool.model.JobExecutionSummary> getAllJobExecutions() {
+        List<com.enterprise.xmldbtool.model.JobExecutionSummary> summaries = new java.util.ArrayList<>();
+        DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+        try {
+            List<String> jobNames = jobExplorer.getJobNames();
+            for (String name : jobNames) {
+                int instanceCount = (int) jobExplorer.getJobInstanceCount(name);
+                List<org.springframework.batch.core.JobInstance> instances = jobExplorer.getJobInstances(name, 0, Math.min(instanceCount, 100));
+
+                for (org.springframework.batch.core.JobInstance instance : instances) {
+                    List<JobExecution> executions = jobExplorer.getJobExecutions(instance);
+                    for (JobExecution exec : executions) {
+                        com.enterprise.xmldbtool.model.JobExecutionSummary summary = new com.enterprise.xmldbtool.model.JobExecutionSummary();
+                        summary.setExecutionId(exec.getId());
+                        summary.setJobName(instance.getJobName());
+                        summary.setStatus(exec.getStatus().name());
+                        summary.setExitCode(exec.getExitStatus() != null ? exec.getExitStatus().getExitCode() : "");
+
+                        String targetTable = exec.getJobParameters().getString("targetTable", "MULTI_TABLE");
+                        summary.setTargetTable(targetTable);
+
+                        long read = 0;
+                        long written = 0;
+                        long errors = 0;
+                        for (StepExecution step : exec.getStepExecutions()) {
+                            read += step.getReadCount();
+                            written += step.getWriteCount();
+                            errors += (step.getReadSkipCount() + step.getProcessSkipCount() + step.getWriteSkipCount());
+                        }
+
+                        DatabaseErrorSkipListener listener = skipListenerMap.get(exec.getId());
+                        if (listener != null) {
+                            errors += listener.getTableErrorCount();
+                        }
+
+                        summary.setTotalRead(read);
+                        summary.setTotalWritten(written);
+                        summary.setTotalErrors(errors);
+
+                        if (exec.getStartTime() != null) {
+                            summary.setStartTime(exec.getStartTime().format(dtf));
+                            java.time.LocalDateTime end = exec.getEndTime() != null ? exec.getEndTime() : java.time.LocalDateTime.now();
+                            long durationSec = java.time.Duration.between(exec.getStartTime(), end).getSeconds();
+                            summary.setDuration(String.format("%02d:%02d:%02d", durationSec / 3600, (durationSec % 3600) / 60, durationSec % 60));
+                            if (durationSec > 0 && written > 0) {
+                                summary.setRecordsPerSecond(Math.round(((double) written / durationSec) * 10.0) / 10.0);
+                            }
+                        }
+                        if (exec.getEndTime() != null) {
+                            summary.setEndTime(exec.getEndTime().format(dtf));
+                        }
+
+                        summaries.add(summary);
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            log.error("Failed to retrieve job executions history: {}", ex.getMessage());
         }
 
-        return telemetry;
+        summaries.sort((a, b) -> Long.compare(b.getExecutionId() != null ? b.getExecutionId() : 0, a.getExecutionId() != null ? a.getExecutionId() : 0));
+        return summaries;
     }
 
     /**

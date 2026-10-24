@@ -10,6 +10,7 @@ public class JobLaunchRequest {
     private String targetTable;
     private int chunkSize = 1000;
     private List<FieldMapping> mappings = new ArrayList<>();
+    private List<String> tableOrder = new ArrayList<>();
 
     public JobLaunchRequest() {}
 
@@ -30,4 +31,7 @@ public class JobLaunchRequest {
 
     public List<FieldMapping> getMappings() { return mappings; }
     public void setMappings(List<FieldMapping> mappings) { this.mappings = mappings; }
+
+    public List<String> getTableOrder() { return tableOrder; }
+    public void setTableOrder(List<String> tableOrder) { this.tableOrder = tableOrder; }
 }

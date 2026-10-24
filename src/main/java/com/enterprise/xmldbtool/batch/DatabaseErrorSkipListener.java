@@ -64,6 +64,20 @@ public class DatabaseErrorSkipListener implements SkipListener<Map<String, Objec
         persistError("PROCESS", payloadJson, t);
     }
 
+    private final java.util.concurrent.atomic.AtomicLong tableErrorCount = new java.util.concurrent.atomic.AtomicLong(0);
+
+    public long getTableErrorCount() {
+        return tableErrorCount.get();
+    }
+
+    public void recordTableWriteFailure(String tableName, int sequenceNumber, int itemCount, String errorMsg, Throwable t) {
+        tableErrorCount.addAndGet(itemCount);
+        log.warn("Table '{}' (Sequence #{}) write failed for {} items: {}. Continuing with other tables...",
+                tableName, sequenceNumber, itemCount, errorMsg);
+        String payloadJson = "{\"table\": \"" + tableName + "\", \"sequence\": " + sequenceNumber + ", \"itemCount\": " + itemCount + "}";
+        persistError("WRITE_TABLE_" + tableName, payloadJson, t);
+    }
+
     @Override
     public void onSkipInWrite(DatabaseRowPayload item, Throwable t) {
         log.warn("Record skipped during WRITE phase (SQL/Type mismatch): {}", t.getMessage());

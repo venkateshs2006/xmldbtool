@@ -47,6 +47,10 @@ public class XmlSchemaDiscoveryService {
         SchemaDiscoveryResponse response = new SchemaDiscoveryResponse();
 
         try {
+            long sizeBytes = getFileSizeBytes(request.getSourceXmlPath());
+            response.setFileSizeBytes(sizeBytes);
+            response.setFileSizeFormatted(formatFileSize(sizeBytes));
+
             // 1. Scan XML using lightweight StAX (first 1,000 lines)
             List<DiscoveredElement> xmlElements = discoverXmlElements(request.getSourceXmlPath(), request.getSampleLinesLimit());
             response.setDiscoveredXmlElements(xmlElements);
@@ -58,7 +62,7 @@ public class XmlSchemaDiscoveryService {
             }
 
             response.setSuccess(true);
-            response.setMessage("Schema discovery completed successfully.");
+            response.setMessage("Schema discovery completed successfully. Source XML size: " + response.getFileSizeFormatted());
         } catch (Exception ex) {
             log.error("Schema discovery failed: {}", ex.getMessage(), ex);
             response.setSuccess(false);
@@ -106,14 +110,17 @@ public class XmlSchemaDiscoveryService {
                         currentTag = streamReader.getLocalName();
                         textBuffer.setLength(0);
 
-                        // Extract XML attributes flattened with @
+                        final String enclosingTag = currentTag;
+                        // Extract XML attributes qualified with tag/@attr to identify enclosing tag
                         int attrCount = streamReader.getAttributeCount();
                         for (int i = 0; i < attrCount; i++) {
-                            String attrName = "@" + streamReader.getAttributeLocalName(i);
+                            String rawAttrName = streamReader.getAttributeLocalName(i);
+                            String fullAttrName = enclosingTag + "/@" + rawAttrName;
                             String attrVal = streamReader.getAttributeValue(i);
 
-                            discoveredMap.computeIfAbsent(attrName, k -> new DiscoveredElement(
-                                    attrName,
+                            discoveredMap.computeIfAbsent(fullAttrName, k -> new DiscoveredElement(
+                                    fullAttrName,
+                                    enclosingTag,
                                     true,
                                     attrVal,
                                     detectDataType(attrVal)
@@ -131,6 +138,7 @@ public class XmlSchemaDiscoveryService {
                             final String sampleVal = text;
                             discoveredMap.computeIfAbsent(closedTag, k -> new DiscoveredElement(
                                     closedTag,
+                                    null,
                                     false,
                                     sampleVal,
                                     detectDataType(sampleVal)
@@ -147,6 +155,46 @@ public class XmlSchemaDiscoveryService {
         }
 
         return new ArrayList<>(discoveredMap.values());
+    }
+
+    /**
+     * Extracts all attributes of the document root element.
+     * When repeating records (e.g. <record>) are unmarshalled individually, document-level
+     * root attributes (e.g. <catalog exportId="..." version="...">) are otherwise skipped.
+     */
+    public Map<String, Object> extractDocumentRootAttributes(String sourcePath, String recordRootElement) {
+        Map<String, Object> rootAttrs = new LinkedHashMap<>();
+        if (sourcePath == null || sourcePath.trim().isEmpty()) return rootAttrs;
+
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+        factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+
+        try (BufferedReader reader = openReaderForSource(sourcePath)) {
+            XMLStreamReader streamReader = factory.createXMLStreamReader(reader);
+            while (streamReader.hasNext()) {
+                int event = streamReader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String rootName = streamReader.getLocalName();
+                    // If the first element is already the record fragment root element, no parent root attributes exist
+                    if (recordRootElement != null && rootName.equalsIgnoreCase(recordRootElement)) {
+                        break;
+                    }
+                    int attrCount = streamReader.getAttributeCount();
+                    for (int i = 0; i < attrCount; i++) {
+                        String rawAttrName = streamReader.getAttributeLocalName(i);
+                        String attrVal = streamReader.getAttributeValue(i);
+                        rootAttrs.put(rootName + "/@" + rawAttrName, attrVal);
+                        rootAttrs.put("@" + rawAttrName, attrVal);
+                        rootAttrs.put(rawAttrName, attrVal);
+                    }
+                    break; // Captured the document root attributes
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("Could not extract document root attributes from {}: {}", sourcePath, ex.getMessage());
+        }
+        return rootAttrs;
     }
 
     private BufferedReader openReaderForSource(String sourcePath) throws Exception {
@@ -181,5 +229,36 @@ public class XmlSchemaDiscoveryService {
         if (value.equalsIgnoreCase("true") || value.equalsIgnoreCase("false")) return "BOOLEAN";
         if (value.matches("^\\d{4}-\\d{2}-\\d{2}.*")) return "TIMESTAMP";
         return "VARCHAR";
+    }
+
+    public long getFileSizeBytes(String sourcePath) {
+        if (sourcePath == null || sourcePath.trim().isEmpty()) {
+            return -1L;
+        }
+        try {
+            Path directPath = Paths.get(sourcePath.trim());
+            if (Files.exists(directPath)) {
+                return Files.size(directPath);
+            }
+            Path relativePath = Paths.get("/home/sv/Projects/xmldbtool", sourcePath.trim());
+            if (Files.exists(relativePath)) {
+                return Files.size(relativePath);
+            }
+            Resource res = resourceLoader.getResource(sourcePath.trim());
+            if (res.exists()) {
+                return res.contentLength();
+            }
+        } catch (Exception ex) {
+            log.warn("Could not determine size of file '{}': {}", sourcePath, ex.getMessage());
+        }
+        return -1L;
+    }
+
+    public static String formatFileSize(long bytes) {
+        if (bytes < 0) return "Unknown";
+        if (bytes < 1024) return bytes + " B";
+        int exp = (int) (Math.log(bytes) / Math.log(1024));
+        char pre = "KMGTPE".charAt(exp - 1);
+        return String.format("%.1f %cB", bytes / Math.pow(1024, exp), pre);
     }
 }

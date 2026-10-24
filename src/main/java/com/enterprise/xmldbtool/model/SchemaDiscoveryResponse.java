@@ -27,4 +27,13 @@ public class SchemaDiscoveryResponse {
 
     public List<TableMetadata> getDiscoveredTables() { return discoveredTables; }
     public void setDiscoveredTables(List<TableMetadata> discoveredTables) { this.discoveredTables = discoveredTables; }
+
+    private long fileSizeBytes;
+    private String fileSizeFormatted;
+
+    public long getFileSizeBytes() { return fileSizeBytes; }
+    public void setFileSizeBytes(long fileSizeBytes) { this.fileSizeBytes = fileSizeBytes; }
+
+    public String getFileSizeFormatted() { return fileSizeFormatted; }
+    public void setFileSizeFormatted(String fileSizeFormatted) { this.fileSizeFormatted = fileSizeFormatted; }
 }

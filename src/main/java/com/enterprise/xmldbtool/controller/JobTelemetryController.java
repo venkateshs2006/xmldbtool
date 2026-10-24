@@ -34,6 +34,11 @@ public class JobTelemetryController {
         }
     }
 
+    @GetMapping("/history")
+    public ResponseEntity<java.util.List<com.enterprise.xmldbtool.model.JobExecutionSummary>> getJobHistory() {
+        return ResponseEntity.ok(batchJobService.getAllJobExecutions());
+    }
+
     @GetMapping("/{jobExecutionId}/telemetry")
     public ResponseEntity<JobTelemetryResponse> getJobTelemetry(@PathVariable("jobExecutionId") Long jobExecutionId) {
         JobTelemetryResponse telemetry = batchJobService.getJobTelemetry(jobExecutionId);
