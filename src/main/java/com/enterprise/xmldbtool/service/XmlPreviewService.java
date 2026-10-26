@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 
 import javax.xml.stream.XMLEventReader;
 import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.events.StartElement;
 import javax.xml.stream.events.XMLEvent;
 import java.io.InputStream;
@@ -114,76 +115,15 @@ public class XmlPreviewService {
             response.setSkipReason("XML file size is " + sizeStr + " (> 100 MB threshold). Displaying tag-generated dummy preview data without reading the actual file.");
 
             int dummyCount = limit > 0 ? limit : 5;
-            for (int r = 0; r < dummyCount; r++) {
-                Map<String, Object> dummyXmlRecord = new LinkedHashMap<>();
-
-                for (FieldMapping m : request.getMappings()) {
-                    String xmlField = m.getXmlField();
-                    if (xmlField != null && !xmlField.trim().isEmpty()) {
-                        Object dummyVal = generateDummyValueForTag(xmlField, m.getTargetColumn(), r);
-                        dummyXmlRecord.put(xmlField, dummyVal);
-
-                        // Also register normalized aliases so DynamicXmlItemProcessor finds it
-                        if (xmlField.contains("/@")) {
-                            String bare = "@" + xmlField.substring(xmlField.indexOf("/@") + 2);
-                            dummyXmlRecord.putIfAbsent(bare, dummyVal);
-                            dummyXmlRecord.putIfAbsent(bare.substring(1), dummyVal);
-                        } else if (xmlField.contains("/")) {
-                            String bare = xmlField.substring(xmlField.indexOf("/") + 1);
-                            dummyXmlRecord.putIfAbsent(bare, dummyVal);
-                        } else if (xmlField.startsWith("@")) {
-                            dummyXmlRecord.putIfAbsent(xmlField.substring(1), dummyVal);
-                        }
-                    }
-                }
-
-                try {
-                    DatabaseRowPayload rowPayload = processor.process(dummyXmlRecord);
-                    if (rowPayload != null && !rowPayload.getMultiTablePayloads().isEmpty()) {
-                        for (Map.Entry<String, Map<String, Object>> entry : rowPayload.getMultiTablePayloads().entrySet()) {
-                            String tbl = entry.getKey();
-                            Map<String, Object> cols = entry.getValue();
-
-                            multiTableRows.computeIfAbsent(tbl, k -> new ArrayList<>()).add(cols);
-                            multiTableCols.computeIfAbsent(tbl, k -> new LinkedHashSet<>()).addAll(cols.keySet());
-                        }
-                    }
-                } catch (Exception ex) {
-                    log.warn("Error processing dummy record: {}", ex.getMessage());
-                }
-            }
-
-            Map<String, TablePreviewData> tablePreviews = new LinkedHashMap<>();
-            String firstTable = null;
-
-            for (String tbl : tableOrder) {
-                Set<String> colSet = multiTableCols.get(tbl);
-                if (colSet != null && !colSet.isEmpty()) {
-                    if (firstTable == null) firstTable = tbl;
-                    List<String> cols = new ArrayList<>(colSet);
-                    List<Map<String, Object>> rows = multiTableRows.getOrDefault(tbl, new ArrayList<>());
-                    String sql = buildPreparedSqlTemplate(tbl, colSet);
-                    tablePreviews.put(tbl, new TablePreviewData(tbl, cols, rows, sql));
-                }
-            }
-
-            for (Map.Entry<String, Set<String>> entry : multiTableCols.entrySet()) {
-                String tbl = entry.getKey();
-                if (!tablePreviews.containsKey(tbl) && !entry.getValue().isEmpty()) {
-                    if (firstTable == null) firstTable = tbl;
-                    List<String> cols = new ArrayList<>(entry.getValue());
-                    List<Map<String, Object>> rows = multiTableRows.getOrDefault(tbl, new ArrayList<>());
-                    String sql = buildPreparedSqlTemplate(tbl, entry.getValue());
-                    tablePreviews.put(tbl, new TablePreviewData(tbl, cols, rows, sql));
-                }
-            }
+            Map<String, TablePreviewData> tablePreviews = generateSimulatedMultiTablePreviews(tableOrder, request.getMappings(), processor, dummyCount);
 
             response.setSuccess(true);
             response.setMessage("XML file size is " + sizeStr + " (> 100 MB). Displaying tag-generated dummy preview data (5 records) without reading the actual file.");
             response.setTablePreviews(tablePreviews);
             response.setTableOrder(new ArrayList<>(tablePreviews.keySet()));
 
-            if (firstTable != null && tablePreviews.containsKey(firstTable)) {
+            if (!tablePreviews.isEmpty()) {
+                String firstTable = tablePreviews.keySet().iterator().next();
                 TablePreviewData firstData = tablePreviews.get(firstTable);
                 response.setColumns(firstData.getColumns());
                 response.setPreviewRows(firstData.getRows());
@@ -203,35 +143,40 @@ public class XmlPreviewService {
             XMLEventReader reader = factory.createXMLEventReader(is);
 
             while (reader.hasNext() && recordsProcessed < limit) {
-                XMLEvent event = reader.peek();
-                if (event != null && event.isStartElement()) {
-                    StartElement startElement = event.asStartElement();
-                    if (startElement.getName().getLocalPart().equalsIgnoreCase(rootTag)) {
-                        @SuppressWarnings("unchecked")
-                        Map<String, Object> xmlMap = unmarshaller.parseFragmentFromEventReader(reader);
+                try {
+                    XMLEvent event = reader.peek();
+                    if (event != null && event.isStartElement()) {
+                        StartElement startElement = event.asStartElement();
+                        if (startElement.getName().getLocalPart().equalsIgnoreCase(rootTag)) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> xmlMap = unmarshaller.parseFragmentFromEventReader(reader);
 
-                        // Merge document root attributes so they are present in preview
-                        if (rootAttrs != null && !rootAttrs.isEmpty()) {
-                            for (Map.Entry<String, Object> e : rootAttrs.entrySet()) {
-                                xmlMap.putIfAbsent(e.getKey(), e.getValue());
+                            // Merge document root attributes so they are present in preview
+                            if (rootAttrs != null && !rootAttrs.isEmpty()) {
+                                for (Map.Entry<String, Object> e : rootAttrs.entrySet()) {
+                                    xmlMap.putIfAbsent(e.getKey(), e.getValue());
+                                }
                             }
-                        }
 
-                        DatabaseRowPayload rowPayload = processor.process(xmlMap);
-                        if (rowPayload != null && !rowPayload.getMultiTablePayloads().isEmpty()) {
-                            for (Map.Entry<String, Map<String, Object>> entry : rowPayload.getMultiTablePayloads().entrySet()) {
-                                String tbl = entry.getKey();
-                                Map<String, Object> cols = entry.getValue();
+                            DatabaseRowPayload rowPayload = processor.process(xmlMap);
+                            if (rowPayload != null && !rowPayload.getMultiTablePayloads().isEmpty()) {
+                                for (Map.Entry<String, Map<String, Object>> entry : rowPayload.getMultiTablePayloads().entrySet()) {
+                                    String tbl = entry.getKey();
+                                    Map<String, Object> cols = entry.getValue();
 
-                                multiTableRows.computeIfAbsent(tbl, k -> new ArrayList<>()).add(cols);
-                                multiTableCols.computeIfAbsent(tbl, k -> new LinkedHashSet<>()).addAll(cols.keySet());
+                                    multiTableRows.computeIfAbsent(tbl, k -> new ArrayList<>()).add(cols);
+                                    multiTableCols.computeIfAbsent(tbl, k -> new LinkedHashSet<>()).addAll(cols.keySet());
+                                }
+                                recordsProcessed++;
                             }
-                            recordsProcessed++;
+                            continue;
                         }
-                        continue;
                     }
+                    reader.nextEvent();
+                } catch (XMLStreamException xse) {
+                    log.warn("XML parsing notice at row {}: {}. Finishing preview with records extracted so far.", recordsProcessed, xse.getMessage());
+                    break;
                 }
-                reader.nextEvent();
             }
 
             // Populate tablePreviews map strictly in tag order sequence
@@ -262,26 +207,122 @@ public class XmlPreviewService {
                 }
             }
 
+            // If zero records matched the fragment rootTag or file was partially unclosed, fallback to simulated preview
+            if (tablePreviews.isEmpty()) {
+                log.info("No matching records found for root tag '{}'; generating simulated preview for configured mappings.", rootTag);
+                tablePreviews = generateSimulatedMultiTablePreviews(tableOrder, request.getMappings(), processor, limit > 0 ? limit : 5);
+                response.setDummyData(true);
+                response.setMessage("Showing simulated preview data for mapped columns (root tag '" + rootTag + "' fragment preview).");
+            } else {
+                response.setMessage("Successfully generated preview for " + recordsProcessed + " XML records across " + tablePreviews.size() + " tables.");
+            }
+
             response.setSuccess(true);
-            response.setMessage("Successfully generated preview for " + recordsProcessed + " XML records across " + tablePreviews.size() + " tables.");
             response.setTablePreviews(tablePreviews);
             response.setTableOrder(new ArrayList<>(tablePreviews.keySet()));
 
             // Set primary table defaults for backwards compatibility
-            if (firstTable != null && tablePreviews.containsKey(firstTable)) {
-                TablePreviewData firstData = tablePreviews.get(firstTable);
+            if (!tablePreviews.isEmpty()) {
+                String primaryTbl = firstTable != null && tablePreviews.containsKey(firstTable) ? firstTable : tablePreviews.keySet().iterator().next();
+                TablePreviewData firstData = tablePreviews.get(primaryTbl);
                 response.setColumns(firstData.getColumns());
                 response.setPreviewRows(firstData.getRows());
                 response.setGeneratedSqlTemplate(firstData.getSqlTemplate());
             }
 
         } catch (Exception ex) {
-            log.error("Failed to generate preview: {}", ex.getMessage(), ex);
-            response.setSuccess(false);
-            response.setMessage("Preview generation error: " + ex.getMessage());
+            log.error("Failed to generate preview from XML stream: {}", ex.getMessage());
+            Map<String, TablePreviewData> simulatedPreviews = generateSimulatedMultiTablePreviews(tableOrder, request.getMappings(), processor, limit > 0 ? limit : 5);
+            response.setSuccess(true);
+            response.setDummyData(true);
+            response.setMessage("XML parsing notice: " + ex.getMessage() + ". Showing simulated preview data based on your tag mappings.");
+            response.setTablePreviews(simulatedPreviews);
+            response.setTableOrder(new ArrayList<>(simulatedPreviews.keySet()));
+
+            if (!simulatedPreviews.isEmpty()) {
+                String firstTbl = simulatedPreviews.keySet().iterator().next();
+                TablePreviewData firstData = simulatedPreviews.get(firstTbl);
+                response.setColumns(firstData.getColumns());
+                response.setPreviewRows(firstData.getRows());
+                response.setGeneratedSqlTemplate(firstData.getSqlTemplate());
+            }
         }
 
         return response;
+    }
+
+    /**
+     * Generates simulated multi-table preview data for the configured mappings.
+     */
+    public Map<String, TablePreviewData> generateSimulatedMultiTablePreviews(
+            List<String> tableOrder,
+            List<FieldMapping> mappings,
+            DynamicXmlItemProcessor processor,
+            int count) {
+
+        Map<String, List<Map<String, Object>>> multiTableRows = new LinkedHashMap<>();
+        Map<String, Set<String>> multiTableCols = new LinkedHashMap<>();
+
+        for (int r = 0; r < count; r++) {
+            Map<String, Object> dummyXmlRecord = new LinkedHashMap<>();
+
+            for (FieldMapping m : mappings) {
+                String xmlField = m.getXmlField();
+                if (xmlField != null && !xmlField.trim().isEmpty()) {
+                    Object dummyVal = generateDummyValueForTag(xmlField, m.getTargetColumn(), r);
+                    dummyXmlRecord.put(xmlField, dummyVal);
+
+                    if (xmlField.contains("/@")) {
+                        String bare = "@" + xmlField.substring(xmlField.indexOf("/@") + 2);
+                        dummyXmlRecord.putIfAbsent(bare, dummyVal);
+                        dummyXmlRecord.putIfAbsent(bare.substring(1), dummyVal);
+                    } else if (xmlField.contains("/")) {
+                        String bare = xmlField.substring(xmlField.indexOf("/") + 1);
+                        dummyXmlRecord.putIfAbsent(bare, dummyVal);
+                    } else if (xmlField.startsWith("@")) {
+                        dummyXmlRecord.putIfAbsent(xmlField.substring(1), dummyVal);
+                    }
+                }
+            }
+
+            try {
+                DatabaseRowPayload rowPayload = processor.process(dummyXmlRecord);
+                if (rowPayload != null && !rowPayload.getMultiTablePayloads().isEmpty()) {
+                    for (Map.Entry<String, Map<String, Object>> entry : rowPayload.getMultiTablePayloads().entrySet()) {
+                        String tbl = entry.getKey();
+                        Map<String, Object> cols = entry.getValue();
+
+                        multiTableRows.computeIfAbsent(tbl, k -> new ArrayList<>()).add(cols);
+                        multiTableCols.computeIfAbsent(tbl, k -> new LinkedHashSet<>()).addAll(cols.keySet());
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Error processing simulated dummy record: {}", ex.getMessage());
+            }
+        }
+
+        Map<String, TablePreviewData> tablePreviews = new LinkedHashMap<>();
+        for (String tbl : tableOrder) {
+            Set<String> colSet = multiTableCols.get(tbl);
+            if (colSet != null && !colSet.isEmpty()) {
+                List<String> cols = new ArrayList<>(colSet);
+                List<Map<String, Object>> rows = multiTableRows.getOrDefault(tbl, new ArrayList<>());
+                String sql = buildPreparedSqlTemplate(tbl, colSet);
+                tablePreviews.put(tbl, new TablePreviewData(tbl, cols, rows, sql));
+            }
+        }
+
+        for (Map.Entry<String, Set<String>> entry : multiTableCols.entrySet()) {
+            String tbl = entry.getKey();
+            if (!tablePreviews.containsKey(tbl) && !entry.getValue().isEmpty()) {
+                List<String> cols = new ArrayList<>(entry.getValue());
+                List<Map<String, Object>> rows = multiTableRows.getOrDefault(tbl, new ArrayList<>());
+                String sql = buildPreparedSqlTemplate(tbl, entry.getValue());
+                tablePreviews.put(tbl, new TablePreviewData(tbl, cols, rows, sql));
+            }
+        }
+
+        return tablePreviews;
     }
 
     private String buildPreparedSqlTemplate(String tableName, Set<String> columns) {

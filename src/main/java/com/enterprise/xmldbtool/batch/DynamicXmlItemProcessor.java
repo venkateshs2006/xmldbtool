@@ -73,10 +73,23 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
         }
 
-        // Remove any target table payload if it has no columns or ALL mapped column values in this record are null or empty
-        multiTableData.entrySet().removeIf(entry ->
-                entry.getValue().isEmpty() || entry.getValue().values().stream().allMatch(val -> val == null || (val instanceof String s && s.trim().isEmpty()))
-        );
+        // Remove any target table payload if it has no columns, ALL values are empty, or id is null when id is mapped
+        multiTableData.entrySet().removeIf(entry -> {
+            Map<String, Object> cols = entry.getValue();
+            if (cols.isEmpty() || cols.values().stream().allMatch(val -> val == null || (val instanceof String s && s.trim().isEmpty()))) {
+                return true;
+            }
+            // If the target table maps an 'id' primary key column, but this record has no id value, skip to avoid NOT NULL violation
+            boolean hasIdMapped = mappings.stream().anyMatch(m ->
+                    entry.getKey().equalsIgnoreCase(m.getTargetTable()) && "id".equalsIgnoreCase(m.getTargetColumn()));
+            if (hasIdMapped) {
+                Object idVal = cols.get("id");
+                if (idVal == null || (idVal instanceof String s && s.trim().isEmpty())) {
+                    return true;
+                }
+            }
+            return false;
+        });
 
         if (multiTableData.isEmpty()) {
             return null;

@@ -776,25 +776,57 @@ function autoAlignMappings() {
 
     AppState.schema.xmlTags.forEach((tag, idx) => {
         const rawName = tag.name;
-        let cleanName = rawName.replace('@', '').toLowerCase();
-        if (cleanName.includes('/')) {
-            cleanName = cleanName.substring(cleanName.indexOf('/') + 1).replace('@', '');
+        // e.g. "countries/country/@id", "country/@id", "person/name", "age", "@status"
+        const parts = rawName.split('/');
+        const colPart = parts[parts.length - 1].replace('@', '').toLowerCase();
+        let tagPrefix = parts.length > 1 ? parts[parts.length - 2].toLowerCase() : '';
+        if (!tagPrefix && parts.length > 0 && parts[0].includes('@')) {
+            tagPrefix = parts[0].substring(0, parts[0].indexOf('@')).toLowerCase();
         }
 
         let bestTable = '';
         let bestColumn = '';
 
-        for (const tbl of AppState.schema.tables) {
-            for (const col of tbl.columns) {
-                const normCol = col.columnName.toLowerCase().replace(/_/g, '');
-                const normXml = cleanName.replace(/_/g, '');
-                if (normCol === normXml) {
-                    bestTable = tbl.tableName;
-                    bestColumn = col.columnName;
-                    break;
+        // Priority 1: Match by table prefix hint (e.g. "country" matches "countries", "person" matches "persons")
+        if (tagPrefix) {
+            const cleanPrefix = tagPrefix.replace(/[^a-z0-9]/g, '');
+            const candidateTables = AppState.schema.tables.filter(tbl => {
+                const cleanT = tbl.tableName.toLowerCase().replace(/[^a-z0-9]/g, '');
+                return cleanT === cleanPrefix || cleanT.startsWith(cleanPrefix) || cleanPrefix.startsWith(cleanT) ||
+                       (cleanPrefix.endsWith('s') && cleanT === cleanPrefix.slice(0, -1)) ||
+                       (cleanT.endsWith('s') && cleanPrefix === cleanT.slice(0, -1)) ||
+                       (cleanPrefix.endsWith('y') && cleanT === cleanPrefix.slice(0, -1) + 'ies') ||
+                       (cleanT.endsWith('y') && cleanPrefix === cleanT.slice(0, -1) + 'ies');
+            });
+
+            for (const tbl of candidateTables) {
+                for (const col of tbl.columns) {
+                    const normCol = col.columnName.toLowerCase().replace(/_/g, '');
+                    const normXml = colPart.replace(/_/g, '');
+                    if (normCol === normXml) {
+                        bestTable = tbl.tableName;
+                        bestColumn = col.columnName;
+                        break;
+                    }
                 }
+                if (bestTable) break;
             }
-            if (bestTable) break;
+        }
+
+        // Priority 2: Full scan across all tables if no prefix match or column not found in candidate
+        if (!bestTable) {
+            for (const tbl of AppState.schema.tables) {
+                for (const col of tbl.columns) {
+                    const normCol = col.columnName.toLowerCase().replace(/_/g, '');
+                    const normXml = colPart.replace(/_/g, '');
+                    if (normCol === normXml) {
+                        bestTable = tbl.tableName;
+                        bestColumn = col.columnName;
+                        break;
+                    }
+                }
+                if (bestTable) break;
+            }
         }
 
         if (bestTable) {
@@ -807,7 +839,7 @@ function autoAlignMappings() {
     });
 
     updateTableSequenceBanner();
-    showToast(`Auto-aligned ${matchCount} exact matching columns across database tables.`, 'success', 'Auto Alignment Complete');
+    showToast(`Auto-aligned ${matchCount} columns with intelligent table-prefix detection.`, 'success', 'Auto Alignment Complete');
 }
 
 function clearMappings() {
@@ -931,16 +963,27 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
 function updateTableSequenceBanner() {
     const rows = document.querySelectorAll('#mapping-rows-container .mapping-row');
     const distinctTables = [];
+    const mappedColsByTable = {};
 
     rows.forEach(r => {
         const tbl = r.querySelector('.map-target-table')?.value;
-        if (tbl && !distinctTables.includes(tbl)) {
-            distinctTables.push(tbl);
+        const col = r.querySelector('.map-target-col')?.value;
+        if (tbl) {
+            if (!distinctTables.includes(tbl)) {
+                distinctTables.push(tbl);
+            }
+            if (!mappedColsByTable[tbl]) mappedColsByTable[tbl] = [];
+            if (col && !mappedColsByTable[tbl].includes(col)) {
+                mappedColsByTable[tbl].push(col);
+            }
         }
     });
 
-    AppState.mapping.tableOrder = distinctTables;
-    AppState.mapping.targetTable = distinctTables.length > 0 ? distinctTables[0] : '';
+    // Topologically sort tables so foreign-key referenced parent tables precede dependent child tables
+    const sortedTables = sortTablesByFkDependencies(distinctTables, mappedColsByTable);
+
+    AppState.mapping.tableOrder = sortedTables;
+    AppState.mapping.targetTable = sortedTables.length > 0 ? sortedTables[0] : '';
 
     const badgesContainer = document.getElementById('table-sequence-badges');
     const summaryText = document.getElementById('mapping-summary-text');
@@ -952,20 +995,77 @@ function updateTableSequenceBanner() {
     }
 
     let html = '';
-    distinctTables.forEach((tbl, idx) => {
+    sortedTables.forEach((tbl, idx) => {
         html += `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white border border-gray-300 text-gray-800 text-[11px] font-bold shadow-xs">
                 <span class="w-4 h-4 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${idx + 1}</span>
                 <span>${escapeHtml(tbl)}</span>
             </span>
         `;
-        if (idx < distinctTables.length - 1) {
+        if (idx < sortedTables.length - 1) {
             html += `<i class="fas fa-arrow-right text-[10px] text-gray-400"></i>`;
         }
     });
 
     badgesContainer.innerHTML = html;
-    summaryText.textContent = `${rows.length} mappings configured across ${distinctTables.length} tables`;
+    summaryText.textContent = `${rows.length} mappings configured across ${sortedTables.length} tables (FK parent-first sequence)`;
+}
+
+function sortTablesByFkDependencies(tables, mappedColsByTable) {
+    if (!tables || tables.length <= 1) return tables ? [...tables] : [];
+
+    const dependencies = {};
+    tables.forEach(t => { dependencies[t] = []; });
+
+    for (const childTable of tables) {
+        const cols = mappedColsByTable[childTable] || [];
+        for (const col of cols) {
+            const normCol = col.toLowerCase().trim();
+            if (normCol.endsWith('_id') && normCol.length > 3) {
+                const refPrefix = normCol.substring(0, normCol.length - 3).replace(/_/g, '');
+                for (const potentialParent of tables) {
+                    if (potentialParent.toLowerCase() === childTable.toLowerCase()) continue;
+                    const normParent = potentialParent.toLowerCase().replace(/_/g, '');
+                    if (normParent === refPrefix ||
+                        normParent === refPrefix + 's' ||
+                        normParent === refPrefix + 'es' ||
+                        (refPrefix.endsWith('y') && normParent === refPrefix.slice(0, -1) + 'ies')) {
+                        if (!dependencies[childTable].includes(potentialParent)) {
+                            dependencies[childTable].push(potentialParent);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const sorted = [];
+    const visited = new Set();
+    const visiting = new Set();
+
+    function visit(node) {
+        if (visited.has(node)) return;
+        if (visiting.has(node)) {
+            visited.add(node);
+            sorted.push(node);
+            return;
+        }
+
+        visiting.add(node);
+        const parents = dependencies[node] || [];
+        for (const p of parents) {
+            if (dependencies[p]) visit(p);
+        }
+        visiting.delete(node);
+        visited.add(node);
+        sorted.push(node);
+    }
+
+    for (const t of tables) {
+        visit(t);
+    }
+
+    return sorted;
 }
 
 function collectFieldMappings() {

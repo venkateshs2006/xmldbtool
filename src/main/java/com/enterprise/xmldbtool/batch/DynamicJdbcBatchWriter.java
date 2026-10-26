@@ -14,6 +14,7 @@ import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -100,7 +101,8 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
     }
 
     /**
-     * Helper to compute deterministic table execution order sequence based on tag appearance in mappings.
+     * Helper to compute deterministic table execution order sequence based on tag appearance in mappings,
+     * while guaranteeing that foreign key parent tables are inserted before dependent child tables.
      */
     public static List<String> determineTableOrder(List<String> explicitOrder, List<com.enterprise.xmldbtool.model.FieldMapping> mappings, String defaultTable) {
         Set<String> ordered = new LinkedHashSet<>();
@@ -123,7 +125,73 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
         if (ordered.isEmpty() && defaultTable != null && !defaultTable.trim().isEmpty()) {
             ordered.add(defaultTable.trim());
         }
-        return new ArrayList<>(ordered);
+
+        List<String> rawList = new ArrayList<>(ordered);
+        return sortTablesByForeignKeys(rawList, mappings);
+    }
+
+    /**
+     * Topologically sorts tables based on foreign key column naming conventions
+     * (e.g. child table has 'country_id' -> parent table 'countries' must precede it).
+     */
+    public static List<String> sortTablesByForeignKeys(List<String> tables, List<com.enterprise.xmldbtool.model.FieldMapping> mappings) {
+        if (tables == null || tables.size() <= 1 || mappings == null || mappings.isEmpty()) {
+            return tables != null ? new ArrayList<>(tables) : new ArrayList<>();
+        }
+
+        Map<String, Set<String>> dependencies = new LinkedHashMap<>();
+        for (String t : tables) {
+            dependencies.put(t, new LinkedHashSet<>());
+        }
+
+        for (com.enterprise.xmldbtool.model.FieldMapping m : mappings) {
+            String childTable = m.getTargetTable();
+            String col = m.getTargetColumn();
+            if (childTable == null || col == null || !dependencies.containsKey(childTable)) continue;
+
+            String normCol = col.toLowerCase().trim();
+            if (normCol.endsWith("_id") && normCol.length() > 3) {
+                String refPrefix = normCol.substring(0, normCol.length() - 3).replace("_", "");
+                for (String potentialParent : tables) {
+                    if (potentialParent.equalsIgnoreCase(childTable)) continue;
+                    String normParent = potentialParent.toLowerCase().replace("_", "");
+                    if (normParent.equals(refPrefix) ||
+                            normParent.equals(refPrefix + "s") ||
+                            normParent.equals(refPrefix + "es") ||
+                            (refPrefix.endsWith("y") && normParent.equals(refPrefix.substring(0, refPrefix.length() - 1) + "ies"))) {
+                        dependencies.get(childTable).add(potentialParent);
+                    }
+                }
+            }
+        }
+
+        List<String> sorted = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        for (String t : tables) {
+            visitTopological(t, dependencies, visited, new HashSet<>(), sorted);
+        }
+
+        return sorted;
+    }
+
+    private static void visitTopological(String node, Map<String, Set<String>> dependencies, Set<String> visited, Set<String> currentPath, List<String> result) {
+        if (visited.contains(node)) return;
+        if (currentPath.contains(node)) {
+            visited.add(node);
+            result.add(node);
+            return;
+        }
+
+        currentPath.add(node);
+        Set<String> parents = dependencies.getOrDefault(node, Collections.emptySet());
+        for (String p : parents) {
+            if (dependencies.containsKey(p)) {
+                visitTopological(p, dependencies, visited, currentPath, result);
+            }
+        }
+        currentPath.remove(node);
+        visited.add(node);
+        result.add(node);
     }
 
     private void detectDatabaseProduct(DataSource ds) {

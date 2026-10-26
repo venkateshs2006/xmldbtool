@@ -109,6 +109,26 @@ public class JobConfigService {
             throw new IllegalArgumentException("Source XML Path is required.");
         }
 
+        if (config.getId() != null) {
+            SavedJobConfig existing = getJobConfigById(config.getId());
+            if (existing != null) {
+                return updateJobConfig(config.getId(), config);
+            }
+        }
+
+        // Check if a job with the same name already exists to prevent duplicate key constraint violations
+        List<SavedJobConfig> existingByName = jdbcTemplate.query(
+                "SELECT * FROM saved_job_configs WHERE LOWER(job_name) = LOWER(?)",
+                jobConfigRowMapper,
+                config.getJobName().trim()
+        );
+        if (!existingByName.isEmpty()) {
+            Long existingId = existingByName.get(0).getId();
+            log.info("Job configuration with name '{}' already exists (ID: {}). Updating existing configuration.",
+                    config.getJobName().trim(), existingId);
+            return updateJobConfig(existingId, config);
+        }
+
         try {
             String dbJson = objectMapper.writeValueAsString(config.getDbConfig());
             String mappingsJson = objectMapper.writeValueAsString(config.getMappings() != null ? config.getMappings() : Collections.emptyList());
