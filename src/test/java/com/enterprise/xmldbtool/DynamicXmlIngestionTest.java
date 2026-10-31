@@ -1,5 +1,6 @@
 package com.enterprise.xmldbtool;
 
+import com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter;
 import com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor;
 import com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller;
 import com.enterprise.xmldbtool.model.DataPreviewRequest;
@@ -17,6 +18,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import javax.xml.stream.XMLEventReader;
 import javax.xml.stream.XMLInputFactory;
 import java.io.StringReader;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -464,6 +466,167 @@ class DynamicXmlIngestionTest {
         assertFalse(normalResponse.isPreviewSkipped(), "Preview should NOT be skipped when file size is under 100MB");
         assertFalse(normalResponse.isDummyData(), "Normal preview should NOT be dummy data");
         assertFalse(normalResponse.getPreviewRows().isEmpty(), "Preview rows should be populated from actual XML");
+    }
+
+    @Test
+    @DisplayName("Verify parent and child attributes do not clobber each other")
+    void testParentChildAttributeNoClobber() throws Exception {
+        String xml = """
+            <person id="1" status="active">
+                <name>James Smith</name>
+                <address id="101" type="home">
+                    <street>123 Main St</street>
+                </address>
+            </person>
+            """;
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        XMLEventReader reader = factory.createXMLEventReader(new StringReader(xml));
+
+        Map<String, Object> map = unmarshaller.parseFragmentFromEventReader(reader);
+        assertNotNull(map);
+        assertEquals("1", map.get("person/@id"));
+        assertEquals("101", map.get("address/@id"));
+        assertEquals("1", map.get("@id"), "Root attribute @id must take precedence over child attribute");
+        assertEquals("1", map.get("id"), "Root attribute id must take precedence over child attribute");
+        assertEquals("home", map.get("address/@type"));
+        assertEquals("home", map.get("@type"));
+    }
+
+    @Test
+    @DisplayName("Verify qualified XML attributes do not leak to unrelated tags")
+    void testQualifiedAttributeResolutionNoLeak() throws Exception {
+        Map<String, Object> xmlRecord = new LinkedHashMap<>();
+        xmlRecord.put("entity/@id", "20");
+        xmlRecord.put("entity/@status", "active");
+        xmlRecord.put("descriptionlist1_id", "20");
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("descriptionlist2/@id", "descriptionlists2", "id", "NONE"),
+                new FieldMapping("descriptionlist1_id", "descriptionlists2", "descriptionlist1_id", "NONE")
+        );
+
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor("descriptionlists2", mappings);
+        DatabaseRowPayload payload = processor.process(xmlRecord);
+
+        // descriptionlist2/@id should NOT resolve from entity/@id; descriptionlists2 payload should be skipped due to null id
+        assertNull(payload, "Table payload should be omitted when its mapped id attribute is null in current fragment");
+    }
+
+    @Test
+    @DisplayName("Verify numbered plural foreign key detection (descriptionlists1 for descriptionlist1_id)")
+    void testNumberedPluralForeignKeys() {
+        assertTrue(DynamicJdbcBatchWriter.isParentTableForFk("descriptionlists1", "descriptionlist1_id"));
+        assertTrue(DynamicJdbcBatchWriter.isParentTableForFk("descriptionlists2", "descriptionlist2_id"));
+        assertTrue(DynamicJdbcBatchWriter.isParentTableForFk("countries", "country_id"));
+        assertTrue(DynamicJdbcBatchWriter.isParentTableForFk("countrylists", "countrylist_id"));
+
+        List<String> tables = List.of("entities", "descriptionlists2", "descriptionlists1");
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("descriptionlist1_id", "descriptionlists2", "descriptionlist1_id", "NONE"),
+                new FieldMapping("descriptionlist2_id", "entities", "descriptionlist2_id", "NONE")
+        );
+
+        List<String> sorted = DynamicJdbcBatchWriter.sortTablesByForeignKeys(tables, mappings);
+        assertEquals(List.of("descriptionlists1", "descriptionlists2", "entities"), sorted,
+                "Foreign key parent tables must precede child dependent tables");
+    }
+
+    @Test
+    @DisplayName("Verify multi-record repeating collections unmarshal and process all records per table")
+    void testMultiRecordCollectionUnmarshallingAndProcessing() throws Exception {
+        StringBuilder xmlBuilder = new StringBuilder("<canopyapp><countrylists>\n");
+        for (int i = 1; i <= 20; i++) {
+            xmlBuilder.append(String.format("<countrylist id=\"%d\" action=\"active\">list%d</countrylist>\n", i, i));
+        }
+        xmlBuilder.append("</countrylists><countries>\n");
+        for (int i = 1; i <= 20; i++) {
+            xmlBuilder.append(String.format("""
+                <country id="%d" action="create">
+                    <countrylist_id>%d</countrylist_id>
+                    <name>Country %d</name>
+                </country>
+            """, i, i, i));
+        }
+        xmlBuilder.append("</countries></canopyapp>");
+
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        XMLEventReader reader = factory.createXMLEventReader(new StringReader(xmlBuilder.toString()));
+
+        Map<String, Object> recordMap = unmarshaller.parseFragmentFromEventReader(reader);
+
+        assertNotNull(recordMap);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> countrylists = (List<Map<String, Object>>) recordMap.get("_entities_countrylist");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> countries = (List<Map<String, Object>>) recordMap.get("_entities_country");
+
+        assertNotNull(countrylists, "_entities_countrylist must be populated");
+        assertNotNull(countries, "_entities_country must be populated");
+        assertEquals(20, countrylists.size(), "All 20 countrylists must be preserved");
+        assertEquals(20, countries.size(), "All 20 countries must be preserved");
+
+        // Verify id=17 is present
+        assertEquals("17", countrylists.get(16).get("id"));
+        assertEquals("17", countries.get(16).get("id"));
+        assertEquals("17", countries.get(16).get("countrylist_id"));
+
+        // Process with DynamicXmlItemProcessor
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("countrylist/@id", "countrylists", "id", "NONE"),
+                new FieldMapping("countrylist/@action", "countrylists", "action", "NONE"),
+                new FieldMapping("country/@id", "countries", "id", "NONE"),
+                new FieldMapping("countrylist_id", "countries", "countrylist_id", "NONE"),
+                new FieldMapping("name", "countries", "name", "NONE")
+        );
+
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor("countrylists", mappings);
+        DatabaseRowPayload payload = processor.process(recordMap);
+
+        assertNotNull(payload);
+        Map<String, List<Map<String, Object>>> multiRecords = payload.getMultiTableRecords();
+        assertNotNull(multiRecords);
+        assertEquals(20, multiRecords.get("countrylists").size(), "Target table countrylists must contain 20 rows");
+        assertEquals(20, multiRecords.get("countries").size(), "Target table countries must contain 20 rows");
+    }
+
+    @Test
+    @DisplayName("Verify DynamicJdbcBatchWriter batch-inserts all multi-table records into database")
+    void testMultiTableBatchWriterExecutionWithFks() throws Exception {
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS multi_parents (id INT PRIMARY KEY, name VARCHAR(50))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS multi_children (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES multi_parents(id))");
+            stmt.execute("DELETE FROM multi_children");
+            stmt.execute("DELETE FROM multi_parents");
+        }
+
+        DatabaseRowPayload payload = new DatabaseRowPayload();
+        List<Map<String, Object>> parentRows = new java.util.ArrayList<>();
+        List<Map<String, Object>> childRows = new java.util.ArrayList<>();
+        for (int i = 1; i <= 20; i++) {
+            parentRows.add(Map.of("id", i, "name", "Parent " + i));
+            childRows.add(Map.of("id", i, "parent_id", i));
+        }
+        payload.setTableRecords("multi_parents", parentRows);
+        payload.setTableRecords("multi_children", childRows);
+
+        List<String> tableOrder = List.of("multi_parents", "multi_children");
+        DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(dataSource, tableOrder);
+
+        org.springframework.batch.item.Chunk<DatabaseRowPayload> chunk = new org.springframework.batch.item.Chunk<>(List.of(payload));
+        writer.write(chunk);
+
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM multi_parents")) {
+                assertTrue(rs.next());
+                assertEquals(20, rs.getInt(1), "multi_parents table must have all 20 records");
+            }
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM multi_children")) {
+                assertTrue(rs.next());
+                assertEquals(20, rs.getInt(1), "multi_children table must have all 20 records");
+            }
+        }
     }
 }
 

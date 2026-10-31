@@ -65,13 +65,21 @@ public class DatabaseErrorSkipListener implements SkipListener<Map<String, Objec
     }
 
     private final java.util.concurrent.atomic.AtomicLong tableErrorCount = new java.util.concurrent.atomic.AtomicLong(0);
+    private final Map<String, Long> tableErrorCounts = new java.util.concurrent.ConcurrentHashMap<>();
 
     public long getTableErrorCount() {
         return tableErrorCount.get();
     }
 
+    public Map<String, Long> getTableErrorCounts() {
+        return new java.util.LinkedHashMap<>(tableErrorCounts);
+    }
+
     public void recordTableWriteFailure(String tableName, int sequenceNumber, int itemCount, String errorMsg, Throwable t) {
         tableErrorCount.addAndGet(itemCount);
+        if (tableName != null) {
+            tableErrorCounts.compute(tableName, (k, v) -> (v == null ? 0L : v) + itemCount);
+        }
         log.warn("Table '{}' (Sequence #{}) write failed for {} items: {}. Continuing with other tables...",
                 tableName, sequenceNumber, itemCount, errorMsg);
         String payloadJson = "{\"table\": \"" + tableName + "\", \"sequence\": " + sequenceNumber + ", \"itemCount\": " + itemCount + "}";

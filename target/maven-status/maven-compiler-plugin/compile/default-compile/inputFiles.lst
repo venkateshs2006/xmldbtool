@@ -5,6 +5,7 @@
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/batch/DynamicXmlUnmarshaller.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/config/AppSchemaInitializer.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/config/BatchConfig.java
+/home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/config/DatabaseConfig.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/controller/AuthController.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/controller/ConnectionController.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/controller/DataPreviewController.java

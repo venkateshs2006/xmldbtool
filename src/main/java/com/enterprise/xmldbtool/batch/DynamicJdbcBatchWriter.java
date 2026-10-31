@@ -27,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Executes high-throughput batch updates (INSERT ON CONFLICT DO UPDATE)
  * without JPA or Hibernate overhead, automatically resolving duplicate key collisions.
  */
-public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
+public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, org.springframework.batch.core.StepExecutionListener {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicJdbcBatchWriter.class);
 
@@ -40,6 +40,46 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
 
     private boolean continueOnTableError = true;
     private DatabaseErrorSkipListener skipListener;
+
+    private final java.util.concurrent.atomic.AtomicLong totalRowsWritten = new java.util.concurrent.atomic.AtomicLong(0);
+    private final Map<String, Long> tableWriteCounts = new ConcurrentHashMap<>();
+    private volatile org.springframework.batch.core.StepExecution stepExecution;
+
+    @Override
+    public void beforeStep(org.springframework.batch.core.StepExecution stepExecution) {
+        this.stepExecution = stepExecution;
+        this.totalRowsWritten.set(0);
+        this.tableWriteCounts.clear();
+        if (stepExecution != null) {
+            stepExecution.getExecutionContext().putLong("actualRowsWritten", 0L);
+            if (this.tableOrder != null && !this.tableOrder.isEmpty()) {
+                stepExecution.getExecutionContext().putString("targetTables", String.join(", ", this.tableOrder));
+            }
+        }
+    }
+
+    @Override
+    public org.springframework.batch.core.ExitStatus afterStep(org.springframework.batch.core.StepExecution stepExecution) {
+        if (stepExecution != null) {
+            stepExecution.getExecutionContext().putLong("actualRowsWritten", totalRowsWritten.get());
+            if (this.tableOrder != null && !this.tableOrder.isEmpty()) {
+                stepExecution.getExecutionContext().putString("targetTables", String.join(", ", this.tableOrder));
+            }
+            stepExecution.getExecutionContext().put("tableWriteCounts", new LinkedHashMap<>(tableWriteCounts));
+            if (this.skipListener != null) {
+                stepExecution.getExecutionContext().put("tableErrorCounts", new LinkedHashMap<>(this.skipListener.getTableErrorCounts()));
+            }
+        }
+        return null;
+    }
+
+    public long getTotalRowsWritten() {
+        return totalRowsWritten.get();
+    }
+
+    public Map<String, Long> getTableWriteCounts() {
+        return new LinkedHashMap<>(tableWriteCounts);
+    }
 
     public DynamicJdbcBatchWriter(DataSource dataSource) {
         this(dataSource, Collections.emptyList());
@@ -155,10 +195,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
                 for (String potentialParent : tables) {
                     if (potentialParent.equalsIgnoreCase(childTable)) continue;
                     String normParent = potentialParent.toLowerCase().replace("_", "");
-                    if (normParent.equals(refPrefix) ||
-                            normParent.equals(refPrefix + "s") ||
-                            normParent.equals(refPrefix + "es") ||
-                            (refPrefix.endsWith("y") && normParent.equals(refPrefix.substring(0, refPrefix.length() - 1) + "ies"))) {
+                    if (isParentTableForFk(potentialParent, normCol)) {
                         dependencies.get(childTable).add(potentialParent);
                     }
                 }
@@ -194,6 +231,28 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
         result.add(node);
     }
 
+    public static boolean isParentTableForFk(String parentTable, String fkColumnName) {
+        if (parentTable == null || fkColumnName == null) return false;
+        String normCol = fkColumnName.toLowerCase().trim();
+        if (!normCol.endsWith("_id") || normCol.length() <= 3) return false;
+
+        String refPrefix = normCol.substring(0, normCol.length() - 3).replace("_", "");
+        String normParent = parentTable.toLowerCase().replace("_", "");
+
+        if (normParent.equals(refPrefix) ||
+                normParent.equals(refPrefix + "s") ||
+                normParent.equals(refPrefix + "es") ||
+                (refPrefix.endsWith("y") && normParent.equals(refPrefix.substring(0, refPrefix.length() - 1) + "ies")) ||
+                (normParent.endsWith("ies") && refPrefix.equals(normParent.substring(0, normParent.length() - 3) + "y"))) {
+            return true;
+        }
+
+        // Support numbered plural tables like descriptionlists1 for FK descriptionlist1_id
+        String pNoNumS = normParent.replaceAll("s(?=\\d*$)", "");
+        String rNoNumS = refPrefix.replaceAll("s(?=\\d*$)", "");
+        return pNoNumS.equals(rNoNumS);
+    }
+
     private void detectDatabaseProduct(DataSource ds) {
         if (ds == null) return;
         try (Connection conn = ds.getConnection()) {
@@ -217,20 +276,42 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
         for (DatabaseRowPayload row : chunk) {
             if (row == null) continue;
 
-            Map<String, Map<String, Object>> multiPayloads = row.getMultiTablePayloads();
-            for (Map.Entry<String, Map<String, Object>> tableEntry : multiPayloads.entrySet()) {
-                String tableName = tableEntry.getKey();
-                Map<String, Object> colVals = tableEntry.getValue();
+            Map<String, List<Map<String, Object>>> multiRecords = row.getMultiTableRecords();
+            if (multiRecords != null && !multiRecords.isEmpty()) {
+                for (Map.Entry<String, List<Map<String, Object>>> tableEntry : multiRecords.entrySet()) {
+                    String tableName = tableEntry.getKey();
+                    List<Map<String, Object>> rows = tableEntry.getValue();
+                    if (rows == null || rows.isEmpty()) continue;
 
-                if (colVals != null && !colVals.isEmpty()) {
-                    tableColumnsMap.computeIfAbsent(tableName, k -> new LinkedHashSet<>()).addAll(colVals.keySet());
+                    for (Map<String, Object> colVals : rows) {
+                        if (colVals != null && !colVals.isEmpty()) {
+                            tableColumnsMap.computeIfAbsent(tableName, k -> new LinkedHashSet<>()).addAll(colVals.keySet());
 
-                    MapSqlParameterSource paramSource = new MapSqlParameterSource();
-                    for (Map.Entry<String, Object> colEntry : colVals.entrySet()) {
-                        Object converted = autoConvertType(colEntry.getValue(), colEntry.getKey());
-                        paramSource.addValue(colEntry.getKey(), converted);
+                            MapSqlParameterSource paramSource = new MapSqlParameterSource();
+                            for (Map.Entry<String, Object> colEntry : colVals.entrySet()) {
+                                Object converted = autoConvertType(colEntry.getValue(), colEntry.getKey());
+                                paramSource.addValue(colEntry.getKey(), converted);
+                            }
+                            tableBatchMap.computeIfAbsent(tableName, k -> new ArrayList<>()).add(paramSource);
+                        }
                     }
-                    tableBatchMap.computeIfAbsent(tableName, k -> new ArrayList<>()).add(paramSource);
+                }
+            } else {
+                Map<String, Map<String, Object>> multiPayloads = row.getMultiTablePayloads();
+                for (Map.Entry<String, Map<String, Object>> tableEntry : multiPayloads.entrySet()) {
+                    String tableName = tableEntry.getKey();
+                    Map<String, Object> colVals = tableEntry.getValue();
+
+                    if (colVals != null && !colVals.isEmpty()) {
+                        tableColumnsMap.computeIfAbsent(tableName, k -> new LinkedHashSet<>()).addAll(colVals.keySet());
+
+                        MapSqlParameterSource paramSource = new MapSqlParameterSource();
+                        for (Map.Entry<String, Object> colEntry : colVals.entrySet()) {
+                            Object converted = autoConvertType(colEntry.getValue(), colEntry.getKey());
+                            paramSource.addValue(colEntry.getKey(), converted);
+                        }
+                        tableBatchMap.computeIfAbsent(tableName, k -> new ArrayList<>()).add(paramSource);
+                    }
                 }
             }
         }
@@ -290,9 +371,18 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload> {
             try {
                 MapSqlParameterSource[] batchArray = batchParams.toArray(new MapSqlParameterSource[0]);
                 int[] updateCounts = jdbcTemplate.batchUpdate(insertOrUpsertSql, batchArray);
+                long writtenCount = updateCounts.length;
+                totalRowsWritten.addAndGet(writtenCount);
+                tableWriteCounts.compute(tableName, (k, v) -> (v == null ? 0L : v) + writtenCount);
+
+                if (this.stepExecution != null) {
+                    this.stepExecution.getExecutionContext().putLong("actualRowsWritten", totalRowsWritten.get());
+                    this.stepExecution.getExecutionContext().put("tableWriteCounts", new LinkedHashMap<>(tableWriteCounts));
+                }
+
                 if (log.isDebugEnabled()) {
-                    log.debug("Batch written {} rows to table '{}' (Sequence #{} of {})",
-                            updateCounts.length, tableName, (i + 1), executionOrder.size());
+                    log.debug("Batch written {} rows to table '{}' (Sequence #{} of {}) - Total written so far: {}",
+                            updateCounts.length, tableName, (i + 1), executionOrder.size(), totalRowsWritten.get());
                 }
                 if (savepoint != null && conn != null) {
                     try {

@@ -38,6 +38,7 @@ import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -59,10 +60,14 @@ public class DynamicBatchJobService {
 
     // In-memory cache of active job listeners for real-time telemetry error reporting
     private final Map<Long, DatabaseErrorSkipListener> skipListenerMap = new ConcurrentHashMap<>();
+    private final Map<Long, DynamicJdbcBatchWriter> activeWriters = new ConcurrentHashMap<>();
+    private final Map<Long, DynamicXmlItemProcessor> activeProcessors = new ConcurrentHashMap<>();
 
     // Throughput rate calculation state
     private final Map<Long, Long> previousWriteCounts = new ConcurrentHashMap<>();
     private final Map<Long, Long> previousPollTimestamps = new ConcurrentHashMap<>();
+
+    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     public DynamicBatchJobService(JobRepository jobRepository,
                                  JobLauncher jobLauncher,
@@ -80,6 +85,11 @@ public class DynamicBatchJobService {
         this.discoveryService = discoveryService;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setJdbcTemplate(org.springframework.jdbc.core.JdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
     /**
      * Dynamically builds and launches Spring Batch Job for high-volume XML ingestion.
      */
@@ -91,18 +101,37 @@ public class DynamicBatchJobService {
             // Target DB DataSource
             DataSource targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
 
-            // 1. StaxEventItemReader
+            // 1. StaxEventItemReader with effective fragment root element resolution
+            String effectiveFragmentRoot = request.getRecordRootElement();
+            String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
+            if (docRoot != null && !docRoot.trim().isEmpty()) {
+                if (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty() || "record".equalsIgnoreCase(effectiveFragmentRoot)) {
+                    boolean hasNonRecordTags = request.getMappings() != null && request.getMappings().stream().anyMatch(m -> {
+                        String f = m.getXmlField() != null ? m.getXmlField().toLowerCase() : "";
+                        return !f.startsWith("record/") && !f.startsWith("record/@") && !f.equals("record") && !f.equals("@record");
+                    });
+                    if (hasNonRecordTags && !docRoot.equalsIgnoreCase(effectiveFragmentRoot)) {
+                        log.info("Auto-resolving fragmentRootElementName from '{}' to document root '{}' to capture all mapped collections.",
+                                effectiveFragmentRoot, docRoot);
+                        effectiveFragmentRoot = docRoot;
+                    }
+                }
+            }
+            if (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty()) {
+                effectiveFragmentRoot = docRoot != null ? docRoot : "record";
+            }
+
             Resource xmlResource = resolveXmlResource(request.getSourceXmlPath());
             StaxEventItemReader<Map<String, Object>> reader = new StaxEventItemReader<>();
             reader.setName("dynamicStaxEventReader_" + timestamp);
             reader.setResource(xmlResource);
-            reader.setFragmentRootElementName(request.getRecordRootElement());
+            reader.setFragmentRootElementName(effectiveFragmentRoot);
             reader.setUnmarshaller(dynamicXmlUnmarshaller);
 
             // Extract document root attributes (e.g. catalog/@exportId, catalog/@version)
             Map<String, Object> rootAttrs = discoveryService.extractDocumentRootAttributes(
                     request.getSourceXmlPath(),
-                    request.getRecordRootElement()
+                    effectiveFragmentRoot
             );
 
             // Determine table insertion order sequence based on tag appearance in mappings
@@ -139,6 +168,8 @@ public class DynamicBatchJobService {
                     .skipLimit(10000)
                     .skip(Exception.class)
                     .listener(skipListener)
+                    .listener(processor)
+                    .listener(writer)
                     .build();
 
             // Build Job
@@ -146,10 +177,15 @@ public class DynamicBatchJobService {
                     .start(step)
                     .build();
 
+            String allTables = (tableOrder != null && !tableOrder.isEmpty())
+                    ? String.join(", ", tableOrder)
+                    : (request.getTargetTable() != null ? request.getTargetTable() : "MULTI_TABLE");
+
             // Job Parameters
             JobParameters params = new JobParametersBuilder()
                     .addString("sourceXmlPath", request.getSourceXmlPath())
-                    .addString("targetTable", request.getTargetTable() != null ? request.getTargetTable() : "MULTI_TABLE")
+                    .addString("targetTable", allTables)
+                    .addString("targetTables", allTables)
                     .addLong("time", timestamp)
                     .toJobParameters();
 
@@ -160,6 +196,8 @@ public class DynamicBatchJobService {
             // Launch in background
             JobExecution jobExecution = jobRepository.createJobExecution(jobName, params);
             skipListenerMap.put(jobExecution.getId(), skipListener);
+            activeWriters.put(jobExecution.getId(), writer);
+            activeProcessors.put(jobExecution.getId(), processor);
 
             asyncExecutor.execute(() -> {
                 try {
@@ -209,15 +247,49 @@ public class DynamicBatchJobService {
         long totalErrors = 0;
 
         for (StepExecution step : execution.getStepExecutions()) {
-            totalRead += step.getReadCount();
-            totalWritten += step.getWriteCount();
+            long stepRead = step.getReadCount();
+            long stepWritten = step.getWriteCount();
+            long actualWritten = step.getExecutionContext().getLong("actualRowsWritten", 0L);
+            if (actualWritten > 0) {
+                stepWritten = actualWritten;
+            }
+            long actualRead = step.getExecutionContext().getLong("actualRowsRead", 0L);
+            if (actualRead > 0) {
+                stepRead = actualRead;
+            }
+            totalRead += stepRead;
+            totalWritten += stepWritten;
             totalErrors += (step.getReadSkipCount() + step.getProcessSkipCount() + step.getWriteSkipCount());
+
+            if (step.getExecutionContext().containsKey("tableWriteCounts")) {
+                Object twc = step.getExecutionContext().get("tableWriteCounts");
+                if (twc instanceof Map<?, ?> m) {
+                    for (Map.Entry<?, ?> e : m.entrySet()) {
+                        if (e.getKey() != null && e.getValue() instanceof Number num) {
+                            telemetry.getTableWriteCounts().put(e.getKey().toString(), num.longValue());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Active writer and processor metrics
+        DynamicJdbcBatchWriter activeWriter = activeWriters.get(jobExecutionId);
+        if (activeWriter != null && activeWriter.getTotalRowsWritten() > 0) {
+            totalWritten = activeWriter.getTotalRowsWritten();
+            telemetry.setTableWriteCounts(activeWriter.getTableWriteCounts());
+            telemetry.setTargetTables(activeWriter.getTableOrder());
+        }
+        DynamicXmlItemProcessor activeProcessor = activeProcessors.get(jobExecutionId);
+        if (activeProcessor != null && activeProcessor.getTotalRowsRead() > 0) {
+            totalRead = activeProcessor.getTotalRowsRead();
         }
 
         // Retrieve recent errors from Step listener
         DatabaseErrorSkipListener listener = skipListenerMap.get(jobExecutionId);
         if (listener != null) {
             telemetry.setRecentErrors(listener.getRecentErrors());
+            telemetry.setTableErrorCounts(listener.getTableErrorCounts());
             totalErrors += listener.getTableErrorCount();
         }
 
@@ -272,14 +344,69 @@ public class DynamicBatchJobService {
                         long written = 0;
                         long errors = 0;
                         for (StepExecution step : exec.getStepExecutions()) {
-                            read += step.getReadCount();
-                            written += step.getWriteCount();
+                            long stepRead = step.getReadCount();
+                            long stepWritten = step.getWriteCount();
+                            long actualWritten = step.getExecutionContext().getLong("actualRowsWritten", 0L);
+                            if (actualWritten > 0) {
+                                stepWritten = actualWritten;
+                            }
+                            long actualRead = step.getExecutionContext().getLong("actualRowsRead", 0L);
+                            if (actualRead > 0) {
+                                stepRead = actualRead;
+                            }
+
+                            read += stepRead;
+                            written += stepWritten;
                             errors += (step.getReadSkipCount() + step.getProcessSkipCount() + step.getWriteSkipCount());
+
+                            if (step.getExecutionContext().containsKey("tableWriteCounts")) {
+                                Object twc = step.getExecutionContext().get("tableWriteCounts");
+                                if (twc instanceof Map<?, ?> m) {
+                                    for (Map.Entry<?, ?> e : m.entrySet()) {
+                                        if (e.getKey() != null && e.getValue() instanceof Number num) {
+                                            summary.getTableWriteCounts().put(e.getKey().toString(), num.longValue());
+                                        }
+                                    }
+                                }
+                            }
+                            if (step.getExecutionContext().containsKey("tableErrorCounts")) {
+                                Object tec = step.getExecutionContext().get("tableErrorCounts");
+                                if (tec instanceof Map<?, ?> m) {
+                                    for (Map.Entry<?, ?> e : m.entrySet()) {
+                                        if (e.getKey() != null && e.getValue() instanceof Number num) {
+                                            summary.getTableErrorCounts().put(e.getKey().toString(), num.longValue());
+                                        }
+                                    }
+                                }
+                            }
+                            String tablesFromCtx = step.getExecutionContext().getString("targetTables", null);
+                            if (tablesFromCtx != null && !tablesFromCtx.trim().isEmpty()) {
+                                summary.setTargetTable(tablesFromCtx);
+                            }
+                        }
+
+                        DynamicJdbcBatchWriter activeWriter = activeWriters.get(exec.getId());
+                        if (activeWriter != null && activeWriter.getTotalRowsWritten() > 0) {
+                            written = activeWriter.getTotalRowsWritten();
+                            summary.getTableWriteCounts().putAll(activeWriter.getTableWriteCounts());
+                            if (summary.getTargetTable() == null || summary.getTargetTable().equals("MULTI_TABLE")) {
+                                summary.setTargetTable(String.join(", ", activeWriter.getTableOrder()));
+                            }
+                        }
+                        DynamicXmlItemProcessor activeProcessor = activeProcessors.get(exec.getId());
+                        if (activeProcessor != null && activeProcessor.getTotalRowsRead() > 0) {
+                            read = activeProcessor.getTotalRowsRead();
                         }
 
                         DatabaseErrorSkipListener listener = skipListenerMap.get(exec.getId());
                         if (listener != null) {
                             errors += listener.getTableErrorCount();
+                            summary.getTableErrorCounts().putAll(listener.getTableErrorCounts());
+                        }
+
+                        // Enrich target table names if MULTI_TABLE or empty
+                        if ((summary.getTargetTable() == null || summary.getTargetTable().equals("MULTI_TABLE") || summary.getTargetTables().isEmpty()) && jdbcTemplate != null) {
+                            enrichHistoricalExecution(summary);
                         }
 
                         summary.setTotalRead(read);
@@ -342,5 +469,42 @@ public class DynamicBatchJobService {
             return res;
         }
         return new FileSystemResource(new File(sourcePath));
+    }
+
+    private void enrichHistoricalExecution(com.enterprise.xmldbtool.model.JobExecutionSummary summary) {
+        if (jdbcTemplate == null) return;
+        try {
+            List<Map<String, Object>> rows;
+            try {
+                rows = jdbcTemplate.queryForList("SELECT table_order_json, target_table, db_config_json FROM job_details ORDER BY id DESC");
+            } catch (Exception e) {
+                rows = jdbcTemplate.queryForList("SELECT table_order_json, target_table, db_config_json FROM saved_job_configs ORDER BY id DESC");
+            }
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            for (Map<String, Object> cfgRow : rows) {
+                String tableOrderJson = (String) cfgRow.get("table_order_json");
+                List<String> tables = new ArrayList<>();
+                if (tableOrderJson != null && !tableOrderJson.trim().isEmpty()) {
+                    tables = mapper.readValue(tableOrderJson, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+                }
+                if (tables.isEmpty() && cfgRow.get("target_table") != null) {
+                    tables.add((String) cfgRow.get("target_table"));
+                }
+
+                String currentTarget = summary.getTargetTable() != null ? summary.getTargetTable().trim() : "";
+                boolean matches = false;
+                if ("MULTI_TABLE".equalsIgnoreCase(currentTarget) || tables.contains(currentTarget) || (!tables.isEmpty() && currentTarget.contains(tables.get(0)))) {
+                    matches = true;
+                }
+
+                if (matches && !tables.isEmpty()) {
+                    summary.setTargetTable(String.join(", ", tables));
+                    summary.setTargetTables(tables);
+                    break;
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Historical execution enrichment: {}", ex.getMessage());
+        }
     }
 }

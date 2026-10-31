@@ -93,11 +93,20 @@ public class JobConfigService {
     };
 
     public List<SavedJobConfig> getAllJobConfigs() {
-        return jdbcTemplate.query("SELECT * FROM saved_job_configs ORDER BY id DESC", jobConfigRowMapper);
+        try {
+            return jdbcTemplate.query("SELECT * FROM job_details ORDER BY id DESC", jobConfigRowMapper);
+        } catch (Exception ex) {
+            return jdbcTemplate.query("SELECT * FROM saved_job_configs ORDER BY id DESC", jobConfigRowMapper);
+        }
     }
 
     public SavedJobConfig getJobConfigById(Long id) {
-        List<SavedJobConfig> list = jdbcTemplate.query("SELECT * FROM saved_job_configs WHERE id = ?", jobConfigRowMapper, id);
+        List<SavedJobConfig> list;
+        try {
+            list = jdbcTemplate.query("SELECT * FROM job_details WHERE id = ?", jobConfigRowMapper, id);
+        } catch (Exception ex) {
+            list = jdbcTemplate.query("SELECT * FROM saved_job_configs WHERE id = ?", jobConfigRowMapper, id);
+        }
         return list.isEmpty() ? null : list.get(0);
     }
 
@@ -117,11 +126,20 @@ public class JobConfigService {
         }
 
         // Check if a job with the same name already exists to prevent duplicate key constraint violations
-        List<SavedJobConfig> existingByName = jdbcTemplate.query(
-                "SELECT * FROM saved_job_configs WHERE LOWER(job_name) = LOWER(?)",
-                jobConfigRowMapper,
-                config.getJobName().trim()
-        );
+        List<SavedJobConfig> existingByName;
+        try {
+            existingByName = jdbcTemplate.query(
+                    "SELECT * FROM job_details WHERE LOWER(job_name) = LOWER(?)",
+                    jobConfigRowMapper,
+                    config.getJobName().trim()
+            );
+        } catch (Exception ex) {
+            existingByName = jdbcTemplate.query(
+                    "SELECT * FROM saved_job_configs WHERE LOWER(job_name) = LOWER(?)",
+                    jobConfigRowMapper,
+                    config.getJobName().trim()
+            );
+        }
         if (!existingByName.isEmpty()) {
             Long existingId = existingByName.get(0).getId();
             log.info("Job configuration with name '{}' already exists (ID: {}). Updating existing configuration.",
@@ -134,13 +152,13 @@ public class JobConfigService {
             String mappingsJson = objectMapper.writeValueAsString(config.getMappings() != null ? config.getMappings() : Collections.emptyList());
             String tableOrderJson = objectMapper.writeValueAsString(config.getTableOrder() != null ? config.getTableOrder() : Collections.emptyList());
 
-            String sql = "INSERT INTO saved_job_configs (" +
+            String sqlJobDetails = "INSERT INTO job_details (" +
                     "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
                     "db_config_json, mappings_json, cron_expression, status, created_by) " +
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
             jdbcTemplate.update(
-                    sql,
+                    sqlJobDetails,
                     config.getJobName().trim(),
                     config.getDescription(),
                     config.getSourceXmlPath().trim(),
@@ -155,8 +173,30 @@ public class JobConfigService {
                     config.getCreatedBy() != null ? config.getCreatedBy() : "admin"
             );
 
+            try {
+                String sqlSavedJobs = "INSERT INTO saved_job_configs (" +
+                        "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
+                        "db_config_json, mappings_json, cron_expression, status, created_by) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                jdbcTemplate.update(
+                        sqlSavedJobs,
+                        config.getJobName().trim(),
+                        config.getDescription(),
+                        config.getSourceXmlPath().trim(),
+                        config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : "record",
+                        config.getTargetTable(),
+                        tableOrderJson,
+                        config.getChunkSize() > 0 ? config.getChunkSize() : 1000,
+                        dbJson,
+                        mappingsJson,
+                        config.getCronExpression(),
+                        "READY",
+                        config.getCreatedBy() != null ? config.getCreatedBy() : "admin"
+                );
+            } catch (Exception ignored) {}
+
             return jdbcTemplate.queryForObject(
-                    "SELECT * FROM saved_job_configs WHERE LOWER(job_name) = LOWER(?)",
+                    "SELECT * FROM job_details WHERE LOWER(job_name) = LOWER(?)",
                     jobConfigRowMapper,
                     config.getJobName().trim()
             );
@@ -177,7 +217,7 @@ public class JobConfigService {
             String mappingsJson = config.getMappings() != null ? objectMapper.writeValueAsString(config.getMappings()) : objectMapper.writeValueAsString(existing.getMappings());
             String tableOrderJson = config.getTableOrder() != null ? objectMapper.writeValueAsString(config.getTableOrder()) : objectMapper.writeValueAsString(existing.getTableOrder());
 
-            String sql = "UPDATE saved_job_configs SET " +
+            String sql = "UPDATE job_details SET " +
                     "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
                     "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
                     "mappings_json = ?, cron_expression = ?, updated_at = CURRENT_TIMESTAMP " +
@@ -198,6 +238,28 @@ public class JobConfigService {
                     id
             );
 
+            try {
+                String sqlSavedJobs = "UPDATE saved_job_configs SET " +
+                        "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
+                        "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
+                        "mappings_json = ?, cron_expression = ?, updated_at = CURRENT_TIMESTAMP " +
+                        "WHERE id = ?";
+                jdbcTemplate.update(
+                        sqlSavedJobs,
+                        config.getJobName() != null ? config.getJobName().trim() : existing.getJobName(),
+                        config.getDescription() != null ? config.getDescription() : existing.getDescription(),
+                        config.getSourceXmlPath() != null ? config.getSourceXmlPath().trim() : existing.getSourceXmlPath(),
+                        config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : existing.getRecordRootElement(),
+                        config.getTargetTable() != null ? config.getTargetTable() : existing.getTargetTable(),
+                        tableOrderJson,
+                        config.getChunkSize() > 0 ? config.getChunkSize() : existing.getChunkSize(),
+                        dbJson,
+                        mappingsJson,
+                        config.getCronExpression() != null ? config.getCronExpression() : existing.getCronExpression(),
+                        id
+                );
+            } catch (Exception ignored) {}
+
             return getJobConfigById(id);
         } catch (Exception ex) {
             throw new RuntimeException("Error updating job configuration: " + ex.getMessage(), ex);
@@ -207,16 +269,25 @@ public class JobConfigService {
     public void updateExecutionStatus(Long id, Long executionId, String status) {
         try {
             jdbcTemplate.update(
-                    "UPDATE saved_job_configs SET last_run_at = CURRENT_TIMESTAMP, last_run_status = ?, last_job_execution_id = ?, status = ? WHERE id = ?",
+                    "UPDATE job_details SET last_run_at = CURRENT_TIMESTAMP, last_run_status = ?, last_job_execution_id = ?, status = ? WHERE id = ?",
                     status, executionId, status, id
             );
+            try {
+                jdbcTemplate.update(
+                        "UPDATE saved_job_configs SET last_run_at = CURRENT_TIMESTAMP, last_run_status = ?, last_job_execution_id = ?, status = ? WHERE id = ?",
+                        status, executionId, status, id
+                );
+            } catch (Exception ignored) {}
         } catch (Exception ex) {
             log.warn("Failed to update execution status for job #{}: {}", id, ex.getMessage());
         }
     }
 
     public boolean deleteJobConfig(Long id) {
-        int rows = jdbcTemplate.update("DELETE FROM saved_job_configs WHERE id = ?", id);
+        int rows = jdbcTemplate.update("DELETE FROM job_details WHERE id = ?", id);
+        try {
+            jdbcTemplate.update("DELETE FROM saved_job_configs WHERE id = ?", id);
+        } catch (Exception ignored) {}
         return rows > 0;
     }
 }

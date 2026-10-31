@@ -1,4 +1,4 @@
 -------------------------------------------------------------------------------
 Test set: com.enterprise.xmldbtool.DynamicXmlIngestionTest
 -------------------------------------------------------------------------------
-Tests run: 17, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 6.178 s -- in com.enterprise.xmldbtool.DynamicXmlIngestionTest
+Tests run: 22, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 9.790 s -- in com.enterprise.xmldbtool.DynamicXmlIngestionTest

@@ -4,6 +4,9 @@ public class JobExecutionSummary {
     private Long executionId;
     private String jobName;
     private String targetTable;
+    private java.util.List<String> targetTables = new java.util.ArrayList<>();
+    private java.util.Map<String, Long> tableWriteCounts = new java.util.LinkedHashMap<>();
+    private java.util.Map<String, Long> tableErrorCounts = new java.util.LinkedHashMap<>();
     private String status;
     private String exitCode;
     private String startTime;
@@ -24,6 +27,15 @@ public class JobExecutionSummary {
 
     public String getTargetTable() { return targetTable; }
     public void setTargetTable(String targetTable) { this.targetTable = targetTable; }
+
+    public java.util.List<String> getTargetTables() { return targetTables; }
+    public void setTargetTables(java.util.List<String> targetTables) { this.targetTables = targetTables != null ? targetTables : new java.util.ArrayList<>(); }
+
+    public java.util.Map<String, Long> getTableWriteCounts() { return tableWriteCounts; }
+    public void setTableWriteCounts(java.util.Map<String, Long> tableWriteCounts) { this.tableWriteCounts = tableWriteCounts != null ? tableWriteCounts : new java.util.LinkedHashMap<>(); }
+
+    public java.util.Map<String, Long> getTableErrorCounts() { return tableErrorCounts; }
+    public void setTableErrorCounts(java.util.Map<String, Long> tableErrorCounts) { this.tableErrorCounts = tableErrorCounts != null ? tableErrorCounts : new java.util.LinkedHashMap<>(); }
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }

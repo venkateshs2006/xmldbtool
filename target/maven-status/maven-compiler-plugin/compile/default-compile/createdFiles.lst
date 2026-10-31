@@ -1,5 +1,5 @@
-com/enterprise/xmldbtool/batch/DynamicXmlUnmarshaller$1.class
 com/enterprise/xmldbtool/controller/AuthController.class
+com/enterprise/xmldbtool/service/DynamicBatchJobService$1.class
 com/enterprise/xmldbtool/XmlDbToolApplication.class
 com/enterprise/xmldbtool/model/SchemaDiscoveryRequest.class
 com/enterprise/xmldbtool/controller/JobConfigController.class
@@ -9,6 +9,7 @@ com/enterprise/xmldbtool/model/DatabaseRowPayload.class
 com/enterprise/xmldbtool/config/AppSchemaInitializer.class
 com/enterprise/xmldbtool/model/JobLaunchRequest.class
 com/enterprise/xmldbtool/service/JobConfigService$1$1.class
+com/enterprise/xmldbtool/config/DatabaseConfig.class
 com/enterprise/xmldbtool/service/DynamicDataSourceService.class
 com/enterprise/xmldbtool/model/DbTestResponse.class
 com/enterprise/xmldbtool/controller/SystemTelemetryController.class
@@ -44,6 +45,7 @@ com/enterprise/xmldbtool/batch/DatabaseErrorSkipListener.class
 com/enterprise/xmldbtool/service/SystemMetricsService.class
 com/enterprise/xmldbtool/model/TableMetadata.class
 com/enterprise/xmldbtool/batch/DynamicJdbcBatchWriter.class
+com/enterprise/xmldbtool/batch/DynamicXmlUnmarshaller$ElementFrame.class
 com/enterprise/xmldbtool/model/User.class
 com/enterprise/xmldbtool/model/SystemMetrics.class
 com/enterprise/xmldbtool/model/DiscoveredElement.class

@@ -1040,121 +1040,140 @@
 
             <!-- SYSTEM & HARDWARE METRICS GRID -->
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <!-- CPU & Cores -->
-                <div class="card p-4 border-l-4 border-l-bnp-emerald">
-                    <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">CPU Cores &amp; Load</span>
-                        <i class="fas fa-microchip text-bnp-emerald text-base"></i>
-                    </div>
-                    <div class="mt-2 flex items-baseline gap-2">
-                        <span id="metric-cpu-cores" class="text-2xl font-bold font-mono text-gray-900">--</span>
-                        <span class="text-xs text-gray-500 font-semibold">Cores</span>
-                    </div>
-                    <div class="mt-2">
-                        <div class="flex justify-between text-[11px] text-gray-500 mb-1">
-                            <span>System Load</span>
-                            <span id="metric-system-cpu" class="font-mono font-bold text-gray-800">0%</span>
+                <!-- MERGED: CPU Cores, Load & JVM Heap Memory -->
+                <div class="card p-4 border-l-4 border-l-bnp-emerald flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between pb-2 border-b border-gray-100 mb-2">
+                            <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">CPU Cores, Load &amp; JVM Heap</span>
+                            <div class="flex items-center gap-1.5 text-bnp-emerald text-sm">
+                                <i class="fas fa-microchip" title="CPU"></i>
+                                <span class="text-gray-300">|</span>
+                                <i class="fas fa-memory text-blue-500 text-xs" title="JVM Heap"></i>
+                            </div>
                         </div>
-                        <div class="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
-                            <div id="metric-cpu-bar" class="bg-bnp-emerald h-1.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+
+                        <!-- 2-Column Split for CPU and JVM Heap -->
+                        <div class="grid grid-cols-2 gap-2.5">
+                            <!-- Left: CPU Load & Cores -->
+                            <div class="border-r border-gray-100 pr-2">
+                                <div class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">CPU Load</div>
+                                <div class="flex items-baseline gap-1">
+                                    <span id="metric-system-cpu" class="text-lg font-bold font-mono text-gray-900">0%</span>
+                                    <span class="text-[10px] text-gray-500 font-mono">(<span id="metric-cpu-cores">--</span>c)</span>
+                                </div>
+                                <div class="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden mt-1.5">
+                                    <div id="metric-cpu-bar" class="bg-bnp-emerald h-1.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                                </div>
+                                <div class="mt-1.5 text-[9px] text-gray-400 font-mono truncate" id="metric-os-info">OS: --</div>
+                            </div>
+
+                            <!-- Right: JVM Heap Memory -->
+                            <div class="pl-0.5">
+                                <div class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">JVM Heap</div>
+                                <div class="flex items-baseline gap-1">
+                                    <span id="metric-heap-used" class="text-lg font-bold font-mono text-gray-900">--</span>
+                                    <span id="metric-heap-percent" class="text-[10px] font-bold text-blue-600 font-mono">0%</span>
+                                </div>
+                                <div class="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden mt-1.5">
+                                    <div id="metric-heap-bar" class="bg-blue-500 h-1.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                                </div>
+                                <div class="mt-1.5 text-[9px] text-gray-500 font-mono truncate">
+                                    Max: <span id="metric-heap-max" class="text-gray-700">--</span>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <div class="mt-2 text-[10px] text-gray-400 font-mono truncate" id="metric-os-info">OS: --</div>
+                    <div class="mt-2 pt-1.5 border-t border-gray-100 flex items-center justify-between text-[9px] text-gray-400 font-mono">
+                        <span id="metric-gc-info" class="truncate max-w-[130px]">GC: --</span>
+                        <span id="metric-system-load">Load: --</span>
+                    </div>
                 </div>
 
-                <!-- JVM Memory Details -->
-                <div class="card p-4 border-l-4 border-l-blue-500">
-                    <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">JVM Heap Memory</span>
-                        <i class="fas fa-memory text-blue-500 text-base"></i>
-                    </div>
-                    <div class="mt-2 flex items-baseline gap-2">
-                        <span id="metric-heap-used" class="text-2xl font-bold font-mono text-gray-900">--</span>
-                        <span id="metric-heap-percent" class="text-xs font-bold text-blue-600 font-mono">0%</span>
-                    </div>
-                    <div class="mt-2">
-                        <div class="flex justify-between text-[11px] text-gray-500 mb-1">
-                            <span>Max Heap: <span id="metric-heap-max" class="font-mono text-gray-800">--</span></span>
+                <!-- Total Count of Records Transferred Till Now -->
+                <div class="card p-4 border-l-4 border-l-emerald-600 bg-gradient-to-br from-white via-emerald-50/20 to-teal-50/40 relative overflow-hidden flex flex-col justify-between shadow-xs hover:shadow-md transition-all duration-200">
+                    <div>
+                        <div class="flex items-center justify-between pb-2 border-b border-gray-100 mb-2">
+                            <div class="flex items-center gap-1.5">
+                                <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                                <span class="text-xs font-bold text-gray-600 uppercase tracking-wider">Total Records Transferred</span>
+                            </div>
+                            <span class="w-7 h-7 rounded-lg bg-emerald-600 text-white flex items-center justify-center text-xs shadow-xs">
+                                <i class="fas fa-database"></i>
+                            </span>
                         </div>
-                        <div class="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
-                            <div id="metric-heap-bar" class="bg-blue-500 h-1.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+
+                        <div class="flex items-baseline justify-between mt-1">
+                            <div class="flex items-baseline gap-1.5">
+                                <span id="metric-total-records-transferred" class="text-2xl lg:text-3xl font-extrabold font-mono tracking-tight text-emerald-700">0</span>
+                                <span class="text-[11px] text-emerald-600 font-bold uppercase">rows</span>
+                            </div>
+                            <span id="metric-history-executions-badge" class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px] font-mono shadow-2xs">0 runs</span>
+                        </div>
+
+                        <!-- Total Read and Total Write Prominently Displayed -->
+                        <div class="mt-2.5 grid grid-cols-2 gap-2 text-[11px]">
+                            <div class="bg-white/95 p-2 rounded-lg border border-blue-100 flex flex-col shadow-2xs">
+                                <span class="text-[9px] uppercase font-bold text-blue-600 tracking-wider flex items-center gap-1">
+                                    <i class="fas fa-file-import text-blue-500 text-[10px]"></i> Total Read
+                                </span>
+                                <span id="metric-total-read" class="font-mono font-bold text-blue-800 text-sm mt-0.5">0</span>
+                            </div>
+                            <div class="bg-white/95 p-2 rounded-lg border border-emerald-100 flex flex-col shadow-2xs">
+                                <span class="text-[9px] uppercase font-bold text-emerald-600 tracking-wider flex items-center gap-1">
+                                    <i class="fas fa-file-export text-emerald-500 text-[10px]"></i> Total Write
+                                </span>
+                                <span id="metric-total-written" class="font-mono font-bold text-emerald-800 text-sm mt-0.5">0</span>
+                            </div>
                         </div>
                     </div>
-                    <div class="mt-2 text-[10px] text-gray-400 font-mono truncate" id="metric-gc-info">GC: --</div>
+
+                    <div class="mt-2 pt-1.5 border-t border-gray-100 flex items-center justify-between text-[9px] text-gray-400 font-mono">
+                        <span id="metric-transferred-subtitle" class="truncate flex items-center gap-1 text-emerald-700 font-medium">
+                            <i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Batch Transaction Details
+                        </span>
+                        <span id="metric-total-tables-count" class="text-gray-500 font-sans font-medium text-[10px]">-- tables</span>
+                    </div>
                 </div>
 
                 <!-- Data Transfer Throughput -->
-                <div class="card p-4 border-l-4 border-l-amber-500">
-                    <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">Throughput Speed</span>
-                        <i class="fas fa-gauge-high text-amber-500 text-base"></i>
-                    </div>
-                    <div class="mt-2 flex items-baseline gap-2">
-                        <span id="metric-live-speed" class="text-2xl font-bold font-mono text-gray-900">0</span>
-                        <span class="text-xs text-gray-500 font-semibold">records / sec</span>
-                    </div>
-                    <div class="mt-2 text-xs text-gray-500 flex justify-between">
-                        <span>Total Written:</span>
-                        <span id="metric-total-written" class="font-mono font-bold text-gray-800">0</span>
+                <div class="card p-4 border-l-4 border-l-amber-500 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">Throughput Speed</span>
+                            <span class="w-7 h-7 rounded-lg bg-amber-50 text-amber-500 flex items-center justify-center text-sm shadow-xs border border-amber-100">
+                                <i class="fas fa-gauge-high"></i>
+                            </span>
+                        </div>
+                        <div class="mt-2 flex items-baseline gap-2">
+                            <span id="metric-live-speed" class="text-2xl font-bold font-mono text-gray-900">0</span>
+                            <span class="text-xs text-gray-500 font-semibold">rec / sec</span>
+                        </div>
+                        <div class="mt-2 text-xs text-gray-500 flex justify-between items-center py-1 px-2 bg-gray-50 rounded border border-gray-100">
+                            <span class="text-[11px] font-semibold text-gray-600">Streaming State:</span>
+                            <span id="metric-speed-state" class="font-mono font-bold text-amber-600 text-[11px]">IDLE</span>
+                        </div>
                     </div>
                     <div class="mt-2 text-[10px] text-gray-400 font-mono truncate" id="metric-speed-subtitle">Streaming speed rate</div>
                 </div>
 
                 <!-- System Summary & Uptime -->
-                <div class="card p-4 border-l-4 border-l-purple-500">
-                    <div class="flex items-center justify-between">
-                        <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">JVM &amp; Uptime</span>
-                        <i class="fas fa-clock text-purple-500 text-base"></i>
-                    </div>
-                    <div class="mt-2 flex items-baseline gap-2">
-                        <span id="metric-jvm-uptime" class="text-xl font-bold font-mono text-gray-900">--</span>
-                    </div>
-                    <div class="mt-2 text-xs text-gray-500 flex justify-between">
-                        <span>Java:</span>
-                        <span id="metric-java-ver" class="font-mono text-gray-800 font-semibold truncate max-w-[120px]">--</span>
-                    </div>
-                    <div class="mt-2 text-[10px] text-gray-400 font-mono truncate" id="metric-system-load">Load Avg: --</div>
-                </div>
-            </div>
-
-            <!-- ACTIVE RUNNING BATCH MONITOR (Visible during execution) -->
-            <div id="active-batch-monitor-card" class="hidden card p-6 border border-emerald-300 bg-emerald-50/40 space-y-4">
-                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div class="flex items-center gap-3">
-                        <div class="w-10 h-10 rounded-lg bg-emerald-100 text-bnp-emerald flex items-center justify-center text-lg animate-pulse">
-                            <i class="fas fa-bolt"></i>
+                <div class="card p-4 border-l-4 border-l-purple-500 flex flex-col justify-between">
+                    <div>
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold text-gray-500 uppercase tracking-wider">JVM &amp; System Uptime</span>
+                            <span class="w-7 h-7 rounded-lg bg-purple-50 text-purple-500 flex items-center justify-center text-sm shadow-xs border border-purple-100">
+                                <i class="fas fa-clock"></i>
+                            </span>
                         </div>
-                        <div>
-                            <div class="flex items-center gap-2">
-                                <h3 class="font-bold text-gray-900">Active Batch Ingestion in Progress</h3>
-                                <span id="active-job-id-badge" class="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-200 text-emerald-900 font-bold">Job #--</span>
-                            </div>
-                            <p class="text-xs text-gray-500 mt-0.5">Streaming XML chunks into database with isolated table savepoints.</p>
+                        <div class="mt-2 flex items-baseline gap-2">
+                            <span id="metric-jvm-uptime" class="text-xl font-bold font-mono text-gray-900">--</span>
+                        </div>
+                        <div class="mt-2 text-xs text-gray-500 flex justify-between items-center py-1 px-2 bg-gray-50 rounded border border-gray-100">
+                            <span class="text-[11px] font-semibold text-gray-600">Runtime:</span>
+                            <span id="metric-java-ver" class="font-mono text-gray-800 font-semibold truncate max-w-[130px]">--</span>
                         </div>
                     </div>
-                    <button type="button" id="btn-stop-active-job" class="btn text-xs py-1.5 px-3 bg-red-600 hover:bg-red-700 text-white font-bold">
-                        <i class="fas fa-stop mr-1.5"></i> Stop Batch Job
-                    </button>
-                </div>
-
-                <!-- Progress & Stats Bar -->
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-white p-3 rounded-lg border border-emerald-200 text-xs">
-                    <div>
-                        <div class="text-[10px] uppercase font-bold text-gray-400">Status</div>
-                        <div id="active-job-status" class="font-bold text-bnp-emerald font-mono">RUNNING</div>
-                    </div>
-                    <div>
-                        <div class="text-[10px] uppercase font-bold text-gray-400">Total Read</div>
-                        <div id="active-job-read" class="font-bold text-gray-800 font-mono">0</div>
-                    </div>
-                    <div>
-                        <div class="text-[10px] uppercase font-bold text-gray-400">Total Committed</div>
-                        <div id="active-job-written" class="font-bold text-gray-800 font-mono">0</div>
-                    </div>
-                    <div>
-                        <div class="text-[10px] uppercase font-bold text-gray-400">Errors / Skips</div>
-                        <div id="active-job-errors" class="font-bold text-red-600 font-mono">0</div>
-                    </div>
+                    <div class="mt-2 text-[10px] text-gray-400 font-mono truncate" id="metric-process-cpu">Process CPU: --</div>
                 </div>
             </div>
 
@@ -1197,15 +1216,70 @@
                 </div>
             </div>
 
-            <!-- SPRING BATCH EXECUTION HISTORY TABLE -->
+            <!-- SPRING BATCH EXECUTION HISTORY TABLE & STATUS VIEWER -->
             <div class="card overflow-hidden">
-                <div class="p-4 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                <div class="p-4 bg-gray-50 border-b border-gray-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
                     <div class="flex items-center gap-2">
                         <i class="fas fa-history text-bnp-emerald"></i>
                         <h4 class="font-bold text-gray-800 text-sm">Spring Batch Execution History</h4>
+                        <span id="history-count-badge" class="px-2.5 py-0.5 rounded text-xs font-mono font-bold bg-slate-200 text-slate-700">0 Executions</span>
                     </div>
-                    <span id="history-count-badge" class="px-2.5 py-0.5 rounded text-xs font-mono font-bold bg-slate-200 text-slate-700">0 Executions</span>
+                    <!-- Dropdown to show history of the Spring Batch Job and view status -->
+                    <div class="flex items-center gap-2">
+                        <label for="history-job-dropdown" class="text-xs font-bold text-gray-600 whitespace-nowrap flex items-center gap-1">
+                            <i class="fas fa-filter text-bnp-emerald"></i> View Job Status:
+                        </label>
+                        <select id="history-job-dropdown" class="form-select text-xs py-1.5 pl-3 pr-8 font-mono font-semibold bg-white border border-gray-300 rounded-lg shadow-2xs focus:ring-emerald-500 focus:border-emerald-500 max-w-sm truncate cursor-pointer">
+                            <option value="ALL">All Executions</option>
+                        </select>
+                    </div>
                 </div>
+
+                <!-- Selected Job Status Details Panel -->
+                <div id="selected-job-status-panel" class="hidden p-4 bg-gradient-to-r from-slate-50 via-emerald-50/20 to-slate-50 border-b border-slate-200 text-xs">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200/80">
+                        <div class="flex items-center gap-3">
+                            <span id="status-panel-job-id" class="px-2.5 py-1 rounded-md font-mono font-bold text-xs bg-slate-800 text-white shadow-2xs">Job #--</span>
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <h5 id="status-panel-job-name" class="font-bold text-gray-900 text-sm truncate max-w-xs sm:max-w-md">--</h5>
+                                    <span id="status-panel-status-badge" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-700">UNKNOWN</span>
+                                </div>
+                                <div class="text-[11px] text-gray-500 mt-0.5 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono">
+                                    <span>Started: <span id="status-panel-start" class="text-gray-700 font-semibold">--</span></span>
+                                    <span>Ended: <span id="status-panel-end" class="text-gray-700 font-semibold">--</span></span>
+                                    <span>Duration: <span id="status-panel-duration" class="text-gray-900 font-bold">--</span></span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button type="button" id="btn-stop-active-job" class="hidden btn text-xs py-1.5 px-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded shadow-2xs">
+                                <i class="fas fa-stop mr-1.5"></i> Stop Batch Job
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Metrics bar for selected job -->
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+                        <div class="bg-white p-2.5 rounded-lg border border-slate-200 shadow-2xs">
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Total Read</div>
+                            <div id="status-panel-read" class="font-bold text-blue-700 font-mono text-sm mt-0.5">0</div>
+                        </div>
+                        <div class="bg-white p-2.5 rounded-lg border border-slate-200 shadow-2xs">
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Total Written</div>
+                            <div id="status-panel-written" class="font-bold text-emerald-700 font-mono text-sm mt-0.5">0</div>
+                        </div>
+                        <div class="bg-white p-2.5 rounded-lg border border-slate-200 shadow-2xs">
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Errors / Skips</div>
+                            <div id="status-panel-errors" class="font-bold text-red-600 font-mono text-sm mt-0.5">0</div>
+                        </div>
+                        <div class="bg-white p-2.5 rounded-lg border border-slate-200 shadow-2xs">
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Target Tables</div>
+                            <div id="status-panel-tables" class="font-bold text-gray-800 font-mono text-xs mt-0.5 truncate">--</div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200 text-left text-xs">
                         <thead class="bg-gray-100 text-gray-600 font-bold uppercase tracking-wider">
@@ -1222,7 +1296,7 @@
                                 <th class="px-4 py-3">Errors</th>
                             </tr>
                         </thead>
-                        <tbody id="execution-history-tbody" class="divide-y divide-gray-200 bg-white font-mono">
+                        <tbody id="execution-history-tbody" class="bg-white font-mono">
                             <!-- Populated dynamically -->
                         </tbody>
                     </table>

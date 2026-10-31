@@ -4,6 +4,7 @@ public class FieldMapping {
     private String xmlField;
     private String targetTable;
     private String targetColumn;
+    @com.fasterxml.jackson.annotation.JsonAlias({"transformation", "transform"})
     private String transform = "NONE";
 
     public FieldMapping() {}
@@ -32,4 +33,7 @@ public class FieldMapping {
 
     public String getTransform() { return transform; }
     public void setTransform(String transform) { this.transform = transform; }
+
+    public String getTransformation() { return transform; }
+    public void setTransformation(String transformation) { this.transform = transformation; }
 }

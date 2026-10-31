@@ -65,6 +65,18 @@ public class XmlPreviewService {
         DataPreviewResponse response = new DataPreviewResponse();
         int limit = request.getPreviewLimit() > 0 ? request.getPreviewLimit() : 5;
         String rootTag = request.getRecordRootElement() != null ? request.getRecordRootElement() : "record";
+        String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
+        if (docRoot != null && !docRoot.trim().isEmpty()) {
+            if ("record".equalsIgnoreCase(rootTag)) {
+                boolean hasNonRecordTags = request.getMappings() != null && request.getMappings().stream().anyMatch(m -> {
+                    String f = m.getXmlField() != null ? m.getXmlField().toLowerCase() : "";
+                    return !f.startsWith("record/") && !f.startsWith("record/@") && !f.equals("record") && !f.equals("@record");
+                });
+                if (hasNonRecordTags && !docRoot.equalsIgnoreCase(rootTag)) {
+                    rootTag = docRoot;
+                }
+            }
+        }
 
         long fileSize = discoveryService.getFileSizeBytes(request.getSourceXmlPath());
         response.setFileSizeBytes(fileSize);
@@ -159,13 +171,18 @@ public class XmlPreviewService {
                             }
 
                             DatabaseRowPayload rowPayload = processor.process(xmlMap);
-                            if (rowPayload != null && !rowPayload.getMultiTablePayloads().isEmpty()) {
-                                for (Map.Entry<String, Map<String, Object>> entry : rowPayload.getMultiTablePayloads().entrySet()) {
+                            if (rowPayload != null && !rowPayload.getMultiTableRecords().isEmpty()) {
+                                for (Map.Entry<String, List<Map<String, Object>>> entry : rowPayload.getMultiTableRecords().entrySet()) {
                                     String tbl = entry.getKey();
-                                    Map<String, Object> cols = entry.getValue();
-
-                                    multiTableRows.computeIfAbsent(tbl, k -> new ArrayList<>()).add(cols);
-                                    multiTableCols.computeIfAbsent(tbl, k -> new LinkedHashSet<>()).addAll(cols.keySet());
+                                    List<Map<String, Object>> rows = entry.getValue();
+                                    if (rows != null && !rows.isEmpty()) {
+                                        for (Map<String, Object> cols : rows) {
+                                            if (multiTableRows.computeIfAbsent(tbl, k -> new ArrayList<>()).size() < limit) {
+                                                multiTableRows.get(tbl).add(cols);
+                                                multiTableCols.computeIfAbsent(tbl, k -> new LinkedHashSet<>()).addAll(cols.keySet());
+                                            }
+                                        }
+                                    }
                                 }
                                 recordsProcessed++;
                             }

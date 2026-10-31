@@ -16,8 +16,20 @@ public class JobTelemetryResponse {
     private String endTime;
     private String message;
     private List<MigrationErrorRecord> recentErrors = new ArrayList<>();
+    private List<String> targetTables = new ArrayList<>();
+    private java.util.Map<String, Long> tableWriteCounts = new java.util.LinkedHashMap<>();
+    private java.util.Map<String, Long> tableErrorCounts = new java.util.LinkedHashMap<>();
 
     public JobTelemetryResponse() {}
+
+    public List<String> getTargetTables() { return targetTables; }
+    public void setTargetTables(List<String> targetTables) { this.targetTables = targetTables != null ? targetTables : new ArrayList<>(); }
+
+    public java.util.Map<String, Long> getTableWriteCounts() { return tableWriteCounts; }
+    public void setTableWriteCounts(java.util.Map<String, Long> tableWriteCounts) { this.tableWriteCounts = tableWriteCounts != null ? tableWriteCounts : new java.util.LinkedHashMap<>(); }
+
+    public java.util.Map<String, Long> getTableErrorCounts() { return tableErrorCounts; }
+    public void setTableErrorCounts(java.util.Map<String, Long> tableErrorCounts) { this.tableErrorCounts = tableErrorCounts != null ? tableErrorCounts : new java.util.LinkedHashMap<>(); }
 
     public String getMessage() { return message; }
     public void setMessage(String message) { this.message = message; }

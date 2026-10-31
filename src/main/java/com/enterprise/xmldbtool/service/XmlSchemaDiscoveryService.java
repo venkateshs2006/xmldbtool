@@ -197,6 +197,25 @@ public class XmlSchemaDiscoveryService {
         return rootAttrs;
     }
 
+    public String detectDocumentRootElement(String sourcePath) {
+        if (sourcePath == null || sourcePath.trim().isEmpty()) return null;
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+        factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+        try (BufferedReader reader = openReaderForSource(sourcePath)) {
+            XMLStreamReader streamReader = factory.createXMLStreamReader(reader);
+            while (streamReader.hasNext()) {
+                int event = streamReader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    return streamReader.getLocalName();
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("Could not detect document root element from {}: {}", sourcePath, ex.getMessage());
+        }
+        return null;
+    }
+
     private BufferedReader openReaderForSource(String sourcePath) throws Exception {
         if (sourcePath == null || sourcePath.trim().isEmpty()) {
             throw new IllegalArgumentException("XML source path cannot be blank.");

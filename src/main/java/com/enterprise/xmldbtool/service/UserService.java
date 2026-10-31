@@ -57,9 +57,15 @@ public class UserService {
         }
 
         String hash = AppSchemaInitializer.hashPassword(password);
-        String sql = "SELECT * FROM app_users WHERE LOWER(username) = LOWER(?) AND password_hash = ?";
+        String sql = "SELECT * FROM users WHERE LOWER(username) = LOWER(?) AND password_hash = ?";
 
-        List<User> list = jdbcTemplate.query(sql, userRowMapper, username.trim(), hash);
+        List<User> list;
+        try {
+            list = jdbcTemplate.query(sql, userRowMapper, username.trim(), hash);
+        } catch (Exception ex) {
+            list = jdbcTemplate.query("SELECT * FROM app_users WHERE LOWER(username) = LOWER(?) AND password_hash = ?", userRowMapper, username.trim(), hash);
+        }
+
         if (list.isEmpty()) {
             return new LoginResponse(false, "Invalid username or password.", null, null);
         }
@@ -92,11 +98,20 @@ public class UserService {
     }
 
     public List<User> getAllUsers() {
-        return jdbcTemplate.query("SELECT * FROM app_users ORDER BY id ASC", userRowMapper);
+        try {
+            return jdbcTemplate.query("SELECT * FROM users ORDER BY id ASC", userRowMapper);
+        } catch (Exception ex) {
+            return jdbcTemplate.query("SELECT * FROM app_users ORDER BY id ASC", userRowMapper);
+        }
     }
 
     public User getUserById(Long id) {
-        List<User> list = jdbcTemplate.query("SELECT * FROM app_users WHERE id = ?", userRowMapper, id);
+        List<User> list;
+        try {
+            list = jdbcTemplate.query("SELECT * FROM users WHERE id = ?", userRowMapper, id);
+        } catch (Exception ex) {
+            list = jdbcTemplate.query("SELECT * FROM app_users WHERE id = ?", userRowMapper, id);
+        }
         return list.isEmpty() ? null : list.get(0);
     }
 
@@ -109,7 +124,7 @@ public class UserService {
         }
 
         Integer count = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM app_users WHERE LOWER(username) = LOWER(?)",
+                "SELECT COUNT(*) FROM users WHERE LOWER(username) = LOWER(?)",
                 Integer.class,
                 user.getUsername().trim()
         );
@@ -121,7 +136,7 @@ public class UserService {
         String hash = AppSchemaInitializer.hashPassword(user.getPassword());
 
         jdbcTemplate.update(
-                "INSERT INTO app_users (username, password_hash, full_name, email, role, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (username, password_hash, full_name, email, role, enabled) VALUES (?, ?, ?, ?, ?, ?)",
                 user.getUsername().trim(),
                 hash,
                 user.getFullName(),
@@ -130,8 +145,20 @@ public class UserService {
                 user.isEnabled()
         );
 
+        try {
+            jdbcTemplate.update(
+                    "INSERT INTO app_users (username, password_hash, full_name, email, role, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+                    user.getUsername().trim(),
+                    hash,
+                    user.getFullName(),
+                    user.getEmail(),
+                    role,
+                    user.isEnabled()
+            );
+        } catch (Exception ignored) {}
+
         return jdbcTemplate.queryForObject(
-                "SELECT * FROM app_users WHERE LOWER(username) = LOWER(?)",
+                "SELECT * FROM users WHERE LOWER(username) = LOWER(?)",
                 userRowMapper,
                 user.getUsername().trim()
         );
@@ -151,14 +178,26 @@ public class UserService {
         if (user.getPassword() != null && !user.getPassword().trim().isEmpty()) {
             String newHash = AppSchemaInitializer.hashPassword(user.getPassword().trim());
             jdbcTemplate.update(
-                    "UPDATE app_users SET full_name = ?, email = ?, role = ?, enabled = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "UPDATE users SET full_name = ?, email = ?, role = ?, enabled = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     fullName, email, role, enabled, newHash, id
             );
+            try {
+                jdbcTemplate.update(
+                        "UPDATE app_users SET full_name = ?, email = ?, role = ?, enabled = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        fullName, email, role, enabled, newHash, id
+                );
+            } catch (Exception ignored) {}
         } else {
             jdbcTemplate.update(
-                    "UPDATE app_users SET full_name = ?, email = ?, role = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "UPDATE users SET full_name = ?, email = ?, role = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     fullName, email, role, enabled, id
             );
+            try {
+                jdbcTemplate.update(
+                        "UPDATE app_users SET full_name = ?, email = ?, role = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        fullName, email, role, enabled, id
+                );
+            } catch (Exception ignored) {}
         }
 
         return getUserById(id);
@@ -170,7 +209,10 @@ public class UserService {
         if ("admin".equalsIgnoreCase(existing.getUsername())) {
             throw new IllegalArgumentException("The primary administrator account 'admin' cannot be deleted.");
         }
-        int rows = jdbcTemplate.update("DELETE FROM app_users WHERE id = ?", id);
+        int rows = jdbcTemplate.update("DELETE FROM users WHERE id = ?", id);
+        try {
+            jdbcTemplate.update("DELETE FROM app_users WHERE id = ?", id);
+        } catch (Exception ignored) {}
         return rows > 0;
     }
 }

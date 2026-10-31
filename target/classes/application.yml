@@ -5,23 +5,33 @@ spring:
   application:
     name: xmldbtool
 
-  # Primary Datasource for Spring Batch metadata (Embedded H2)
+  # Primary Datasource for Spring Batch metadata (PostgreSQL)
   datasource:
-    url: jdbc:h2:mem:batchdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
-    driver-class-name: org.h2.Driver
-    username: sa
-    password: ""
-  h2:
-    console:
-      enabled: true
-      path: /h2-console
+    url: jdbc:postgresql://localhost:5432/v5_batch_db
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+    # Batch Metadata Database Configuration (Primary)
+    batchdb:
+      url: jdbc:postgresql://localhost:5432/v5_batch_db
+      username: postgres
+      password: postgres
+      driver-class-name: org.postgresql.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 2
 
-  # Spring Batch initialization
+  # Spring Batch Configuration
   batch:
     jdbc:
       initialize-schema: always
+      schema: classpath:batch-schema.sql
+      table-prefix: BATCH_
     job:
-      enabled: false # Do not auto-run batch jobs on startup
+      enabled: false  
 
   servlet:
     multipart:
