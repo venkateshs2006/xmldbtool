@@ -4,6 +4,7 @@ import com.enterprise.xmldbtool.batch.DatabaseErrorSkipListener;
 import com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter;
 import com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor;
 import com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller;
+import com.enterprise.xmldbtool.batch.HeaderReferenceIngestionTasklet;
 import com.enterprise.xmldbtool.model.DatabaseRowPayload;
 import com.enterprise.xmldbtool.model.JobLaunchRequest;
 import com.enterprise.xmldbtool.model.JobLaunchResponse;
@@ -35,8 +36,12 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
 import java.io.File;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -102,24 +107,31 @@ public class DynamicBatchJobService {
             DataSource targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
 
             // 1. StaxEventItemReader with effective fragment root element resolution
+            // CRUCIAL FOR 10GB FILES: Never set fragmentRoot to document root (e.g. PFA),
+            // which buffers the entire 10GB file into one item and exhausts heap memory.
+            // Stream by repeating record item fragments (e.g. Person, record).
             String effectiveFragmentRoot = request.getRecordRootElement();
             String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
-            if (docRoot != null && !docRoot.trim().isEmpty()) {
-                if (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty() || "record".equalsIgnoreCase(effectiveFragmentRoot)) {
-                    boolean hasNonRecordTags = request.getMappings() != null && request.getMappings().stream().anyMatch(m -> {
-                        String f = m.getXmlField() != null ? m.getXmlField().toLowerCase() : "";
-                        return !f.startsWith("record/") && !f.startsWith("record/@") && !f.equals("record") && !f.equals("@record");
-                    });
-                    if (hasNonRecordTags && !docRoot.equalsIgnoreCase(effectiveFragmentRoot)) {
-                        log.info("Auto-resolving fragmentRootElementName from '{}' to document root '{}' to capture all mapped collections.",
-                                effectiveFragmentRoot, docRoot);
-                        effectiveFragmentRoot = docRoot;
-                    }
+            if (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty() || "record".equalsIgnoreCase(effectiveFragmentRoot)) {
+                String detectedRoot = discoveryService.detectRecordRootElement(request.getSourceXmlPath());
+                if (detectedRoot != null && !detectedRoot.trim().isEmpty() && !detectedRoot.equalsIgnoreCase(docRoot)) {
+                    effectiveFragmentRoot = detectedRoot;
                 }
             }
             if (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty()) {
-                effectiveFragmentRoot = docRoot != null ? docRoot : "record";
+                effectiveFragmentRoot = "record";
             }
+            // Protect against document root override
+            if (docRoot != null && docRoot.equalsIgnoreCase(effectiveFragmentRoot)) {
+                String altRoot = discoveryService.detectRecordRootElement(request.getSourceXmlPath());
+                if (altRoot != null && !altRoot.equalsIgnoreCase(docRoot)) {
+                    effectiveFragmentRoot = altRoot;
+                } else {
+                    effectiveFragmentRoot = "Person";
+                }
+            }
+            log.info("Configured StaxEventItemReader chunk streaming fragmentRootElementName='{}' (docRoot='{}')",
+                    effectiveFragmentRoot, docRoot);
 
             Resource xmlResource = resolveXmlResource(request.getSourceXmlPath());
             StaxEventItemReader<Map<String, Object>> reader = new StaxEventItemReader<>();
@@ -128,7 +140,7 @@ public class DynamicBatchJobService {
             reader.setFragmentRootElementName(effectiveFragmentRoot);
             reader.setUnmarshaller(dynamicXmlUnmarshaller);
 
-            // Extract document root attributes (e.g. catalog/@exportId, catalog/@version)
+            // Extract document root attributes (e.g. catalog/@exportId, PFA/@date)
             Map<String, Object> rootAttrs = discoveryService.extractDocumentRootAttributes(
                     request.getSourceXmlPath(),
                     effectiveFragmentRoot
@@ -158,8 +170,8 @@ public class DynamicBatchJobService {
 
             int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
 
-            // Build Step with .faultTolerant().skipLimit(10000)
-            Step step = new StepBuilder("dynamicIngestStep", jobRepository)
+            // Build Records Streaming Step with .faultTolerant().skipLimit(10000)
+            Step recordsStep = new StepBuilder("dynamicIngestStep", jobRepository)
                     .<Map<String, Object>, DatabaseRowPayload>chunk(chunkSize, transactionManager)
                     .reader(reader)
                     .processor(processor)
@@ -172,10 +184,41 @@ public class DynamicBatchJobService {
                     .listener(writer)
                     .build();
 
-            // Build Job
-            Job job = new JobBuilder(jobName, jobRepository)
-                    .start(step)
-                    .build();
+            // Check if header lookup / reference tables (e.g. CountryList, OccupationList) are mapped
+            final String finalRecordRoot = effectiveFragmentRoot;
+            boolean hasHeaderTables = request.getMappings() != null && request.getMappings().stream().anyMatch(m -> {
+                String tbl = m.getTargetTable();
+                if (tbl == null || tbl.trim().isEmpty()) return false;
+                String norm = tbl.trim().toLowerCase();
+                return norm.endsWith("list") || norm.endsWith("lists")
+                        || (!norm.equals("person") && !norm.startsWith("person")
+                            && !norm.equals(finalRecordRoot.toLowerCase()));
+            });
+
+            // Build Job: If header reference tables are present, stream header lists before record chunks
+            Job job;
+            if (hasHeaderTables) {
+                log.info("Detected header reference tables in mappings; attaching HeaderReferenceIngestionTasklet before streaming records.");
+                HeaderReferenceIngestionTasklet headerTasklet = new HeaderReferenceIngestionTasklet(
+                        request.getSourceXmlPath(),
+                        effectiveFragmentRoot,
+                        request.getMappings(),
+                        targetDataSource
+                );
+                Step headerStep = new StepBuilder("headerReferenceStep", jobRepository)
+                        .tasklet(headerTasklet, transactionManager)
+                        .listener(headerTasklet)
+                        .build();
+
+                job = new JobBuilder(jobName, jobRepository)
+                        .start(headerStep)
+                        .next(recordsStep)
+                        .build();
+            } else {
+                job = new JobBuilder(jobName, jobRepository)
+                        .start(recordsStep)
+                        .build();
+            }
 
             String allTables = (tableOrder != null && !tableOrder.isEmpty())
                     ? String.join(", ", tableOrder)
@@ -288,9 +331,51 @@ public class DynamicBatchJobService {
         // Retrieve recent errors from Step listener
         DatabaseErrorSkipListener listener = skipListenerMap.get(jobExecutionId);
         if (listener != null) {
-            telemetry.setRecentErrors(listener.getRecentErrors());
+            telemetry.setRecentErrors(new ArrayList<>(listener.getRecentErrors()));
             telemetry.setTableErrorCounts(listener.getTableErrorCounts());
             totalErrors += listener.getTableErrorCount();
+        }
+
+        // Collect fatal job failure exceptions & step failure exceptions
+        List<Throwable> allExceptions = new ArrayList<>(execution.getAllFailureExceptions());
+        for (StepExecution step : execution.getStepExecutions()) {
+            allExceptions.addAll(step.getFailureExceptions());
+        }
+
+        if (!allExceptions.isEmpty() || execution.getStatus() == BatchStatus.FAILED) {
+            StringBuilder errorSummary = new StringBuilder();
+            for (Throwable t : allExceptions) {
+                Throwable cause = t;
+                while (cause.getCause() != null && cause.getCause() != cause) {
+                    cause = cause.getCause();
+                }
+                String msg = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getSimpleName();
+                if (!errorSummary.toString().contains(msg)) {
+                    if (errorSummary.length() > 0) errorSummary.append(" | ");
+                    errorSummary.append(cause.getClass().getSimpleName()).append(": ").append(msg);
+                }
+
+                StringWriter sw = new StringWriter();
+                cause.printStackTrace(new PrintWriter(sw));
+                String trace = sw.toString();
+                if (trace.length() > 800) trace = trace.substring(0, 800) + "...";
+
+                MigrationErrorRecord fatalRecord = new MigrationErrorRecord(
+                        jobExecutionId,
+                        "dynamicIngestStep",
+                        "FATAL_JOB_FAILURE",
+                        "{\"errorClass\": \"" + cause.getClass().getName() + "\", \"rootCause\": \"" + msg.replace("\"", "\\\"").replace("\n", " ") + "\"}",
+                        cause.getClass().getSimpleName() + ": " + msg,
+                        LocalDateTime.now().format(dtf)
+                );
+                telemetry.getRecentErrors().add(0, fatalRecord);
+            }
+
+            if (errorSummary.length() == 0 && execution.getExitStatus() != null) {
+                errorSummary.append(execution.getExitStatus().getExitDescription());
+            }
+            telemetry.setMessage(errorSummary.toString());
+            totalErrors = Math.max(1, totalErrors);
         }
 
         telemetry.setTotalRead(totalRead);
@@ -299,6 +384,15 @@ public class DynamicBatchJobService {
 
         // Throughput calculation (records/second)
         long now = System.currentTimeMillis();
+        long elapsedSec = 1;
+        if (execution.getStartTime() != null) {
+            LocalDateTime start = execution.getStartTime();
+            LocalDateTime end = execution.getEndTime() != null ? execution.getEndTime() : LocalDateTime.now();
+            long d = Duration.between(start, end).getSeconds();
+            if (d > 0) elapsedSec = d;
+        }
+        double avgThroughput = totalWritten / (double) elapsedSec;
+
         Long prevTime = previousPollTimestamps.put(jobExecutionId, now);
         Long prevCount = previousWriteCounts.put(jobExecutionId, totalWritten);
 
@@ -310,7 +404,16 @@ public class DynamicBatchJobService {
                 recordsPerSec = deltaRecords / deltaSec;
             }
         }
-        telemetry.setRecordsPerSecond(recordsPerSec);
+
+        if (execution.getStatus() == BatchStatus.COMPLETED || execution.getStatus() == BatchStatus.FAILED
+                || execution.getStatus() == BatchStatus.STOPPED) {
+            telemetry.setRecordsPerSecond(Math.round(avgThroughput * 10.0) / 10.0);
+        } else {
+            if (recordsPerSec <= 0.0 && totalWritten > 0) {
+                recordsPerSec = avgThroughput;
+            }
+            telemetry.setRecordsPerSecond(Math.round(recordsPerSec * 10.0) / 10.0);
+        }
 
         return telemetry;
     }
@@ -424,6 +527,21 @@ public class DynamicBatchJobService {
                         }
                         if (exec.getEndTime() != null) {
                             summary.setEndTime(exec.getEndTime().format(dtf));
+                        }
+
+                        // Collect failure message for history table
+                        List<Throwable> allExceptions = new ArrayList<>(exec.getAllFailureExceptions());
+                        for (StepExecution step : exec.getStepExecutions()) {
+                            allExceptions.addAll(step.getFailureExceptions());
+                        }
+                        if (!allExceptions.isEmpty()) {
+                            Throwable root = allExceptions.get(0);
+                            while (root.getCause() != null && root.getCause() != root) {
+                                root = root.getCause();
+                            }
+                            summary.setErrorMessage(root.getClass().getSimpleName() + ": " + (root.getMessage() != null ? root.getMessage() : "Execution failed"));
+                        } else if (exec.getExitStatus() != null && !exec.getExitStatus().getExitDescription().isEmpty()) {
+                            summary.setErrorMessage(exec.getExitStatus().getExitDescription());
                         }
 
                         summaries.add(summary);

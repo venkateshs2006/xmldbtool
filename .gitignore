@@ -6,6 +6,7 @@ opencode.exe
 logs/
 
 # Maven
+.mvn-home/
 target/
 pom.xml.tag
 pom.xml.releaseBackup

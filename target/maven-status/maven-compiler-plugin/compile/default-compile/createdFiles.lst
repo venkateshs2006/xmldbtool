@@ -7,6 +7,7 @@ com/enterprise/xmldbtool/service/XmlPreviewService.class
 com/enterprise/xmldbtool/model/JobLaunchResponse.class
 com/enterprise/xmldbtool/model/DatabaseRowPayload.class
 com/enterprise/xmldbtool/config/AppSchemaInitializer.class
+com/enterprise/xmldbtool/batch/HeaderReferenceIngestionTasklet.class
 com/enterprise/xmldbtool/model/JobLaunchRequest.class
 com/enterprise/xmldbtool/service/JobConfigService$1$1.class
 com/enterprise/xmldbtool/config/DatabaseConfig.class

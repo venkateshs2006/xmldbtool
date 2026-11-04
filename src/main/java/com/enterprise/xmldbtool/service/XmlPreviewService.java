@@ -64,17 +64,13 @@ public class XmlPreviewService {
     public DataPreviewResponse generatePreview(DataPreviewRequest request) {
         DataPreviewResponse response = new DataPreviewResponse();
         int limit = request.getPreviewLimit() > 0 ? request.getPreviewLimit() : 5;
-        String rootTag = request.getRecordRootElement() != null ? request.getRecordRootElement() : "record";
-        String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
-        if (docRoot != null && !docRoot.trim().isEmpty()) {
-            if ("record".equalsIgnoreCase(rootTag)) {
-                boolean hasNonRecordTags = request.getMappings() != null && request.getMappings().stream().anyMatch(m -> {
-                    String f = m.getXmlField() != null ? m.getXmlField().toLowerCase() : "";
-                    return !f.startsWith("record/") && !f.startsWith("record/@") && !f.equals("record") && !f.equals("@record");
-                });
-                if (hasNonRecordTags && !docRoot.equalsIgnoreCase(rootTag)) {
-                    rootTag = docRoot;
-                }
+        String rootTag = request.getRecordRootElement();
+        if (rootTag == null || rootTag.trim().isEmpty() || "record".equalsIgnoreCase(rootTag)) {
+            String detected = discoveryService.detectRecordRootElement(request.getSourceXmlPath());
+            if (detected != null && !detected.trim().isEmpty()) {
+                rootTag = detected;
+            } else {
+                rootTag = "record";
             }
         }
 

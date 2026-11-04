@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+    batchdb:
+      url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+      driver-class-name: org.h2.Driver
+      username: sa
+      password: ""
+  batch:
+    jdbc:
+      initialize-schema: always
+      schema: classpath:org/springframework/batch/core/schema-h2.sql
+    job:
+      enabled: false
+

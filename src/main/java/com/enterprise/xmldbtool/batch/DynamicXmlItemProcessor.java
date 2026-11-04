@@ -209,33 +209,63 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             return Collections.emptyList();
         }
 
-        // 1. Check if any mapping has an explicit tag prefix in xmlField (e.g. "countrylist/@id", "person/@status", "entity/@id")
-        for (FieldMapping m : tblMappings) {
-            String f = m.getXmlField();
-            if (f != null && f.contains("/")) {
-                String tag = f.substring(0, f.indexOf("/")).toLowerCase().trim();
-                Object list = xmlRecord.get("_entities_" + tag);
-                if (list instanceof List<?> l && !l.isEmpty()) {
-                    return (List<Map<String, Object>>) list;
-                }
-            }
-        }
-
-        // 2. Check by exact table name
         String normTable = tableName.toLowerCase().trim();
+        String singular = DynamicXmlUnmarshaller.singularize(normTable);
+
+        // 1. Check exact table name or singular in _entities_*
         Object list = xmlRecord.get("_entities_" + normTable);
         if (list instanceof List<?> l && !l.isEmpty()) {
             return (List<Map<String, Object>>) list;
         }
-
-        // 3. Check by singular table name
-        String singular = DynamicXmlUnmarshaller.singularize(normTable);
         list = xmlRecord.get("_entities_" + singular);
         if (list instanceof List<?> l && !l.isEmpty()) {
             return (List<Map<String, Object>>) list;
         }
 
-        // 4. Fuzzy match against any _entities_* keys in xmlRecord
+        // 2. If table is main entity (e.g. Person, record) and no direct _entities_* was found, it's a single record
+        if (normTable.equals("person") || normTable.equals("record")) {
+            return Collections.emptyList();
+        }
+
+        // 3. Strip entity prefix (e.g. "person_name" or "personname" -> "name", "role", "date")
+        String stripped = normTable.replaceFirst("^person_?", "");
+        if (!stripped.isEmpty() && !stripped.equals(normTable)) {
+            list = xmlRecord.get("_entities_" + stripped);
+            if (list instanceof List<?> l && !l.isEmpty()) {
+                return (List<Map<String, Object>>) list;
+            }
+            // Check composite child entities (e.g. namevalue for personname, occtitle for personrole)
+            for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                if (entry.getKey().startsWith("_entities_") && entry.getValue() instanceof List<?> l && !l.isEmpty()) {
+                    String entTag = entry.getKey().substring("_entities_".length());
+                    if (entTag.contains(stripped) || (stripped.equals("name") && entTag.equals("namevalue"))
+                            || (stripped.equals("role") && entTag.equals("occtitle"))
+                            || (stripped.equals("date") && entTag.equals("datevalue"))
+                            || (stripped.equals("country") && entTag.equals("countryvalue"))
+                            || (stripped.equals("idnumber") && (entTag.equals("idvalue") || entTag.equals("id")))
+                            || (stripped.equals("sanctionsreference") && entTag.equals("reference"))) {
+                        return (List<Map<String, Object>>) entry.getValue();
+                    }
+                }
+            }
+        }
+
+        // 4. Check if any mapping has an explicit tag prefix that corresponds to this child table
+        for (FieldMapping m : tblMappings) {
+            String f = m.getXmlField();
+            if (f != null && !f.trim().isEmpty()) {
+                String tag = f.contains("/") ? f.substring(0, f.indexOf("/")).toLowerCase().trim() : f.toLowerCase().trim();
+                if (tag.startsWith("@")) tag = tag.substring(1);
+                if (normTable.contains(tag) || tag.contains(normTable) || (!stripped.isEmpty() && (stripped.contains(tag) || tag.contains(stripped)))) {
+                    list = xmlRecord.get("_entities_" + tag);
+                    if (list instanceof List<?> l && !l.isEmpty()) {
+                        return (List<Map<String, Object>>) list;
+                    }
+                }
+            }
+        }
+
+        // 5. Fuzzy match against any _entities_* keys in xmlRecord
         for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
             if (entry.getKey().startsWith("_entities_") && entry.getValue() instanceof List<?> l && !l.isEmpty()) {
                 String entTag = entry.getKey().substring("_entities_".length());

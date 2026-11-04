@@ -43,7 +43,9 @@ const AppState = {
     activeJobExecutionId: null,
     telemetryPollingTimer: null,
     systemMetricsTimer: null,
-    pollIntervalMs: 3000,
+    pollIntervalMs: 1000,
+    isLivePollingPaused: false,
+    peakThroughput: 0,
 
     // Cached Job Configs & History
     savedJobs: [],
@@ -66,6 +68,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initStepHandlers();
     initJobListHandlers();
     initUserMaintenanceHandlers();
+    initExecutionSummaryHandlers();
     initCharts();
 
     // Check existing session
@@ -219,10 +222,9 @@ function switchPage(pageName) {
     document.querySelectorAll('.nav-tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.app-page').forEach(p => p.classList.add('hidden'));
 
-    // Clear system metrics timer if moving away from execution summary
-    if (pageName !== 'execution-summary' && AppState.systemMetricsTimer) {
-        clearInterval(AppState.systemMetricsTimer);
-        AppState.systemMetricsTimer = null;
+    // Clear live telemetry polling if moving away from execution summary
+    if (pageName !== 'execution-summary') {
+        stopUnifiedLiveTelemetryEngine();
     }
 
     if (pageName === 'schedule') {
@@ -235,9 +237,7 @@ function switchPage(pageName) {
     } else if (pageName === 'execution-summary') {
         document.getElementById('nav-btn-execution-summary').classList.add('active');
         document.getElementById('page-execution-summary').classList.remove('hidden');
-        loadSystemMetrics();
-        loadExecutionHistory();
-        startSystemMetricsPolling();
+        startUnifiedLiveTelemetryEngine();
     } else if (pageName === 'users') {
         document.getElementById('nav-btn-users').classList.add('active');
         document.getElementById('page-users').classList.remove('hidden');
@@ -1609,11 +1609,144 @@ async function deleteJobConfig(jobId, jobName = '') {
 }
 
 // =========================================================================
-// PAGE 3: EXECUTION SUMMARY & HARDWARE TELEMETRY
+// PAGE 3: EXECUTION SUMMARY & HARDWARE TELEMETRY (Live 1s Polling & Diagnostics)
 // =========================================================================
-function startSystemMetricsPolling() {
-    if (AppState.systemMetricsTimer) clearInterval(AppState.systemMetricsTimer);
-    AppState.systemMetricsTimer = setInterval(loadSystemMetrics, 3000);
+
+function initExecutionSummaryHandlers() {
+    // 1. Manual Refresh Button
+    const btnRefresh = document.getElementById('btn-refresh-history');
+    if (btnRefresh) {
+        btnRefresh.addEventListener('click', async () => {
+            const icon = btnRefresh.querySelector('.fa-sync-alt');
+            if (icon) icon.classList.add('fa-spin');
+            await runLiveTelemetryCycle();
+            setTimeout(() => { if (icon) icon.classList.remove('fa-spin'); }, 500);
+            showToast('Metrics and execution history refreshed.', 'info');
+        });
+    }
+
+    // 2. Pause / Resume Live Polling Toggle
+    const btnTogglePolling = document.getElementById('btn-toggle-telemetry-polling');
+    if (btnTogglePolling) {
+        btnTogglePolling.addEventListener('click', () => {
+            AppState.isLivePollingPaused = !AppState.isLivePollingPaused;
+            const icon = document.getElementById('icon-toggle-polling');
+            const label = document.getElementById('label-toggle-polling');
+            const indicator = document.getElementById('live-telemetry-indicator');
+            const indicatorText = document.getElementById('live-indicator-text');
+
+            if (AppState.isLivePollingPaused) {
+                if (icon) icon.className = 'fas fa-play text-emerald-500';
+                if (label) label.textContent = 'Resume Live';
+                if (indicator) {
+                    indicator.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-gray-100 text-gray-600 border border-gray-300 shadow-2xs';
+                }
+                if (indicatorText) indicatorText.textContent = 'PAUSED';
+                showToast('Live telemetry polling paused.', 'info');
+            } else {
+                if (icon) icon.className = 'fas fa-pause text-amber-500';
+                if (label) label.textContent = 'Pause Live';
+                if (indicator) {
+                    indicator.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-2xs';
+                }
+                if (indicatorText) indicatorText.textContent = 'LIVE TELEMETRY (1s)';
+                runLiveTelemetryCycle();
+                showToast('Live telemetry polling resumed (1s).', 'success');
+            }
+        });
+    }
+
+    // 3. Failure Diagnostic Alert: Dismiss Button
+    const btnDismissAlert = document.getElementById('btn-dismiss-failure-alert');
+    if (btnDismissAlert) {
+        btnDismissAlert.addEventListener('click', () => {
+            document.getElementById('job-failure-alert-panel')?.classList.add('hidden');
+        });
+    }
+
+    // 4. Failure Diagnostic Alert: Toggle Stack Trace
+    const btnToggleTrace = document.getElementById('btn-toggle-failure-trace');
+    if (btnToggleTrace) {
+        btnToggleTrace.addEventListener('click', () => {
+            const traceDetails = document.getElementById('failure-trace-details');
+            const label = document.getElementById('failure-trace-toggle-label');
+            if (!traceDetails) return;
+            const isHidden = traceDetails.classList.contains('hidden');
+            if (isHidden) {
+                traceDetails.classList.remove('hidden');
+                if (label) label.textContent = 'Hide Stack Trace & Diagnostic Logs';
+            } else {
+                traceDetails.classList.add('hidden');
+                if (label) label.textContent = 'View Stack Trace & Diagnostic Logs';
+            }
+        });
+    }
+
+    // 5. Job Dropdown Filter
+    const dropdown = document.getElementById('history-job-dropdown');
+    if (dropdown) {
+        dropdown.addEventListener('change', () => {
+            applyExecutionHistoryFilter(dropdown.value);
+            if (dropdown.value !== 'ALL') {
+                pollJobTelemetry(dropdown.value);
+            }
+        });
+    }
+}
+
+function startUnifiedLiveTelemetryEngine() {
+    stopUnifiedLiveTelemetryEngine();
+    runLiveTelemetryCycle();
+    AppState.telemetryPollingTimer = setInterval(runLiveTelemetryCycle, AppState.pollIntervalMs || 1000);
+}
+
+function stopUnifiedLiveTelemetryEngine() {
+    if (AppState.telemetryPollingTimer) {
+        clearInterval(AppState.telemetryPollingTimer);
+        AppState.telemetryPollingTimer = null;
+    }
+    if (AppState.systemMetricsTimer) {
+        clearInterval(AppState.systemMetricsTimer);
+        AppState.systemMetricsTimer = null;
+    }
+}
+
+async function runLiveTelemetryCycle() {
+    if (AppState.isLivePollingPaused) return;
+
+    // Update live sync indicator
+    const syncEl = document.getElementById('span-last-refreshed');
+    if (syncEl) syncEl.textContent = `Sync: ${new Date().toLocaleTimeString()}`;
+
+    // 1. Fetch hardware metrics
+    await loadSystemMetrics();
+
+    // 2. Refresh Spring Batch execution history
+    await loadExecutionHistory(true);
+
+    // 3. Determine target job to poll
+    const dropdown = document.getElementById('history-job-dropdown');
+    const selectedVal = dropdown?.value || 'ALL';
+
+    let targetJobId = null;
+    if (selectedVal !== 'ALL') {
+        targetJobId = selectedVal;
+    } else {
+        // Look for actively RUNNING or STARTED job
+        const running = (AppState.executionHistory || []).find(e => e.status === 'RUNNING' || e.status === 'STARTED');
+        if (running) {
+            targetJobId = running.executionId;
+        } else if (AppState.activeJobExecutionId) {
+            targetJobId = AppState.activeJobExecutionId;
+        } else if (AppState.executionHistory && AppState.executionHistory.length > 0) {
+            // Default to most recent execution
+            targetJobId = AppState.executionHistory[0].executionId;
+        }
+    }
+
+    if (targetJobId) {
+        await pollJobTelemetry(targetJobId);
+    }
 }
 
 async function loadSystemMetrics() {
@@ -1658,7 +1791,7 @@ async function loadSystemMetrics() {
     }
 }
 
-async function loadExecutionHistory() {
+async function loadExecutionHistory(isSilent = false) {
     const tbody = document.getElementById('execution-history-tbody');
     const badge = document.getElementById('history-count-badge');
     const dropdown = document.getElementById('history-job-dropdown');
@@ -1672,7 +1805,7 @@ async function loadExecutionHistory() {
 
         if (badge) badge.textContent = `${history.length} Executions`;
 
-        // Populate the Job History Status Dropdown
+        // Populate dropdown options
         if (dropdown) {
             const currentSelected = dropdown.value || 'ALL';
             let optionsHtml = `<option value="ALL">All Executions (${history.length})</option>`;
@@ -1682,24 +1815,22 @@ async function loadExecutionHistory() {
             });
             dropdown.innerHTML = optionsHtml;
 
-            // Restore selection if still present
+            // Preserve current user selection
             if (Array.from(dropdown.options).some(opt => opt.value === currentSelected)) {
                 dropdown.value = currentSelected;
             } else {
                 dropdown.value = 'ALL';
             }
-
-            dropdown.onchange = () => {
-                applyExecutionHistoryFilter(dropdown.value);
-            };
         }
 
         applyExecutionHistoryFilter(dropdown ? dropdown.value : 'ALL');
 
     } catch (e) {
-        console.error('Error loading execution history:', e);
-        if (tbody) {
-            tbody.innerHTML = `<tr><td colspan="10" class="px-4 py-6 text-center text-red-500">Error loading execution history.</td></tr>`;
+        if (!isSilent) {
+            console.error('Error loading execution history:', e);
+            if (tbody) {
+                tbody.innerHTML = `<tr><td colspan="11" class="px-4 py-6 text-center text-red-500">Error loading execution history.</td></tr>`;
+            }
         }
     }
 }
@@ -1756,6 +1887,51 @@ function updateTransferredCard(exec, totalRunsCount) {
     }
 }
 
+function updateTransferredFromTelemetry(data) {
+    const totalTransferredEl = document.getElementById('metric-total-records-transferred');
+    const totalReadEl = document.getElementById('metric-total-read');
+    const totalWrittenEl = document.getElementById('metric-total-written');
+    const execBadgeEl = document.getElementById('metric-history-executions-badge');
+    const subtitleEl = document.getElementById('metric-transferred-subtitle');
+    const tablesCountEl = document.getElementById('metric-total-tables-count');
+
+    const written = data.totalWritten || 0;
+    const read = data.totalRead || 0;
+
+    if (totalTransferredEl) totalTransferredEl.textContent = written.toLocaleString();
+    if (totalReadEl) totalReadEl.textContent = read.toLocaleString();
+    if (totalWrittenEl) totalWrittenEl.textContent = written.toLocaleString();
+
+    if (execBadgeEl) {
+        const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
+        execBadgeEl.textContent = `Job #${data.jobExecutionId} (${isRunning ? 'STREAMING' : data.status})`;
+        execBadgeEl.className = `px-2 py-0.5 rounded-full font-bold text-[10px] font-mono shadow-2xs ${
+            isRunning ? 'bg-blue-100 text-blue-800 animate-pulse' :
+            data.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800' :
+            data.status === 'FAILED' ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-800'
+        }`;
+    }
+
+    if (subtitleEl) {
+        const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
+        if (isRunning) {
+            subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> Streaming Active (Job #${data.jobExecutionId})`;
+        } else {
+            subtitleEl.innerHTML = `<i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Finished Ingestion (Job #${data.jobExecutionId})`;
+        }
+    }
+
+    if (tablesCountEl) {
+        let count = 0;
+        if (data.tableWriteCounts && Object.keys(data.tableWriteCounts).length > 0) {
+            count = Object.keys(data.tableWriteCounts).length;
+        } else if (data.targetTables && data.targetTables.length > 0) {
+            count = data.targetTables.length;
+        }
+        tablesCountEl.textContent = count > 0 ? `${count} tables` : '-- tables';
+    }
+}
+
 function applyExecutionHistoryFilter(selectedId) {
     const tbody = document.getElementById('execution-history-tbody');
     const statusPanel = document.getElementById('selected-job-status-panel');
@@ -1763,12 +1939,32 @@ function applyExecutionHistoryFilter(selectedId) {
     if (!tbody) return;
 
     if (!selectedId || selectedId === 'ALL') {
-        if (statusPanel) statusPanel.classList.add('hidden');
         renderExecutionRows(history);
         const latestExec = history.length > 0 ? history[0] : null;
         updateTransferredCard(latestExec, history.length);
-        if (latestExec && document.getElementById('metric-transferred-subtitle')) {
-            document.getElementById('metric-transferred-subtitle').innerHTML = `<i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Latest Transaction Details`;
+
+        // If an active job is running, keep status panel visible for it
+        const running = history.find(e => e.status === 'RUNNING' || e.status === 'STARTED');
+        if (running) {
+            updateSelectedJobStatusPanel(running);
+            if (statusPanel) statusPanel.classList.remove('hidden');
+        } else if (statusPanel) {
+            statusPanel.classList.add('hidden');
+        }
+
+        // Check if latest execution failed
+        if (latestExec && latestExec.status === 'FAILED') {
+            checkAndDisplayFailureAlert({
+                jobExecutionId: latestExec.executionId,
+                status: latestExec.status,
+                message: latestExec.errorMessage || 'Job failed during execution.',
+                endTime: latestExec.endTime
+            });
+        } else {
+            const running = history.find(e => e.status === 'RUNNING' || e.status === 'STARTED');
+            if (!running) {
+                document.getElementById('job-failure-alert-panel')?.classList.add('hidden');
+            }
         }
         return;
     }
@@ -1783,71 +1979,84 @@ function applyExecutionHistoryFilter(selectedId) {
     }
 
     updateTransferredCard(selectedExec, 1);
+    updateSelectedJobStatusPanel(selectedExec);
+    renderExecutionRows([selectedExec]);
 
-    // Populate Status Details Panel for selected job
-    if (statusPanel) {
-        statusPanel.classList.remove('hidden');
+    if (selectedExec.status === 'FAILED') {
+        checkAndDisplayFailureAlert({
+            jobExecutionId: selectedExec.executionId,
+            status: selectedExec.status,
+            message: selectedExec.errorMessage || 'Job failed during execution.',
+            endTime: selectedExec.endTime
+        });
+    } else {
+        document.getElementById('job-failure-alert-panel')?.classList.add('hidden');
+    }
+}
 
-        const idBadge = document.getElementById('status-panel-job-id');
-        if (idBadge) idBadge.textContent = `Job #${selectedExec.executionId}`;
+function updateSelectedJobStatusPanel(jobData) {
+    const statusPanel = document.getElementById('selected-job-status-panel');
+    if (!statusPanel) return;
+    statusPanel.classList.remove('hidden');
 
-        const nameEl = document.getElementById('status-panel-job-name');
-        if (nameEl) nameEl.textContent = selectedExec.jobName || 'Batch Ingestion Job';
+    const execId = jobData.jobExecutionId || jobData.executionId || '--';
+    const idBadge = document.getElementById('status-panel-job-id');
+    if (idBadge) idBadge.textContent = `Job #${execId}`;
 
-        const statusBadge = document.getElementById('status-panel-status-badge');
-        if (statusBadge) {
-            statusBadge.textContent = selectedExec.status;
-            statusBadge.className = `px-2 py-0.5 rounded text-[10px] font-bold ${
-                selectedExec.status === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
-                selectedExec.status === 'STARTED' || selectedExec.status === 'RUNNING' ? 'bg-blue-100 text-blue-700 animate-pulse' :
-                selectedExec.status === 'FAILED' ? 'bg-red-100 text-red-600' :
-                'bg-amber-100 text-amber-800'
-            }`;
-        }
+    const nameEl = document.getElementById('status-panel-job-name');
+    if (nameEl) nameEl.textContent = jobData.jobName || 'Batch Ingestion Job';
 
-        const startEl = document.getElementById('status-panel-start');
-        if (startEl) startEl.textContent = selectedExec.startTime || '--';
+    const statusBadge = document.getElementById('status-panel-status-badge');
+    if (statusBadge) {
+        statusBadge.textContent = jobData.status;
+        statusBadge.className = `px-2 py-0.5 rounded text-[10px] font-bold ${
+            jobData.status === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
+            jobData.status === 'STARTED' || jobData.status === 'RUNNING' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+            jobData.status === 'FAILED' ? 'bg-red-100 text-red-600' :
+            'bg-amber-100 text-amber-800'
+        }`;
+    }
 
-        const endEl = document.getElementById('status-panel-end');
-        if (endEl) endEl.textContent = selectedExec.endTime || '--';
+    const startEl = document.getElementById('status-panel-start');
+    if (startEl) startEl.textContent = jobData.startTime || '--';
 
-        const durationEl = document.getElementById('status-panel-duration');
-        if (durationEl) durationEl.textContent = selectedExec.duration || '--';
+    const endEl = document.getElementById('status-panel-end');
+    if (endEl) endEl.textContent = jobData.endTime || '--';
 
-        const readEl = document.getElementById('status-panel-read');
-        if (readEl) readEl.textContent = (selectedExec.totalRead || 0).toLocaleString();
+    const durationEl = document.getElementById('status-panel-duration');
+    if (durationEl) durationEl.textContent = jobData.duration || '--';
 
-        const writtenEl = document.getElementById('status-panel-written');
-        if (writtenEl) writtenEl.textContent = (selectedExec.totalWritten || 0).toLocaleString();
+    const readEl = document.getElementById('status-panel-read');
+    if (readEl) readEl.textContent = (jobData.totalRead || 0).toLocaleString();
 
-        const errorsEl = document.getElementById('status-panel-errors');
-        if (errorsEl) errorsEl.textContent = (selectedExec.totalErrors || 0).toLocaleString();
+    const writtenEl = document.getElementById('status-panel-written');
+    if (writtenEl) writtenEl.textContent = (jobData.totalWritten || 0).toLocaleString();
 
-        const tablesEl = document.getElementById('status-panel-tables');
-        if (tablesEl) {
-            if (selectedExec.tableWriteCounts && Object.keys(selectedExec.tableWriteCounts).length > 0) {
-                tablesEl.textContent = Object.keys(selectedExec.tableWriteCounts).join(', ');
-            } else if (selectedExec.targetTables && selectedExec.targetTables.length > 0) {
-                tablesEl.textContent = selectedExec.targetTables.join(', ');
-            } else {
-                tablesEl.textContent = selectedExec.targetTable || '--';
-            }
-        }
+    const errorsEl = document.getElementById('status-panel-errors');
+    if (errorsEl) errorsEl.textContent = (jobData.totalErrors || 0).toLocaleString();
 
-        const btnStop = document.getElementById('btn-stop-active-job');
-        if (btnStop) {
-            if (selectedExec.status === 'STARTED' || selectedExec.status === 'RUNNING') {
-                btnStop.classList.remove('hidden');
-                btnStop.onclick = async () => {
-                    await stopBatchJob(selectedExec.executionId);
-                };
-            } else {
-                btnStop.classList.add('hidden');
-            }
+    const tablesEl = document.getElementById('status-panel-tables');
+    if (tablesEl) {
+        if (jobData.tableWriteCounts && Object.keys(jobData.tableWriteCounts).length > 0) {
+            tablesEl.textContent = Object.keys(jobData.tableWriteCounts).join(', ');
+        } else if (jobData.targetTables && jobData.targetTables.length > 0) {
+            tablesEl.textContent = jobData.targetTables.join(', ');
+        } else {
+            tablesEl.textContent = jobData.targetTable || '--';
         }
     }
 
-    renderExecutionRows([selectedExec]);
+    const btnStop = document.getElementById('btn-stop-active-job');
+    if (btnStop) {
+        if (jobData.status === 'STARTED' || jobData.status === 'RUNNING') {
+            btnStop.classList.remove('hidden');
+            btnStop.onclick = async () => {
+                await stopBatchJob(execId);
+            };
+        } else {
+            btnStop.classList.add('hidden');
+        }
+    }
 }
 
 function renderExecutionRows(executions) {
@@ -1855,7 +2064,7 @@ function renderExecutionRows(executions) {
     if (!tbody) return;
 
     if (!executions || executions.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="10" class="px-4 py-8 text-center text-gray-400">No Spring Batch job executions to display.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="px-4 py-8 text-center text-gray-400">No Spring Batch job executions to display.</td></tr>`;
         return;
     }
 
@@ -1949,6 +2158,11 @@ function renderExecutionRows(executions) {
                     <td class="px-4 py-2.5 text-gray-700 font-mono">${tbl.read.toLocaleString()}</td>
                     <td class="px-4 py-2.5 text-bnp-emerald font-bold font-mono">${tbl.written.toLocaleString()}</td>
                     <td class="px-4 py-2.5 font-bold font-mono ${tbl.errors > 0 ? 'text-red-600' : 'text-gray-400'}">${tbl.errors.toLocaleString()}</td>
+                    <td rowspan="${numRows}" class="px-4 py-3 text-center align-middle bg-white">
+                        <button type="button" class="btn btn-secondary text-[11px] py-1 px-2.5 font-sans font-semibold btn-inspect-exec" data-id="${exec.executionId}">
+                            <i class="fas fa-eye text-bnp-emerald mr-1"></i> Inspect
+                        </button>
+                    </td>
                 `;
             } else {
                 tr.innerHTML = `
@@ -1966,14 +2180,26 @@ function renderExecutionRows(executions) {
             tbody.appendChild(tr);
         });
     });
+
+    // Wire inspect buttons
+    tbody.querySelectorAll('.btn-inspect-exec').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const execId = btn.getAttribute('data-id');
+            if (execId) {
+                const dropdown = document.getElementById('history-job-dropdown');
+                if (dropdown) dropdown.value = execId;
+                applyExecutionHistoryFilter(execId);
+                pollJobTelemetry(execId);
+                document.getElementById('selected-job-status-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        });
+    });
 }
 
 function startActiveJobMonitor(jobExecutionId) {
-    const statusPanel = document.getElementById('selected-job-status-panel');
+    AppState.activeJobExecutionId = jobExecutionId;
+    AppState.peakThroughput = 0;
     const dropdown = document.getElementById('history-job-dropdown');
-
-    // Show status panel and add active running option to dropdown if not present
-    if (statusPanel) statusPanel.classList.remove('hidden');
     if (dropdown) {
         let opt = Array.from(dropdown.options).find(o => String(o.value) === String(jobExecutionId));
         if (!opt) {
@@ -1984,107 +2210,52 @@ function startActiveJobMonitor(jobExecutionId) {
         }
         dropdown.value = jobExecutionId;
     }
+    startUnifiedLiveTelemetryEngine();
+}
 
-    const panelJobId = document.getElementById('status-panel-job-id');
-    if (panelJobId) panelJobId.textContent = `Job #${jobExecutionId}`;
+async function pollJobTelemetry(jobExecutionId) {
+    try {
+        const response = await fetch(`/api/jobs/${jobExecutionId}/telemetry`);
+        if (!response.ok) return;
+        const data = await response.json();
 
-    const btnStop = document.getElementById('btn-stop-active-job');
-    if (btnStop) {
-        btnStop.classList.remove('hidden');
-        btnStop.onclick = async () => {
-            await stopBatchJob(jobExecutionId);
-        };
-    }
+        // 1. Throughput & Streaming state
+        updateThroughputAndState(data);
 
-    if (AppState.telemetryPollingTimer) clearInterval(AppState.telemetryPollingTimer);
+        // 2. Total Transferred Card
+        updateTransferredFromTelemetry(data);
 
-    const poll = async () => {
-        try {
-            const response = await fetch(`/api/jobs/${jobExecutionId}/telemetry`);
-            if (!response.ok) return;
-            const data = await response.json();
+        // 3. Target Tables Live Ingestion Breakdown
+        updateTableBreakdown(data);
 
-            // Update Status Panel
-            const statusBadge = document.getElementById('status-panel-status-badge');
-            if (statusBadge) {
-                statusBadge.textContent = data.status;
-                statusBadge.className = `px-2 py-0.5 rounded text-[10px] font-bold ${
-                    data.status === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
-                    data.status === 'STARTED' || data.status === 'RUNNING' ? 'bg-blue-100 text-blue-700 animate-pulse' :
-                    data.status === 'FAILED' ? 'bg-red-100 text-red-600' :
-                    'bg-amber-100 text-amber-800'
-                }`;
+        // 4. Selected Job Status Details Panel
+        updateSelectedJobStatusPanel(data);
+
+        // 5. Visual Analytics Charts
+        updateCharts(data);
+
+        // 6. Recent Error Logs
+        updateErrorsTable(data.recentErrors || []);
+
+        // 7. Failure Diagnostic Alert Panel
+        checkAndDisplayFailureAlert(data);
+
+        // 8. Job completion/failure toasts for active job
+        if (AppState.activeJobExecutionId && String(AppState.activeJobExecutionId) === String(jobExecutionId)) {
+            if (data.status === 'COMPLETED') {
+                showToast(`Job #${jobExecutionId} completed successfully!`, 'success', 'Ingestion Complete');
+                AppState.activeJobExecutionId = null;
+            } else if (data.status === 'FAILED') {
+                showToast(`Job #${jobExecutionId} failed. See diagnostic alert.`, 'error', 'Job Failed');
+                AppState.activeJobExecutionId = null;
+            } else if (data.status === 'STOPPED') {
+                showToast(`Job #${jobExecutionId} was stopped.`, 'warning', 'Job Stopped');
+                AppState.activeJobExecutionId = null;
             }
-
-            const readPanelEl = document.getElementById('status-panel-read');
-            if (readPanelEl) readPanelEl.textContent = (data.totalRead || 0).toLocaleString();
-
-            const writtenPanelEl = document.getElementById('status-panel-written');
-            if (writtenPanelEl) writtenPanelEl.textContent = (data.totalWritten || 0).toLocaleString();
-
-            const errorsPanelEl = document.getElementById('status-panel-errors');
-            if (errorsPanelEl) errorsPanelEl.textContent = (data.totalErrors || 0).toLocaleString();
-
-            const tablesPanelEl = document.getElementById('status-panel-tables');
-            if (tablesPanelEl && data.targetTables && data.targetTables.length > 0) {
-                tablesPanelEl.textContent = data.targetTables.join(', ');
-            }
-
-            // Update throughput and state
-            const speedEl = document.getElementById('metric-live-speed');
-            if (speedEl) speedEl.textContent = Math.round(data.recordsPerSecond || 0).toLocaleString();
-
-            const speedStateEl = document.getElementById('metric-speed-state');
-            if (speedStateEl) {
-                speedStateEl.textContent = (data.status === 'RUNNING' || data.status === 'STARTED') ? 'STREAMING' : (data.status || 'IDLE');
-            }
-
-            if (data.targetTables && data.targetTables.length > 0) {
-                const tablesCountEl = document.getElementById('metric-total-tables-count');
-                if (tablesCountEl) {
-                    tablesCountEl.textContent = `${data.targetTables.length} tables`;
-                }
-            }
-
-            // Update live Total Transferred, Total Read, and Total Write for active transaction
-            const totalTransferredEl = document.getElementById('metric-total-records-transferred');
-            if (totalTransferredEl) totalTransferredEl.textContent = (data.totalWritten || 0).toLocaleString();
-
-            const metricTotalReadEl = document.getElementById('metric-total-read');
-            if (metricTotalReadEl) metricTotalReadEl.textContent = (data.totalRead || 0).toLocaleString();
-
-            const metricTotalWrittenEl = document.getElementById('metric-total-written');
-            if (metricTotalWrittenEl) metricTotalWrittenEl.textContent = (data.totalWritten || 0).toLocaleString();
-
-            const execBadgeEl = document.getElementById('metric-history-executions-badge');
-            if (execBadgeEl) execBadgeEl.textContent = `Job #${jobExecutionId} (RUNNING)`;
-
-            const subtitleEl = document.getElementById('metric-transferred-subtitle');
-            if (subtitleEl) subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> Active Transaction In Progress`;
-
-            const doughnutCommittedEl = document.getElementById('doughnut-committed-val');
-            if (doughnutCommittedEl) doughnutCommittedEl.textContent = (data.totalWritten || 0).toLocaleString();
-
-            const doughnutErrorsEl = document.getElementById('doughnut-errors-val');
-            if (doughnutErrorsEl) doughnutErrorsEl.textContent = (data.totalErrors || 0).toLocaleString();
-
-            updateCharts(data);
-            updateErrorsTable(data.recentErrors || []);
-
-            if (data.status === 'COMPLETED' || data.status === 'FAILED' || data.status === 'STOPPED') {
-                clearInterval(AppState.telemetryPollingTimer);
-                AppState.telemetryPollingTimer = null;
-                if (btnStop) btnStop.classList.add('hidden');
-                showToast(`Job #${jobExecutionId} finished with status: ${data.status}.`, data.status === 'COMPLETED' ? 'success' : 'warning');
-                loadExecutionHistory();
-            }
-        } catch (e) {
-            console.warn('Active job monitor error:', e);
         }
-    };
-
-    poll();
-    AppState.telemetryPollingTimer = setInterval(poll, AppState.pollIntervalMs);
+    } catch (e) {
+        console.warn('Telemetry polling error for job', jobExecutionId, e);
+    }
 }
 
 async function stopBatchJob(jobExecutionId) {
@@ -2093,9 +2264,163 @@ async function stopBatchJob(jobExecutionId) {
         const result = await response.json();
         if (response.ok) {
             showToast(`Termination signal sent for Job #${jobExecutionId}`, 'info', 'Stopping Job');
+            await runLiveTelemetryCycle();
         }
     } catch (e) {
         showToast('Failed to send stop signal.', 'error');
+    }
+}
+
+function updateTableBreakdown(data) {
+    const tbody = document.getElementById('table-breakdown-tbody');
+    const badge = document.getElementById('table-breakdown-total-badge');
+    if (!tbody) return;
+
+    const writeCounts = data.tableWriteCounts || {};
+    const errorCounts = data.tableErrorCounts || {};
+    const targetTables = data.targetTables || Object.keys(writeCounts);
+
+    if (targetTables.length === 0 && Object.keys(writeCounts).length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No active or historical table write statistics available.</td></tr>`;
+        if (badge) badge.textContent = `0 Tables Active`;
+        return;
+    }
+
+    const allTables = Array.from(new Set([...targetTables, ...Object.keys(writeCounts)]));
+    if (badge) badge.textContent = `${allTables.length} Tables Active`;
+
+    const totalWrittenAll = data.totalWritten || 1;
+
+    let html = '';
+    allTables.forEach(tableName => {
+        const written = writeCounts[tableName] || 0;
+        const errors = errorCounts[tableName] || 0;
+        const pct = totalWrittenAll > 0 ? Math.min(100, Math.round((written / totalWrittenAll) * 100)) : 0;
+        const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
+
+        html += `
+            <tr class="hover:bg-slate-50/80 transition">
+                <td class="px-4 py-2.5 font-bold text-gray-900 font-sans flex items-center gap-2">
+                    <span class="w-6 h-6 rounded bg-emerald-50 text-bnp-emerald flex items-center justify-center text-[10px]">
+                        <i class="fas fa-table"></i>
+                    </span>
+                    <span>${escapeHtml(tableName)}</span>
+                </td>
+                <td class="px-4 py-2.5 font-mono font-bold text-emerald-700">
+                    ${written.toLocaleString()}
+                </td>
+                <td class="px-4 py-2.5 font-mono ${errors > 0 ? 'text-red-600 font-bold' : 'text-gray-400'}">
+                    ${errors.toLocaleString()}
+                </td>
+                <td class="px-4 py-2.5">
+                    <div class="flex items-center gap-2">
+                        <div class="w-24 bg-gray-100 rounded-full h-1.5 overflow-hidden">
+                            <div class="bg-bnp-emerald h-1.5 rounded-full" style="width: ${pct}%"></div>
+                        </div>
+                        <span class="font-mono text-[10px] text-gray-500">${pct}%</span>
+                    </div>
+                </td>
+                <td class="px-4 py-2.5">
+                    <span class="px-2 py-0.5 rounded text-[10px] font-bold ${
+                        isRunning ? 'bg-blue-100 text-blue-700 animate-pulse' :
+                        data.status === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
+                        data.status === 'FAILED' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-600'
+                    }">
+                        ${isRunning ? 'STREAMING' : (data.status || 'COMMITTED')}
+                    </span>
+                </td>
+            </tr>
+        `;
+    });
+    tbody.innerHTML = html;
+}
+
+function updateThroughputAndState(data) {
+    const speed = Math.round(data.recordsPerSecond || 0);
+    const speedEl = document.getElementById('metric-live-speed');
+    if (speedEl) speedEl.textContent = speed.toLocaleString();
+
+    // Track peak speed
+    if (speed > (AppState.peakThroughput || 0)) {
+        AppState.peakThroughput = speed;
+    }
+    const peakEl = document.getElementById('metric-peak-speed');
+    if (peakEl) peakEl.textContent = `Peak: ${(AppState.peakThroughput || 0).toLocaleString()} r/s`;
+
+    const avgEl = document.getElementById('metric-avg-speed');
+    if (avgEl) avgEl.textContent = `${speed.toLocaleString()} r/s`;
+
+    const stateEl = document.getElementById('metric-speed-state');
+    if (stateEl) {
+        const st = data.status || 'IDLE';
+        if (st === 'RUNNING' || st === 'STARTED') {
+            stateEl.textContent = 'STREAMING';
+            stateEl.className = 'font-mono font-bold text-blue-600 text-[11px] animate-pulse';
+        } else if (st === 'COMPLETED') {
+            stateEl.textContent = 'COMPLETED';
+            stateEl.className = 'font-mono font-bold text-emerald-600 text-[11px]';
+        } else if (st === 'FAILED') {
+            stateEl.textContent = 'FAILED';
+            stateEl.className = 'font-mono font-bold text-red-600 text-[11px]';
+        } else {
+            stateEl.textContent = st;
+            stateEl.className = 'font-mono font-bold text-gray-500 text-[11px]';
+        }
+    }
+
+    const subtitleEl = document.getElementById('metric-speed-subtitle');
+    if (subtitleEl) {
+        if (data.status === 'RUNNING' || data.status === 'STARTED') {
+            subtitleEl.textContent = `Job #${data.jobExecutionId} streaming active`;
+        } else {
+            subtitleEl.textContent = `Job #${data.jobExecutionId} (${data.status})`;
+        }
+    }
+
+    const chartBadge = document.getElementById('chart-live-rate-badge');
+    if (chartBadge) {
+        chartBadge.textContent = `${speed.toLocaleString()} rec/s`;
+    }
+}
+
+function checkAndDisplayFailureAlert(data) {
+    const alertPanel = document.getElementById('job-failure-alert-panel');
+    if (!alertPanel) return;
+
+    if (data.status === 'FAILED') {
+        alertPanel.classList.remove('hidden');
+
+        const jobBadge = document.getElementById('failure-alert-job-id');
+        if (jobBadge) jobBadge.textContent = `Job #${data.jobExecutionId}`;
+
+        let failedStep = 'dynamicIngestStep';
+        let stackTrace = '';
+        let errorMsg = data.message || 'Fatal batch execution failure.';
+
+        if (data.recentErrors && data.recentErrors.length > 0) {
+            const fatalErr = data.recentErrors.find(e => e.phase === 'JOB_FATAL') || data.recentErrors[data.recentErrors.length - 1];
+            if (fatalErr) {
+                if (fatalErr.stepName) failedStep = fatalErr.stepName;
+                if (fatalErr.errorMessage) errorMsg = fatalErr.errorMessage;
+                if (fatalErr.recordData) stackTrace = fatalErr.recordData;
+            }
+        }
+
+        const stepBadge = document.getElementById('failure-alert-step');
+        if (stepBadge) stepBadge.textContent = `Step: ${failedStep}`;
+
+        const timeEl = document.getElementById('failure-alert-time');
+        if (timeEl) timeEl.textContent = `Failed at: ${data.endTime || new Date().toLocaleTimeString()}`;
+
+        const msgEl = document.getElementById('failure-alert-message');
+        if (msgEl) msgEl.textContent = errorMsg;
+
+        const traceDetails = document.getElementById('failure-trace-details');
+        if (traceDetails) {
+            traceDetails.textContent = stackTrace || errorMsg || 'No technical stack trace captured.';
+        }
+    } else {
+        alertPanel.classList.add('hidden');
     }
 }
 
@@ -2116,9 +2441,10 @@ function updateErrorsTable(errors) {
         const tr = document.createElement('tr');
         tr.className = 'hover:bg-gray-50 transition';
         const phaseStr = err.phase || 'STEP';
+        const isFatal = phaseStr === 'JOB_FATAL';
         tr.innerHTML = `
             <td class="px-4 py-2.5 text-gray-500 whitespace-nowrap">${escapeHtml(err.failedAt || '')}</td>
-            <td class="px-4 py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${phaseStr.startsWith('WRITE') ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}">${escapeHtml(phaseStr)}</span></td>
+            <td class="px-4 py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${isFatal ? 'bg-red-600 text-white shadow-2xs' : phaseStr.startsWith('WRITE') ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}">${escapeHtml(phaseStr)}</span></td>
             <td class="px-4 py-2.5 text-red-600 max-w-xs truncate" title="${escapeHtml(err.errorMessage || '')}">${escapeHtml(err.errorMessage || 'Unknown Error')}</td>
             <td class="px-4 py-2.5 font-mono text-[11px] text-gray-800 max-w-md truncate" title="${escapeHtml(err.recordData || '')}">${escapeHtml(err.recordData || '{}')}</td>
         `;
@@ -2188,13 +2514,13 @@ function initCharts() {
 
 function updateCharts(data) {
     const timeLabel = new Date().toLocaleTimeString();
-    const speed = data.recordsPerSecond || 0;
+    const speed = Math.round(data.recordsPerSecond || 0);
 
     if (speedLineChart) {
         speedLineChart.data.labels.push(timeLabel);
         speedLineChart.data.datasets[0].data.push(speed);
 
-        if (speedLineChart.data.labels.length > 20) {
+        if (speedLineChart.data.labels.length > 25) {
             speedLineChart.data.labels.shift();
             speedLineChart.data.datasets[0].data.shift();
         }
@@ -2204,9 +2530,15 @@ function updateCharts(data) {
     if (qualityDoughnutChart) {
         const committed = data.totalWritten || 0;
         const errors = data.totalErrors || 0;
-        qualityDoughnutChart.data.datasets[0].data = committed === 0 && errors === 0 ? [1, 0] : [committed, errors];
+        qualityDoughnutChart.data.datasets[0].data = (committed === 0 && errors === 0) ? [1, 0] : [committed, errors];
         qualityDoughnutChart.update('none');
     }
+
+    const committedEl = document.getElementById('doughnut-committed-val');
+    if (committedEl) committedEl.textContent = (data.totalWritten || 0).toLocaleString();
+
+    const errorsEl = document.getElementById('doughnut-errors-val');
+    if (errorsEl) errorsEl.textContent = (data.totalErrors || 0).toLocaleString();
 }
 
 // =========================================================================

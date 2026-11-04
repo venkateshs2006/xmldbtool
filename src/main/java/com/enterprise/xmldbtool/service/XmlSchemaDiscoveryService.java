@@ -216,6 +216,72 @@ public class XmlSchemaDiscoveryService {
         return null;
     }
 
+    /**
+     * Detects the repeating item / record fragment root element (e.g. "Person", "record", "item")
+     * suitable for chunked StaxEventItemReader streaming without memory exhaustion.
+     */
+    public String detectRecordRootElement(String sourcePath) {
+        if (sourcePath == null || sourcePath.trim().isEmpty()) return "record";
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+        factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+
+        Map<String, Integer> tagCounts = new LinkedHashMap<>();
+
+        try (BufferedReader reader = openReaderForSource(sourcePath)) {
+            XMLStreamReader streamReader = factory.createXMLStreamReader(reader);
+            String docRoot = null;
+            int depth = 0;
+            java.util.Deque<String> tagStack = new java.util.ArrayDeque<>();
+
+            int events = 0;
+            while (streamReader.hasNext() && events < 10000) {
+                int event = streamReader.next();
+                events++;
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String localName = streamReader.getLocalName();
+                    if (depth == 0) {
+                        docRoot = localName;
+                    } else if (depth == 1 || depth == 2) {
+                        String parent = tagStack.peek();
+                        if (parent != null && (parent.equalsIgnoreCase("records") || parent.equalsIgnoreCase("items") || parent.equalsIgnoreCase("data"))) {
+                            return localName;
+                        }
+                        tagCounts.put(localName, tagCounts.getOrDefault(localName, 0) + 1);
+                    }
+                    tagStack.push(localName);
+                    depth++;
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    if (!tagStack.isEmpty()) {
+                        tagStack.pop();
+                    }
+                    depth--;
+                }
+            }
+
+            // Find candidate with repeats or known record naming
+            for (Map.Entry<String, Integer> entry : tagCounts.entrySet()) {
+                String tag = entry.getKey();
+                if (tag.equalsIgnoreCase("person") || tag.equalsIgnoreCase("record") || tag.equalsIgnoreCase("item") || tag.equalsIgnoreCase("entity")) {
+                    return tag;
+                }
+                if (entry.getValue() > 1 && !tag.equalsIgnoreCase(docRoot)) {
+                    return tag;
+                }
+            }
+
+            for (String tag : tagCounts.keySet()) {
+                if (!tag.endsWith("List") && !tag.endsWith("list") && !tag.equalsIgnoreCase(docRoot)) {
+                    return tag;
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("Could not detect record root element from {}: {}", sourcePath, ex.getMessage());
+        }
+
+        return "record";
+    }
+
     private BufferedReader openReaderForSource(String sourcePath) throws Exception {
         if (sourcePath == null || sourcePath.trim().isEmpty()) {
             throw new IllegalArgumentException("XML source path cannot be blank.");

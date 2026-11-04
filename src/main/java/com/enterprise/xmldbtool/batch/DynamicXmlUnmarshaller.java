@@ -164,6 +164,17 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                             frame.data.putIfAbsent(sAnc + "/@id", ancId);
                         }
                     }
+                    // Inherit contextual attributes from ancestor frames (e.g. NameType, RoleType, DateType, CountryType, IDType)
+                    for (Map.Entry<String, Object> entry : anc.data.entrySet()) {
+                        String key = entry.getKey();
+                        if (key.startsWith("@") || (!key.contains("/") && !key.startsWith("_entities_"))) {
+                            String cleanKey = key.startsWith("@") ? key.substring(1) : key;
+                            frame.data.putIfAbsent(cleanKey, entry.getValue());
+                            frame.data.putIfAbsent("@" + cleanKey, entry.getValue());
+                            frame.data.putIfAbsent(anc.tagName + "/" + key, entry.getValue());
+                            frame.data.putIfAbsent(anc.tagName + "/@" + cleanKey, entry.getValue());
+                        }
+                    }
                     anc = anc.parent;
                 }
 
@@ -296,6 +307,17 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                             frame.data.putIfAbsent(sAnc + "_id", ancId);
                             frame.data.putIfAbsent(sAnc + "id", ancId);
                             frame.data.putIfAbsent(sAnc + "/@id", ancId);
+                        }
+                    }
+                    // Inherit contextual attributes from ancestor frames (e.g. NameType, RoleType, DateType, CountryType, IDType)
+                    for (Map.Entry<String, Object> entry : anc.data.entrySet()) {
+                        String key = entry.getKey();
+                        if (key.startsWith("@") || (!key.contains("/") && !key.startsWith("_entities_"))) {
+                            String cleanKey = key.startsWith("@") ? key.substring(1) : key;
+                            frame.data.putIfAbsent(cleanKey, entry.getValue());
+                            frame.data.putIfAbsent("@" + cleanKey, entry.getValue());
+                            frame.data.putIfAbsent(anc.tagName + "/" + key, entry.getValue());
+                            frame.data.putIfAbsent(anc.tagName + "/@" + cleanKey, entry.getValue());
                         }
                     }
                     anc = anc.parent;

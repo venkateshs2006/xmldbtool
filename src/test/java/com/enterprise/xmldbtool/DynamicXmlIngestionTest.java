@@ -628,5 +628,318 @@ class DynamicXmlIngestionTest {
             }
         }
     }
+
+    @Test
+    @DisplayName("Verify PFA Person fragment unmarshals and processes into multi-table payload")
+    void testPfaPersonUnmarshallingAndProcessing() throws Exception {
+        String personXml = """
+        <Person id="1447992" action="add" date="21-Feb-2023">
+            <Gender>Male</Gender>
+            <ActiveStatus>Active</ActiveStatus>
+            <Deceased>No</Deceased>
+            <NameDetails>
+                <Name NameType="Primary Name">
+                    <NameValue>
+                        <FirstName>Asim</FirstName>
+                        <Surname>Sarajlić</Surname>
+                    </NameValue>
+                </Name>
+                <Name NameType="Spelling Variation">
+                    <NameValue>
+                        <FirstName>Asim</FirstName>
+                        <Surname>Sarajlich</Surname>
+                    </NameValue>
+                    <NameValue>
+                        <FirstName>Asim</FirstName>
+                        <Surname>Sarajlic</Surname>
+                    </NameValue>
+                </Name>
+            </NameDetails>
+            <Descriptions>
+                <Description Description1="1"/>
+                <Description Description1="3" Description2="1"/>
+                <Description Description1="3" Description2="10"/>
+            </Descriptions>
+            <RoleDetail>
+                <Roles RoleType="Primary Occupation">
+                    <OccTitle OccCat="3">See Previous Roles</OccTitle>
+                </Roles>
+                <Roles RoleType="Previous Roles">
+                    <OccTitle SinceDay="30" SinceMonth="Dec" SinceYear="2010" ToDay="07" ToMonth="Oct" ToYear="2018" OccCat="3">Member, BiH H</OccTitle>
+                    <OccTitle SinceYear="2013" OccCat="16">Deputy Chairman, Party of Democratic Action (SDA)</OccTitle>
+                    <OccTitle SinceDay="07" SinceMonth="Oct" SinceYear="2018" ToDay="28" ToMonth="Feb" ToYear="2019" OccCat="3">Member, Feder</OccTitle>
+                    <OccTitle SinceDay="28" SinceMonth="Feb" SinceYear="2019" ToDay="02" ToMonth="Oct" ToYear="2022" OccCat="3">Member, BiH H</OccTitle>
+                </Roles>
+            </RoleDetail>
+            <DateDetails>
+                <Date DateType="Date of Birth">
+                    <DateValue Day="03" Month="Oct" Year="1975"/>
+                </Date>
+                <Date DateType="Inactive as of (PEP)">
+                    <DateValue Day="02" Month="Oct" Year="2022"/>
+                </Date>
+            </DateDetails>
+            <BirthPlace>
+                <Place name="Sarajevo,Bosnia and Herzegovina"/>
+            </BirthPlace>
+            <SanctionsReferences>
+                <Reference SinceDay="11" SinceMonth="Apr" SinceYear="2022">1</Reference>
+            </SanctionsReferences>
+            <CountryDetails>
+                <Country CountryType="Citizenship">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+                <Country CountryType="Resident of">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+                <Country CountryType="Jurisdiction">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+                <Country CountryType="Country of Reported Allegation">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+            </CountryDetails>
+            <IDNumberTypes>
+                <ID IDType="OFAC Program ID">
+                    <IDValue>BALKANS-EO14033</IDValue>
+                </ID>
+                <ID IDType="OFAC Unique ID">
+                    <IDValue>35956</IDValue>
+                </ID>
+            </IDNumberTypes>
+            <ProfileNotes>PROFILE CREATED: 02-Aug-2022 UPDATE ADDED: 09-Feb-2023 </ProfileNotes>
+            <SourceDescription>
+                <Source name="https://home.treasury.gov/policy-issues/financial-sanctions/recent-actions/20220411"/>
+                <Source name="https://www.treasury.gov/ofac/downloads/sdnlist.pdf"/>
+            </SourceDescription>
+            <Images>
+                <Image URL="http://thebosniatimes.ba/vijestiSlike/vijestSlika_2015-04-29-04-11-48.jpg"/>
+                <Image URL="http://imovinapoliticara.cin.ba/images/AsimSarajlic.jpg"/>
+            </Images>
+        </Person>
+        """;
+
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        XMLEventReader reader = factory.createXMLEventReader(new StringReader(personXml));
+        Map<String, Object> recordMap = unmarshaller.parseFragmentFromEventReader(reader);
+
+        assertNotNull(recordMap);
+        assertEquals("1447992", recordMap.get("@id"));
+        assertEquals("add", recordMap.get("@action"));
+        assertEquals("21-Feb-2023", recordMap.get("@date"));
+
+        // Field mappings matching the DB schema provided by user
+        List<FieldMapping> mappings = List.of(
+                // Person main table
+                new FieldMapping("@id", "Person", "person_id", "NONE"),
+                new FieldMapping("@action", "Person", "action", "NONE"),
+                new FieldMapping("@date", "Person", "record_date", "NONE"),
+                new FieldMapping("Gender", "Person", "gender", "NONE"),
+                new FieldMapping("ActiveStatus", "Person", "active_status", "NONE"),
+                new FieldMapping("Deceased", "Person", "deceased", "NONE"),
+                new FieldMapping("Place/@name", "Person", "birth_place", "NONE"),
+                new FieldMapping("ProfileNotes", "Person", "profile_notes", "NONE"),
+
+                // PersonName table
+                new FieldMapping("person_id", "PersonName", "person_id", "NONE"),
+                new FieldMapping("NameType", "PersonName", "name_type", "NONE"),
+                new FieldMapping("FirstName", "PersonName", "first_name", "NONE"),
+                new FieldMapping("Surname", "PersonName", "surname", "NONE"),
+
+                // PersonDescription table
+                new FieldMapping("person_id", "PersonDescription", "person_id", "NONE"),
+                new FieldMapping("@Description1", "PersonDescription", "description_1_id", "NONE"),
+                new FieldMapping("@Description2", "PersonDescription", "description_2_id", "NONE"),
+                new FieldMapping("@Description3", "PersonDescription", "description_3_id", "NONE"),
+
+                // PersonRole table
+                new FieldMapping("person_id", "PersonRole", "person_id", "NONE"),
+                new FieldMapping("RoleType", "PersonRole", "role_type", "NONE"),
+                new FieldMapping("OccTitle", "PersonRole", "occ_title", "NONE"),
+                new FieldMapping("@OccCat", "PersonRole", "occ_cat", "NONE"),
+                new FieldMapping("@SinceDay", "PersonRole", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "PersonRole", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "PersonRole", "since_year", "NONE"),
+                new FieldMapping("@ToDay", "PersonRole", "to_day", "NONE"),
+                new FieldMapping("@ToMonth", "PersonRole", "to_month", "NONE"),
+                new FieldMapping("@ToYear", "PersonRole", "to_year", "NONE"),
+
+                // PersonDate table
+                new FieldMapping("person_id", "PersonDate", "person_id", "NONE"),
+                new FieldMapping("DateType", "PersonDate", "date_type", "NONE"),
+                new FieldMapping("@Day", "PersonDate", "day", "NONE"),
+                new FieldMapping("@Month", "PersonDate", "month", "NONE"),
+                new FieldMapping("@Year", "PersonDate", "year", "NONE"),
+
+                // PersonSanctionsReference table
+                new FieldMapping("person_id", "PersonSanctionsReference", "person_id", "NONE"),
+                new FieldMapping("Reference", "PersonSanctionsReference", "reference_id", "NONE"),
+                new FieldMapping("@SinceDay", "PersonSanctionsReference", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "PersonSanctionsReference", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "PersonSanctionsReference", "since_year", "NONE"),
+
+                // PersonCountry table
+                new FieldMapping("person_id", "PersonCountry", "person_id", "NONE"),
+                new FieldMapping("CountryType", "PersonCountry", "country_type", "NONE"),
+                new FieldMapping("@Code", "PersonCountry", "country_code", "NONE"),
+
+                // PersonIDNumber table
+                new FieldMapping("person_id", "PersonIDNumber", "person_id", "NONE"),
+                new FieldMapping("IDType", "PersonIDNumber", "id_type", "NONE"),
+                new FieldMapping("IDValue", "PersonIDNumber", "id_value", "NONE"),
+
+                // PersonSource table
+                new FieldMapping("person_id", "PersonSource", "person_id", "NONE"),
+                new FieldMapping("@name", "PersonSource", "source_url", "NONE"),
+
+                // PersonImage table
+                new FieldMapping("person_id", "PersonImage", "person_id", "NONE"),
+                new FieldMapping("@URL", "PersonImage", "image_url", "NONE")
+        );
+
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor("Person", mappings);
+        DatabaseRowPayload payload = processor.process(recordMap);
+
+        assertNotNull(payload, "Payload must not be null");
+        Map<String, List<Map<String, Object>>> multiRecords = payload.getMultiTableRecords();
+        assertNotNull(multiRecords);
+
+        // Verify Person table
+        List<Map<String, Object>> personRows = multiRecords.get("Person");
+        assertNotNull(personRows);
+        System.out.println("Person rows in multiRecords: " + personRows);
+        assertEquals(1, personRows.size());
+        assertEquals("1447992", personRows.get(0).get("person_id"));
+        assertEquals("add", personRows.get(0).get("action"));
+        assertEquals("21-Feb-2023", personRows.get(0).get("record_date"));
+        assertEquals("Male", personRows.get(0).get("gender"));
+        assertEquals("Sarajevo,Bosnia and Herzegovina", personRows.get(0).get("birth_place"));
+
+        // Verify PersonName table (should have 3 rows with name_type, first_name, surname, person_id)
+        List<Map<String, Object>> nameRows = multiRecords.get("PersonName");
+        assertNotNull(nameRows, "PersonName rows must be present");
+        assertTrue(nameRows.size() >= 2, "Expected at least 2 name rows, got: " + nameRows.size());
+        for (Map<String, Object> nr : nameRows) {
+            assertEquals("1447992", nr.get("person_id"));
+            assertNotNull(nr.get("first_name"));
+            assertNotNull(nr.get("surname"));
+        }
+
+        // Verify PersonRole table
+        List<Map<String, Object>> roleRows = multiRecords.get("PersonRole");
+        assertNotNull(roleRows, "PersonRole rows must be present");
+        assertTrue(roleRows.size() >= 2);
+        for (Map<String, Object> rr : roleRows) {
+            assertEquals("1447992", rr.get("person_id"));
+        }
+
+        // Verify PersonDescription table
+        List<Map<String, Object>> descRows = multiRecords.get("PersonDescription");
+        assertNotNull(descRows, "PersonDescription rows must be present");
+        assertEquals(3, descRows.size());
+        for (Map<String, Object> dr : descRows) {
+            assertEquals("1447992", dr.get("person_id"));
+        }
+
+        // Verify PersonDate table
+        List<Map<String, Object>> dateRows = multiRecords.get("PersonDate");
+        assertNotNull(dateRows, "PersonDate rows must be present");
+        assertEquals(2, dateRows.size());
+
+        // Verify PersonCountry table
+        List<Map<String, Object>> countryRows = multiRecords.get("PersonCountry");
+        assertNotNull(countryRows, "PersonCountry rows must be present");
+        assertEquals(4, countryRows.size());
+        for (Map<String, Object> cr : countryRows) {
+            assertEquals("1447992", cr.get("person_id"));
+            assertEquals("BSHZG", cr.get("country_code"));
+        }
+
+        // Verify PersonIDNumber table
+        List<Map<String, Object>> idRows = multiRecords.get("PersonIDNumber");
+        assertNotNull(idRows, "PersonIDNumber rows must be present");
+        assertEquals(2, idRows.size());
+        for (Map<String, Object> ir : idRows) {
+            assertEquals("1447992", ir.get("person_id"));
+        }
+
+        // Verify PersonImage table
+        List<Map<String, Object>> imgRows = multiRecords.get("PersonImage");
+        assertNotNull(imgRows, "PersonImage rows must be present");
+        assertEquals(2, imgRows.size());
+        for (Map<String, Object> im : imgRows) {
+            assertEquals("1447992", im.get("person_id"));
+            assertNotNull(im.get("image_url"));
+        }
+    }
+
+    @Test
+    @DisplayName("Verify HeaderReferenceIngestionTasklet streams lookup tables before Person records")
+    void testHeaderReferenceIngestionTasklet() throws Exception {
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS CountryList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100), is_territory BOOLEAN, profile_url VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS OccupationList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS RelationshipList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS SanctionsReferencesList (reference_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), status VARCHAR(50), description_2_id VARCHAR(50))");
+            stmt.execute("DELETE FROM CountryList");
+            stmt.execute("DELETE FROM OccupationList");
+            stmt.execute("DELETE FROM RelationshipList");
+            stmt.execute("DELETE FROM SanctionsReferencesList");
+        }
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("CountryName/@code", "CountryList", "code", "NONE"),
+                new FieldMapping("CountryName/@name", "CountryList", "name", "NONE"),
+                new FieldMapping("CountryName/@IsTerritory", "CountryList", "is_territory", "NONE"),
+                new FieldMapping("CountryName/@ProfileURL", "CountryList", "profile_url", "NONE"),
+
+                new FieldMapping("Occupation/@code", "OccupationList", "code", "NONE"),
+                new FieldMapping("Occupation/@name", "OccupationList", "name", "NONE"),
+
+                new FieldMapping("Relationship/@code", "RelationshipList", "code", "NONE"),
+                new FieldMapping("Relationship/@name", "RelationshipList", "name", "NONE"),
+
+                new FieldMapping("ReferenceName/@code", "SanctionsReferencesList", "reference_id", "NONE"),
+                new FieldMapping("ReferenceName/@name", "SanctionsReferencesList", "name", "NONE"),
+                new FieldMapping("ReferenceName/@status", "SanctionsReferencesList", "status", "NONE"),
+                new FieldMapping("ReferenceName/@Description2Id", "SanctionsReferencesList", "description_2_id", "NONE")
+        );
+
+        com.enterprise.xmldbtool.batch.HeaderReferenceIngestionTasklet tasklet =
+                new com.enterprise.xmldbtool.batch.HeaderReferenceIngestionTasklet(
+                        "sample-data/pfa-sample.xml",
+                        "Person",
+                        mappings,
+                        dataSource
+                );
+
+        org.springframework.batch.core.StepExecution stepExecution =
+                org.springframework.batch.test.MetaDataInstanceFactory.createStepExecution();
+        tasklet.beforeStep(stepExecution);
+
+        org.springframework.batch.repeat.RepeatStatus status = tasklet.execute(null, null);
+        assertEquals(org.springframework.batch.repeat.RepeatStatus.FINISHED, status);
+
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM CountryList")) {
+                assertTrue(rs.next());
+                assertTrue(rs.getInt(1) >= 1, "CountryList must have records");
+            }
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM OccupationList")) {
+                assertTrue(rs.next());
+                assertTrue(rs.getInt(1) >= 1, "OccupationList must have records");
+            }
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM RelationshipList")) {
+                assertTrue(rs.next());
+                assertTrue(rs.getInt(1) >= 1, "RelationshipList must have records");
+            }
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM SanctionsReferencesList")) {
+                assertTrue(rs.next());
+                assertTrue(rs.getInt(1) >= 1, "SanctionsReferencesList must have records");
+            }
+        }
+    }
 }
 

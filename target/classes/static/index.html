@@ -1025,16 +1025,66 @@
         <!-- ========================================================================= -->
         <!-- PAGE 3: EXECUTION SUMMARY (Batch History & Hardware Telemetry)              -->
         <!-- ========================================================================= -->
-        <main id="page-execution-summary" class="app-page hidden flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-8 space-y-8">
+        <main id="page-execution-summary" class="app-page hidden flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-8 space-y-6">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-gray-200 gap-3">
                 <div>
-                    <h2 class="text-2xl font-bold text-gray-900">Execution Summary &amp; System Telemetry</h2>
-                    <p class="text-xs text-gray-500 mt-1">Real-time hardware utilization, JVM heap memory, throughput graphs, and Spring Batch execution history.</p>
+                    <div class="flex items-center gap-3">
+                        <h2 class="text-2xl font-bold text-gray-900">Execution Summary &amp; System Telemetry</h2>
+                        <span id="live-telemetry-indicator" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-2xs">
+                            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+                            <span class="w-2 h-2 rounded-full bg-emerald-600 -ml-3.5"></span>
+                            <span id="live-indicator-text">LIVE TELEMETRY (1s)</span>
+                        </span>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-1">Real-time hardware utilization, JVM heap memory, live streaming throughput, table metrics, and diagnostic failure logs.</p>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button type="button" id="btn-refresh-history" class="btn btn-secondary text-xs py-1.5 px-3">
-                        <i class="fas fa-sync-alt mr-1.5 text-bnp-emerald"></i> Refresh Metrics
+                    <span id="span-last-refreshed" class="text-[10px] text-gray-400 font-mono hidden sm:inline-block">Sync: --</span>
+                    <button type="button" id="btn-toggle-telemetry-polling" class="btn btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5">
+                        <i class="fas fa-pause text-amber-500" id="icon-toggle-polling"></i>
+                        <span id="label-toggle-polling">Pause Live</span>
                     </button>
+                    <button type="button" id="btn-refresh-history" class="btn btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5">
+                        <i class="fas fa-sync-alt text-bnp-emerald"></i> Refresh Now
+                    </button>
+                </div>
+            </div>
+
+            <!-- JOB FAILURE DIAGNOSTIC ALERT PANEL (Displayed prominently if a job fails) -->
+            <div id="job-failure-alert-panel" class="hidden p-4 rounded-xl border-l-4 border-l-red-600 bg-red-50/95 border border-red-200 shadow-sm text-xs">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="flex items-start gap-3">
+                        <div class="w-9 h-9 rounded-lg bg-red-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                            <i class="fas fa-triangle-exclamation text-lg"></i>
+                        </div>
+                        <div>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <h4 class="font-bold text-red-950 text-sm">Batch Ingestion Failed - Diagnostic Alert</h4>
+                                <span id="failure-alert-job-id" class="px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-red-200 text-red-900">Job #--</span>
+                                <span id="failure-alert-step" class="px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-red-100 text-red-800">Step: --</span>
+                                <span id="failure-alert-time" class="text-[10px] text-red-600 font-mono">Failed at: --</span>
+                            </div>
+                            <div class="mt-1.5 p-2 bg-white/80 rounded border border-red-200">
+                                <span class="text-[10px] uppercase font-bold text-red-600 tracking-wider">Root Cause:</span>
+                                <p id="failure-alert-message" class="text-xs text-red-900 font-mono font-bold mt-0.5 break-all">
+                                    Error details will appear here.
+                                </p>
+                            </div>
+                            <div class="mt-2.5 flex items-center gap-4">
+                                <button type="button" id="btn-toggle-failure-trace" class="text-xs font-bold text-red-700 hover:text-red-900 underline flex items-center gap-1 cursor-pointer">
+                                    <i class="fas fa-code text-[11px]"></i>
+                                    <span id="failure-trace-toggle-label">View Stack Trace &amp; Diagnostic Logs</span>
+                                </button>
+                                <span class="text-[10px] text-red-500 font-mono">Inspect target database constraints, schema columns, or XML format.</span>
+                            </div>
+                        </div>
+                    </div>
+                    <button type="button" id="btn-dismiss-failure-alert" class="text-red-400 hover:text-red-700 p-1" title="Dismiss Alert">
+                        <i class="fas fa-times text-base"></i>
+                    </button>
+                </div>
+                <div id="failure-trace-details" class="hidden mt-3 p-3 bg-gray-900 text-red-200 rounded-lg font-mono text-[11px] overflow-x-auto max-h-60 leading-relaxed whitespace-pre-wrap select-text border border-red-900">
+                    <!-- Diagnostic stack trace content -->
                 </div>
             </div>
 
@@ -1144,16 +1194,25 @@
                                 <i class="fas fa-gauge-high"></i>
                             </span>
                         </div>
-                        <div class="mt-2 flex items-baseline gap-2">
-                            <span id="metric-live-speed" class="text-2xl font-bold font-mono text-gray-900">0</span>
-                            <span class="text-xs text-gray-500 font-semibold">rec / sec</span>
+                        <div class="mt-2 flex items-baseline justify-between">
+                            <div class="flex items-baseline gap-1.5">
+                                <span id="metric-live-speed" class="text-2xl font-bold font-mono text-gray-900">0</span>
+                                <span class="text-xs text-gray-500 font-semibold">rec / sec</span>
+                            </div>
+                            <div class="text-right">
+                                <span class="text-[9px] text-gray-400 font-mono uppercase block">Avg Speed</span>
+                                <span id="metric-avg-speed" class="text-xs font-bold font-mono text-gray-700">0 r/s</span>
+                            </div>
                         </div>
                         <div class="mt-2 text-xs text-gray-500 flex justify-between items-center py-1 px-2 bg-gray-50 rounded border border-gray-100">
                             <span class="text-[11px] font-semibold text-gray-600">Streaming State:</span>
                             <span id="metric-speed-state" class="font-mono font-bold text-amber-600 text-[11px]">IDLE</span>
                         </div>
                     </div>
-                    <div class="mt-2 text-[10px] text-gray-400 font-mono truncate" id="metric-speed-subtitle">Streaming speed rate</div>
+                    <div class="mt-2 text-[10px] text-gray-400 font-mono flex items-center justify-between">
+                        <span id="metric-speed-subtitle" class="truncate">Live streaming throughput</span>
+                        <span id="metric-peak-speed" class="text-gray-500">Peak: 0 r/s</span>
+                    </div>
                 </div>
 
                 <!-- System Summary & Uptime -->
@@ -1185,7 +1244,12 @@
                             <i class="fas fa-chart-area text-bnp-emerald"></i>
                             <h4 class="font-bold text-gray-800 text-sm">Processing Throughput (Records / Sec)</h4>
                         </div>
-                        <span class="text-[11px] font-mono text-gray-400">Live Window</span>
+                        <div class="flex items-center gap-2">
+                            <span id="chart-live-rate-badge" class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                0 rec/s
+                            </span>
+                            <span class="text-[11px] font-mono text-gray-400">Live Window</span>
+                        </div>
                     </div>
                     <div class="h-64 w-full">
                         <canvas id="speedLineChart"></canvas>
@@ -1213,6 +1277,47 @@
                             <div class="text-[10px] text-gray-400">Errors / Skips</div>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- TABLE-LEVEL LIVE INGESTION BREAKDOWN (New Multi-Table Monitoring) -->
+            <div class="card p-5">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-gray-100 gap-2 mb-3">
+                    <div class="flex items-center gap-2.5">
+                        <div class="w-7 h-7 rounded-lg bg-emerald-50 text-bnp-emerald flex items-center justify-center text-xs border border-emerald-100">
+                            <i class="fas fa-table-cells"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-bold text-gray-900 text-sm">Target Tables Live Ingestion Breakdown</h4>
+                            <p class="text-[11px] text-gray-500">Live chunk-by-chunk records committed across normalized PostgreSQL target tables.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span id="table-breakdown-total-badge" class="px-2.5 py-0.5 rounded text-xs font-mono font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                            0 Tables Active
+                        </span>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto rounded-lg border border-gray-100 max-h-72">
+                    <table class="min-w-full divide-y divide-gray-200 text-left text-xs font-mono">
+                        <thead class="bg-gray-50 text-gray-600 sticky top-0 uppercase font-sans text-[11px]">
+                            <tr>
+                                <th class="px-4 py-2.5">Target Table</th>
+                                <th class="px-4 py-2.5">Rows Committed</th>
+                                <th class="px-4 py-2.5">Errors / Skips</th>
+                                <th class="px-4 py-2.5">Share of Total</th>
+                                <th class="px-4 py-2.5">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-breakdown-tbody" class="divide-y divide-gray-100 bg-white">
+                            <tr>
+                                <td colspan="5" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">
+                                    No active or historical table write statistics available.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
 
@@ -1294,6 +1399,7 @@
                                 <th class="px-4 py-3">Read</th>
                                 <th class="px-4 py-3">Written</th>
                                 <th class="px-4 py-3">Errors</th>
+                                <th class="px-4 py-3 text-center">Action</th>
                             </tr>
                         </thead>
                         <tbody id="execution-history-tbody" class="bg-white font-mono">
@@ -1302,6 +1408,40 @@
                     </table>
                 </div>
             </div>
+
+            <!-- RECENT ERROR LOGS (migration_errors JSONB Table Viewer) -->
+            <div class="card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center space-x-3">
+                        <div class="w-8 h-8 rounded-lg bg-red-50 text-red-600 flex items-center justify-center font-bold text-sm">
+                            <i class="fas fa-triangle-exclamation"></i>
+                        </div>
+                        <div>
+                            <h4 class="font-bold text-gray-800 text-sm">Fault-Tolerant Error &amp; Skip Logs</h4>
+                            <p class="text-xs text-gray-500">Captured by DatabaseErrorSkipListener and persisted into target table 'migration_errors'.</p>
+                        </div>
+                    </div>
+                    <span id="errors-count-badge" class="text-xs font-mono font-bold text-red-600 bg-red-50 px-2.5 py-1 rounded-md border border-red-200">0 Errors Logged</span>
+                </div>
+                <div class="overflow-x-auto rounded-xl border border-gray-200 bg-white max-h-60">
+                    <table class="min-w-full divide-y divide-gray-200 text-left text-xs font-mono">
+                        <thead class="bg-gray-50 text-gray-600 sticky top-0">
+                            <tr>
+                                <th class="px-4 py-2.5">Time</th>
+                                <th class="px-4 py-2.5">Phase</th>
+                                <th class="px-4 py-2.5">Error Message</th>
+                                <th class="px-4 py-2.5">Failed Record Payload (JSONB)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="errors-table-body" class="divide-y divide-gray-200 text-gray-700">
+                            <tr>
+                                <td colspan="4" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No errors recorded. All batches committing cleanly.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
 
             <!-- RECENT ERROR LOGS (migration_errors JSONB Table Viewer) -->
             <div class="card p-6">

@@ -436,9 +436,10 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
 
         String normCol = columnName != null ? columnName.toLowerCase() : "";
 
-        // 1. Timestamp / Date conversion (e.g. created_at, "2026-10-01 09:15:00")
+        // 1. Timestamp / Date conversion (e.g. created_at, "2026-10-01 09:15:00", "21-Feb-2023")
         if (normCol.contains("date") || normCol.contains("time") || normCol.contains("at") || normCol.contains("timestamp")
-                || s.matches("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}.*") || s.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
+                || s.matches("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}.*") || s.matches("^\\d{4}-\\d{2}-\\d{2}$")
+                || s.matches("^\\d{1,2}-[A-Za-z]{3}-\\d{4}$")) {
             try {
                 if (s.matches("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}(\\.\\d+)?$")) {
                     return java.sql.Timestamp.valueOf(s);
@@ -449,6 +450,11 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                 }
                 if (s.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
                     return java.sql.Date.valueOf(s);
+                }
+                if (s.matches("^\\d{1,2}-[A-Za-z]{3}-\\d{4}$")) {
+                    java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("d-MMM-yyyy", java.util.Locale.ENGLISH);
+                    java.time.LocalDate ld = java.time.LocalDate.parse(s, dtf);
+                    return java.sql.Date.valueOf(ld);
                 }
             } catch (Exception ignored) {}
         }

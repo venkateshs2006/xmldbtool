@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PFA date="202206192200" type="full">
+    <CountryList>
+        <CountryName code="TIMOR" name="Timor Leste" IsTerritory="False" ProfileURL="timor leste.doc"/>
+    </CountryList>
+    <OccupationList>
+        <Occupation code="1" name="Heads &amp; Deputies State/National Government"/>
+    </OccupationList>
+    <RelationshipList>
+        <Relationship code="1" name="Wife"/>
+    </RelationshipList>
+    <SanctionsReferencesList>
+        <ReferenceName code="1" name="OFAC - Specially Designated National List" status="Current" Description2Id="1"/>
+    </SanctionsReferencesList>
+    <Description1List>
+        <Description1Name Description1Id="1" RecordType="Person">Politically Exposed Person (PEP)</Description1Name>
+    </Description1List>
+    <Description2List>
+        <Description2Name Description2Id="1" Description1Id="3">Sanctions Lists</Description2Name>
+    </Description2List>
+    <Description3List>
+        <Description3Name Description3Id="1" Description2Id="3">Ship</Description3Name>
+    </Description3List>
+    <DateTypeList>
+        <DateType RecordType="Person" Id="1" name="Date of Birth"/>
+    </DateTypeList>
+    <NameTypeList>
+        <NameType NameTypeID="1" RecordType="Person">Primary Name</NameType>
+    </NameTypeList>
+    <RoleTypeList>
+        <RoleType Id="1" name="Primary Occupation"/>
+    </RoleTypeList>
+    <Records>
+        <Person id="1447992" action="add" date="21-Feb-2023">
+            <Gender>Male</Gender>
+            <ActiveStatus>Active</ActiveStatus>
+            <Deceased>No</Deceased>
+            <NameDetails>
+                <Name NameType="Primary Name">
+                    <NameValue>
+                        <FirstName>Asim</FirstName>
+                        <Surname>Sarajlić</Surname>
+                    </NameValue>
+                </Name>
+                <Name NameType="Spelling Variation">
+                    <NameValue>
+                        <FirstName>Asim</FirstName>
+                        <Surname>Sarajlich</Surname>
+                    </NameValue>
+                    <NameValue>
+                        <FirstName>Asim</FirstName>
+                        <Surname>Sarajlic</Surname>
+                    </NameValue>
+                </Name>
+            </NameDetails>
+            <Descriptions>
+                <Description Description1="1"/>
+                <Description Description1="3" Description2="1"/>
+                <Description Description1="3" Description2="10"/>
+            </Descriptions>
+            <RoleDetail>
+                <Roles RoleType="Primary Occupation">
+                    <OccTitle OccCat="3">See Previous Roles</OccTitle>
+                </Roles>
+                <Roles RoleType="Previous Roles">
+                    <OccTitle SinceDay="30" SinceMonth="Dec" SinceYear="2010" ToDay="07" ToMonth="Oct" ToYear="2018" OccCat="3">Member, BiH H</OccTitle>
+                    <OccTitle SinceYear="2013" OccCat="16">Deputy Chairman, Party of Democratic Action (SDA)</OccTitle>
+                    <OccTitle SinceDay="07" SinceMonth="Oct" SinceYear="2018" ToDay="28" ToMonth="Feb" ToYear="2019" OccCat="3">Member, Feder</OccTitle>
+                    <OccTitle SinceDay="28" SinceMonth="Feb" SinceYear="2019" ToDay="02" ToMonth="Oct" ToYear="2022" OccCat="3">Member, BiH H</OccTitle>
+                </Roles>
+            </RoleDetail>
+            <DateDetails>
+                <Date DateType="Date of Birth">
+                    <DateValue Day="03" Month="Oct" Year="1975"/>
+                </Date>
+                <Date DateType="Inactive as of (PEP)">
+                    <DateValue Day="02" Month="Oct" Year="2022"/>
+                </Date>
+            </DateDetails>
+            <BirthPlace>
+                <Place name="Sarajevo,Bosnia and Herzegovina"/>
+            </BirthPlace>
+            <SanctionsReferences>
+                <Reference SinceDay="11" SinceMonth="Apr" SinceYear="2022">1</Reference>
+            </SanctionsReferences>
+            <CountryDetails>
+                <Country CountryType="Citizenship">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+                <Country CountryType="Resident of">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+                <Country CountryType="Jurisdiction">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+                <Country CountryType="Country of Reported Allegation">
+                    <CountryValue Code="BSHZG"/>
+                </Country>
+            </CountryDetails>
+            <IDNumberTypes>
+                <ID IDType="OFAC Program ID">
+                    <IDValue>BALKANS-EO14033</IDValue>
+                </ID>
+                <ID IDType="OFAC Unique ID">
+                    <IDValue>35956</IDValue>
+                </ID>
+            </IDNumberTypes>
+            <ProfileNotes>PROFILE CREATED: 02-Aug-2022 UPDATE ADDED: 09-Feb-2023 </ProfileNotes>
+            <SourceDescription>
+                <Source name="https://home.treasury.gov/policy-issues/financial-sanctions/recent-actions/20220411"/>
+                <Source name="https://www.treasury.gov/ofac/downloads/sdnlist.pdf"/>
+                <Source name="https://home.treasury.gov/news/press-releases/jy0712"/>
+                <Source name="Federalna Novinska Agencija, 29-Jul-2022, on Factiva.com (https://global.factiva.com/redir/d"/>
+                <Source name="Euronews, 29-Jul-2022, on Factiva.com (https://global.factiva.com/redir/default.aspx?P=sa&amp;am"/>
+                <Source name="Associated Press Newswires, 29-Jul-2022, on Factiva.com (https://global.factiva.com/redir/de"/>
+                <Source name="Federalna Novinska Agencija, 10-Feb-2023, on Factiva.com (https://global.factiva.com/redir/de"/>
+                <Source name="Federalna Novinska Agencija, 10-Feb-2023, on Factiva.com (https://global.factiva.com/redir/de"/>
+                <Source name="Federalna Novinska Agencija, 27-Dec-2021, on Factiva.com (https://global.factiva.com/redir/de"/>
+            </SourceDescription>
+            <Images>
+                <Image URL="http://thebosniatimes.ba/vijestiSlike/vijestSlika_2015-04-29-04-11-48.jpg"/>
+                <Image URL="http://imovinapoliticara.cin.ba/images/AsimSarajlic.jpg"/>
+                <Image URL="https://www.parlament.ba/data/fotografije/jpg/asim-sarajlic.jpg?px=165"/>
+            </Images>
+        </Person>
+    </Records>
+</PFA>

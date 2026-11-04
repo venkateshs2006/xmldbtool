@@ -16,8 +16,12 @@ public class JobExecutionSummary {
     private long totalWritten;
     private long totalErrors;
     private double recordsPerSecond;
+    private String errorMessage;
 
     public JobExecutionSummary() {}
+
+    public String getErrorMessage() { return errorMessage; }
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
 
     public Long getExecutionId() { return executionId; }
     public void setExecutionId(Long executionId) { this.executionId = executionId; }
