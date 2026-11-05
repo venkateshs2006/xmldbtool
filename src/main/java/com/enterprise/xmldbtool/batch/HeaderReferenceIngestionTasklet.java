@@ -122,7 +122,7 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
                     }
 
                     // If we reached Records or the main record element, stop header scan immediately
-                    if (tag.equalsIgnoreCase("records") || tag.equalsIgnoreCase(recordRootElement)) {
+                    if (tag.equalsIgnoreCase("records") || (tag.equalsIgnoreCase(recordRootElement) && !recordRootElement.toLowerCase().endsWith("list"))) {
                         log.info("Reached records collection tag '{}', stopping header reference stream.", tag);
                         break;
                     }
@@ -221,25 +221,29 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
     private boolean isTagForTable(String elementTag, String containerTag, String tableName, List<FieldMapping> tblMaps) {
         String normEl = elementTag.toLowerCase();
         String normTbl = tableName.toLowerCase();
+        String cleanEl = normEl.replace("_", "").replace("-", "");
+        String cleanTbl = normTbl.replace("_", "").replace("-", "");
+        String cleanContainer = containerTag != null ? containerTag.toLowerCase().replace("_", "").replace("-", "") : "";
 
         // 1. Check if mappings explicitly reference elementTag
         for (FieldMapping m : tblMaps) {
             String f = m.getXmlField();
             if (f != null) {
-                String normF = f.toLowerCase();
-                if (normF.startsWith(normEl + "/") || normF.startsWith(normEl + "/@") || normF.equals(normEl)) {
+                String normF = f.toLowerCase().replace("_", "").replace("-", "");
+                if (normF.startsWith(cleanEl + "/") || normF.startsWith(cleanEl + "/@") || normF.equals(cleanEl)) {
                     return true;
                 }
             }
         }
 
-        // 2. Container name match (e.g. container CountryList -> table CountryList)
-        if (containerTag != null && containerTag.equalsIgnoreCase(tableName)) {
+        // 2. Container name match (e.g. container CountryList -> table CountryList or country_list)
+        if (!cleanContainer.isEmpty() && (cleanContainer.equals(cleanTbl) || cleanTbl.contains(cleanContainer) || cleanContainer.contains(cleanTbl))) {
             return true;
         }
 
         // 3. Name similarity (e.g. CountryName -> CountryList, Occupation -> OccupationList)
-        if (normTbl.contains(normEl) || normEl.contains(normTbl.replace("list", "").replace("lists", ""))) {
+        String tblBase = cleanTbl.replace("list", "").replace("lists", "");
+        if (cleanTbl.contains(cleanEl) || (!tblBase.isEmpty() && cleanEl.contains(tblBase))) {
             return true;
         }
 

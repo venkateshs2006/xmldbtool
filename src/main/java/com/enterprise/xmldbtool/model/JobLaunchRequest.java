@@ -11,6 +11,7 @@ public class JobLaunchRequest {
     private int chunkSize = 1000;
     private List<FieldMapping> mappings = new ArrayList<>();
     private List<String> tableOrder = new ArrayList<>();
+    private boolean stagedPipeline = false;
 
     public JobLaunchRequest() {}
 
@@ -34,4 +35,7 @@ public class JobLaunchRequest {
 
     public List<String> getTableOrder() { return tableOrder; }
     public void setTableOrder(List<String> tableOrder) { this.tableOrder = tableOrder; }
+
+    public boolean isStagedPipeline() { return stagedPipeline; }
+    public void setStagedPipeline(boolean stagedPipeline) { this.stagedPipeline = stagedPipeline; }
 }

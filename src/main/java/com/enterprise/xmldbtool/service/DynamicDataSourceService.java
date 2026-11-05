@@ -15,6 +15,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +59,100 @@ public class DynamicDataSourceService {
                 detail += " (Target host/port unreachable. Check if database service is running, or use 'Preset: Embedded Test DB' for instant in-memory testing).";
             }
             return new DbTestResponse(false, detail, null, null);
+        } finally {
+            if (testDs != null && !testDs.isClosed()) {
+                try {
+                    testDs.close();
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    /**
+     * Creates a target database schema (e.g. CREATE SCHEMA IF NOT EXISTS "my_schema")
+     * in the target database based on configuration parameters.
+     */
+    public DbTestResponse createSchema(DbConnectionConfig config) {
+        if (config == null || config.getUrl() == null || config.getUrl().trim().isEmpty()) {
+            return new DbTestResponse(false, "Database connection URL is required.", null, null);
+        }
+        String schema = config.getSchema() != null ? config.getSchema().trim() : "";
+        if (schema.isEmpty()) {
+            return new DbTestResponse(false, "Target schema name cannot be empty.", null, null);
+        }
+        if (!schema.matches("^[a-zA-Z0-9_]+$")) {
+            return new DbTestResponse(false, "Invalid schema name '" + schema + "': only alphanumeric characters and underscores are allowed.", null, null);
+        }
+
+        HikariDataSource testDs = null;
+        try {
+            // Build base config without requiring schema to exist beforehand
+            DbConnectionConfig baseConfig = new DbConnectionConfig();
+            baseConfig.setUrl(config.getUrl());
+            baseConfig.setUsername(config.getUsername());
+            baseConfig.setPassword(config.getPassword());
+            baseConfig.setEngine(config.getEngine());
+            baseConfig.setHost(config.getHost());
+            baseConfig.setPort(config.getPort());
+            baseConfig.setDatabaseName(config.getDatabaseName());
+            baseConfig.setSchema(null);
+
+            HikariConfig hikariConfig = buildHikariConfig(baseConfig);
+            hikariConfig.setMaximumPoolSize(2);
+            hikariConfig.setMinimumIdle(1);
+            hikariConfig.setConnectionTimeout(5000);
+            hikariConfig.setInitializationFailTimeout(5000);
+            hikariConfig.setPoolName("CreateSchema-Pool-" + System.currentTimeMillis());
+
+            testDs = new HikariDataSource(hikariConfig);
+            try (Connection conn = testDs.getConnection();
+                 Statement stmt = conn.createStatement()) {
+
+                DatabaseMetaData meta = conn.getMetaData();
+                String prodName = meta.getDatabaseProductName();
+                String url = config.getUrl().toLowerCase();
+
+                if (url.contains(":postgresql:") || (prodName != null && prodName.toLowerCase().contains("postgresql"))) {
+                    String ddl = "CREATE SCHEMA IF NOT EXISTS \"" + schema + "\"";
+                    stmt.execute(ddl);
+                    log.info("Executed PostgreSQL DDL: {}", ddl);
+                } else if (url.contains(":h2:") || (prodName != null && prodName.toLowerCase().contains("h2"))) {
+                    String ddl = "CREATE SCHEMA IF NOT EXISTS \"" + schema + "\"";
+                    stmt.execute(ddl);
+                    log.info("Executed H2 DDL: {}", ddl);
+                } else if (url.contains(":oracle:") || (prodName != null && prodName.toLowerCase().contains("oracle"))) {
+                    boolean exists = false;
+                    try (ResultSet rs = stmt.executeQuery("SELECT USERNAME FROM ALL_USERS WHERE USERNAME = '" + schema.toUpperCase() + "'")) {
+                        if (rs.next()) {
+                            exists = true;
+                        }
+                    } catch (Exception ignored) {}
+
+                    if (exists) {
+                        log.info("Oracle schema (user) '{}' already exists in ALL_USERS.", schema.toUpperCase());
+                    } else {
+                        try {
+                            String pwd = config.getPassword() != null && !config.getPassword().trim().isEmpty() ? config.getPassword() : "oracle";
+                            stmt.execute("CREATE USER " + schema.toUpperCase() + " IDENTIFIED BY \"" + pwd + "\"");
+                            stmt.execute("GRANT CONNECT, RESOURCE TO " + schema.toUpperCase());
+                            log.info("Created Oracle user/schema '{}'.", schema.toUpperCase());
+                        } catch (Exception oraEx) {
+                            log.warn("Notice during Oracle CREATE USER (schema will be referenced via CURRENT_SCHEMA): {}", oraEx.getMessage());
+                        }
+                    }
+                } else {
+                    stmt.execute("CREATE SCHEMA IF NOT EXISTS \"" + schema + "\"");
+                }
+
+                return new DbTestResponse(true, "Target schema '" + schema + "' created successfully (or already exists) in " + prodName + ".", prodName, meta.getDatabaseProductVersion());
+            }
+        } catch (Exception ex) {
+            log.error("Failed to create target schema '{}' at {}: {}", schema, config.getUrl(), ex.getMessage());
+            String detail = ex.getMessage();
+            if (ex.getCause() != null && ex.getCause().getMessage() != null) {
+                detail += " -> " + ex.getCause().getMessage();
+            }
+            return new DbTestResponse(false, "Failed to create schema '" + schema + "': " + detail, null, null);
         } finally {
             if (testDs != null && !testDs.isClosed()) {
                 try {

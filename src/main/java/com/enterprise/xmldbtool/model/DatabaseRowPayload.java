@@ -123,6 +123,10 @@ public class DatabaseRowPayload implements Serializable {
         return multiTableRecords;
     }
 
+    public Map<String, List<Map<String, Object>>> getRowsByTable() {
+        return getMultiTableRecords();
+    }
+
     public void setMultiTableRecords(Map<String, List<Map<String, Object>>> records) {
         this.multiTableRecords = records != null ? new LinkedHashMap<>(records) : new LinkedHashMap<>();
         for (Map.Entry<String, List<Map<String, Object>>> entry : this.multiTableRecords.entrySet()) {

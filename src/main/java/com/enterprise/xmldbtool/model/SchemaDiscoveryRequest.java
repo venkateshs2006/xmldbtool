@@ -7,6 +7,7 @@ public class SchemaDiscoveryRequest {
     private String sourceXmlPath;
     private String recordRootElement = "record";
     private int sampleLinesLimit = 1000;
+    private boolean autoCreateTables = true;
 
     public SchemaDiscoveryRequest() {}
 
@@ -21,4 +22,7 @@ public class SchemaDiscoveryRequest {
 
     public int getSampleLinesLimit() { return sampleLinesLimit; }
     public void setSampleLinesLimit(int sampleLinesLimit) { this.sampleLinesLimit = sampleLinesLimit; }
+
+    public boolean isAutoCreateTables() { return autoCreateTables; }
+    public void setAutoCreateTables(boolean autoCreateTables) { this.autoCreateTables = autoCreateTables; }
 }

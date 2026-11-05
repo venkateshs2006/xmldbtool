@@ -353,10 +353,10 @@
 
                 <div class="p-6 overflow-y-auto space-y-5 text-xs">
                     <!-- General Details Grid -->
-                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-gray-50 p-3.5 rounded-xl border border-gray-200">
+                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 bg-gray-50 p-3.5 rounded-xl border border-gray-200">
                         <div>
                             <div class="text-[10px] uppercase font-bold text-gray-400">Target Table(s)</div>
-                            <div id="review-modal-target-table" class="font-bold text-gray-800 font-mono mt-0.5">--</div>
+                            <div id="review-modal-target-table" class="font-bold text-gray-800 font-mono mt-0.5 truncate">--</div>
                         </div>
                         <div>
                             <div class="text-[10px] uppercase font-bold text-gray-400">Chunk Size</div>
@@ -365,6 +365,10 @@
                         <div>
                             <div class="text-[10px] uppercase font-bold text-gray-400">Root Tag</div>
                             <div id="review-modal-root-tag" class="font-bold text-gray-800 font-mono mt-0.5">record</div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Pipeline Mode</div>
+                            <div id="review-modal-pipeline-mode" class="font-bold text-gray-800 font-mono mt-0.5 text-[10px]">--</div>
                         </div>
                         <div>
                             <div class="text-[10px] uppercase font-bold text-gray-400">Status</div>
@@ -404,6 +408,7 @@
                                         <th class="px-3 py-2">Source XML Field</th>
                                         <th class="px-3 py-2">Target Table</th>
                                         <th class="px-3 py-2">Target Column</th>
+                                        <th class="px-3 py-2">Constraint</th>
                                         <th class="px-3 py-2">Transform</th>
                                     </tr>
                                 </thead>
@@ -420,6 +425,109 @@
                     <button type="button" id="btn-modal-run-job" class="btn btn-primary text-xs font-bold px-5">
                         <i class="fas fa-play mr-1.5"></i>
                         <span>Run Spring Batch Migration Now</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- JSON Mapping Document Modal Dialog (Import & Export) -->
+        <div id="jsonMappingModal" class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-[9999] hidden p-4">
+            <div class="card max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl border border-gray-200" onclick="event.stopPropagation()">
+                <div class="p-5 border-b border-gray-200 flex items-center justify-between bg-slate-50">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-lg bg-emerald-100 text-bnp-emerald flex items-center justify-center text-lg font-bold">
+                            <i class="fas fa-file-code"></i>
+                        </div>
+                        <div>
+                            <h3 id="json-modal-title" class="text-base font-bold text-gray-900">JSON Mapping Document Ingestion</h3>
+                            <p class="text-xs text-gray-500">Import or export declarative XML-to-table field mappings &amp; constraints</p>
+                        </div>
+                    </div>
+                    <button type="button" id="btn-close-json-modal" class="text-gray-400 hover:text-gray-600 text-lg">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="p-6 overflow-y-auto space-y-4 text-xs">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold text-gray-700 uppercase tracking-wider">JSON Mapping Payload</span>
+                        <div class="flex items-center gap-2">
+                            <label class="cursor-pointer text-[11px] text-bnp-emerald hover:underline flex items-center gap-1 font-semibold">
+                                <i class="fas fa-upload"></i> Upload File
+                                <input type="file" id="json-mapping-file-input" accept=".json" class="hidden">
+                            </label>
+                            <span class="text-gray-300">|</span>
+                            <button type="button" id="btn-copy-mapping-json" class="text-[11px] text-gray-600 hover:text-gray-900 flex items-center gap-1 font-semibold">
+                                <i class="fas fa-copy"></i> Copy JSON
+                            </button>
+                        </div>
+                    </div>
+                    <textarea id="json-mapping-textarea" rows="12"
+                              placeholder='[&#10;  {&#10;    "xmlField": "Person/@id",&#10;    "targetTable": "Person",&#10;    "targetColumn": "person_id",&#10;    "constraintType": "PK",&#10;    "transform": "NONE"&#10;  }&#10;]'
+                              class="input-field font-mono text-xs w-full p-3 leading-relaxed"></textarea>
+                    <p class="text-[11px] text-gray-500">Accepts an array of mapping objects containing <code>xmlField</code>, <code>targetTable</code>, <code>targetColumn</code>, <code>constraintType</code> (PK/FK/NONE), and <code>transform</code>.</p>
+                </div>
+                <div class="p-4 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
+                    <button type="button" id="btn-close-json-modal-2" class="btn btn-secondary text-xs">Cancel</button>
+                    <div class="flex items-center gap-2">
+                        <button type="button" id="btn-apply-json-mapping" class="btn btn-primary text-xs font-bold px-4">
+                            <i class="fas fa-check mr-1.5"></i> Apply Mapping to Workflow
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Register Schema Version in Registry Modal Dialog -->
+        <div id="registerSchemaModal" class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-[9999] hidden p-4">
+            <div class="card max-w-lg w-full overflow-hidden shadow-2xl border border-gray-200" onclick="event.stopPropagation()">
+                <div class="p-5 border-b border-gray-200 flex items-center justify-between bg-slate-50">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center text-lg font-bold">
+                            <i class="fas fa-bookmark"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-base font-bold text-gray-900">Schema Registry Versioning</h3>
+                            <p class="text-xs text-gray-500">Publish current schema mapping to central versioned registry</p>
+                        </div>
+                    </div>
+                    <button type="button" id="btn-close-register-schema-modal" class="text-gray-400 hover:text-gray-600 text-lg">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="p-6 space-y-4 text-xs">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block font-bold text-gray-700 uppercase tracking-wider mb-1">Schema Name *</label>
+                            <input type="text" id="reg-schema-name" placeholder="e.g. PFA-WorldCheck-Sanctions" class="input-field text-xs font-medium" required>
+                        </div>
+                        <div>
+                            <label class="block font-bold text-gray-700 uppercase tracking-wider mb-1">Semantic Version *</label>
+                            <input type="text" id="reg-schema-version" placeholder="e.g. 2.5.0" class="input-field text-xs font-mono font-bold text-bnp-emerald" required>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block font-bold text-gray-700 uppercase tracking-wider mb-1">Entity Type</label>
+                            <input type="text" id="reg-schema-entity" placeholder="e.g. Person or Product" class="input-field text-xs">
+                        </div>
+                        <div>
+                            <label class="block font-bold text-gray-700 uppercase tracking-wider mb-1">Root XML Tag</label>
+                            <input type="text" id="reg-schema-root" placeholder="e.g. Person" class="input-field text-xs font-mono">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block font-bold text-gray-700 uppercase tracking-wider mb-1">Description</label>
+                        <textarea id="reg-schema-desc" rows="2" placeholder="Summary of schema version, fields, and canonical relationships..." class="input-field text-xs"></textarea>
+                    </div>
+                    <div class="p-2.5 rounded-lg bg-purple-50 border border-purple-200 text-purple-900 text-[11px] flex items-center gap-2">
+                        <i class="fas fa-info-circle text-purple-600 shrink-0"></i>
+                        <span>This will persist <span id="reg-schema-mapping-count" class="font-bold">0</span> configured field mappings &amp; PK/FK constraints into the Schema Registry table.</span>
+                    </div>
+                </div>
+                <div class="p-4 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
+                    <button type="button" id="btn-close-register-schema-modal-2" class="btn btn-secondary text-xs">Cancel</button>
+                    <button type="button" id="btn-submit-register-schema" class="btn btn-primary text-xs font-bold px-4">
+                        <i class="fas fa-save mr-1.5"></i> Publish Version to Registry
                     </button>
                 </div>
             </div>
@@ -665,8 +773,21 @@
                             <input type="text" id="db-name" required placeholder="enterprise_db" value="enterprise_db" class="input-field font-mono text-xs">
                         </div>
                         <div>
-                            <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">Target Schema</label>
-                            <input type="text" id="db-schema" required placeholder="public" value="public" class="input-field font-mono text-xs">
+                            <div class="flex items-center justify-between mb-2">
+                                <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider">Target Schema</label>
+                                <button type="button" id="btn-create-schema-quick" class="text-[11px] text-purple-700 hover:text-purple-900 font-bold flex items-center gap-1 transition" title="Initialize / Create target schema in database">
+                                    <i class="fas fa-folder-plus text-[10px]"></i>
+                                    <span>Create Schema DDL</span>
+                                </button>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <input type="text" id="db-schema" required placeholder="public" value="public" class="input-field font-mono text-xs">
+                                <button type="button" id="btn-create-schema" class="btn text-xs py-2 px-3 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 font-semibold flex items-center whitespace-nowrap shadow-sm" title="Issue CREATE SCHEMA IF NOT EXISTS in target database">
+                                    <i class="fas fa-folder-plus mr-1.5 text-purple-600"></i>
+                                    <span>Create Schema</span>
+                                </button>
+                            </div>
+                            <p class="text-[11px] text-gray-400 mt-1">Specify schema name (e.g. <code>public</code>, <code>sanctions_schema</code>) or click <strong>Create Schema</strong> to provision it in target DB.</p>
                         </div>
                     </div>
 
@@ -681,11 +802,17 @@
                         </div>
                     </div>
 
-                    <div class="pt-6 flex items-center justify-between border-t border-gray-100">
-                        <button type="button" id="btn-test-connection" class="btn btn-secondary">
-                            <i class="fas fa-plug mr-2 text-bnp-emerald"></i>
-                            <span>Test &amp; Validate Credentials</span>
-                        </button>
+                    <div class="pt-6 flex flex-wrap items-center justify-between border-t border-gray-100 gap-3">
+                        <div class="flex items-center gap-3">
+                            <button type="button" id="btn-test-connection" class="btn btn-secondary">
+                                <i class="fas fa-plug mr-2 text-bnp-emerald"></i>
+                                <span>Test &amp; Validate Credentials</span>
+                            </button>
+                            <button type="button" id="btn-create-schema-footer" class="btn text-xs py-2 px-3.5 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-300 font-semibold flex items-center shadow-sm" title="Initialize / Provision target database schema">
+                                <i class="fas fa-folder-plus mr-1.5 text-purple-600"></i>
+                                <span>Create Target Schema</span>
+                            </button>
+                        </div>
                         <button type="button" id="btn-step1-next" class="btn btn-primary">
                             <span>Next: Source Selection</span>
                             <i class="fas fa-arrow-right ml-2"></i>
@@ -706,12 +833,38 @@
                             <p class="text-xs text-gray-500">Specify local XML file path or Cloud Object Storage URI with bounded StAX streaming.</p>
                         </div>
                     </div>
-                    <button type="button" id="btn-use-sample-xml" class="btn text-xs py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
-                        <i class="fas fa-folder-open mr-1.5"></i> Load Built-in Demo XML
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <button type="button" id="btn-open-json-import-modal-step2" class="btn text-xs py-1.5 px-3 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200">
+                            <i class="fas fa-file-import mr-1.5"></i> Ingest JSON Mapping
+                        </button>
+                        <button type="button" id="btn-use-sample-xml" class="btn text-xs py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
+                            <i class="fas fa-folder-open mr-1.5"></i> Load Built-in Demo XML
+                        </button>
+                    </div>
                 </div>
 
                 <form id="xml-source-form" class="space-y-6">
+                    <!-- Schema Registry Version Selection -->
+                    <div class="p-4 rounded-xl bg-purple-50/60 border border-purple-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div class="flex items-start gap-3">
+                            <div class="w-9 h-9 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-base shrink-0 mt-0.5">
+                                <i class="fas fa-bookmark"></i>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-bold text-gray-800 uppercase tracking-wider">Schema Registry Versioning</label>
+                                <p class="text-[11px] text-gray-500 mt-0.5">Select a versioned schema from central registry or auto-discover tags dynamically.</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2 w-full md:w-auto">
+                            <select id="schema-registry-select" class="input-field text-xs font-medium py-1.5 min-w-[240px] bg-white">
+                                <option value="">-- Dynamic XML Auto-Discovery --</option>
+                            </select>
+                            <button type="button" id="btn-refresh-schema-registry" class="btn btn-secondary text-xs py-1.5 px-2.5" title="Refresh Schema Registry">
+                                <i class="fas fa-arrows-rotate"></i>
+                            </button>
+                        </div>
+                    </div>
+
                     <div>
                         <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">XML Source Path or Cloud Object Storage URI</label>
                         <div class="relative">
@@ -788,7 +941,12 @@
                     <div class="lg:col-span-6 space-y-3">
                         <div class="flex items-center justify-between">
                             <h4 class="text-xs font-bold uppercase tracking-wider text-gray-500">Target Database Schema</h4>
-                            <span id="badge-discovered-tables" class="text-xs font-mono text-bnp-emerald font-bold bg-emerald-50 px-2 py-0.5 rounded">0 Tables</span>
+                            <div class="flex items-center gap-2">
+                                <span id="badge-discovered-tables" class="text-xs font-mono text-bnp-emerald font-bold bg-emerald-50 px-2 py-0.5 rounded">0 Tables</span>
+                                <button type="button" id="btn-create-discovered-tables" class="btn text-[11px] py-1 px-2.5 bg-emerald-50 text-bnp-emerald hover:bg-emerald-100 border border-emerald-300 font-bold transition shadow-xs" title="Auto-create canonical relational tables and flat staging table in target database">
+                                    <i class="fas fa-magic mr-1"></i> Create Tables &amp; Flat Table
+                                </button>
+                            </div>
                         </div>
                         <div id="db-tables-container" class="space-y-3 max-h-[380px] overflow-y-auto pr-1"></div>
                     </div>
@@ -818,9 +976,18 @@
                             <p class="text-xs text-gray-500">Map unmarshalled XML tags and flattened attributes to SQL columns across single or multiple tables.</p>
                         </div>
                     </div>
-                    <div class="flex items-center gap-2">
+                    <div class="flex flex-wrap items-center gap-2">
                         <button type="button" id="btn-auto-map" class="btn text-xs py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
                             <i class="fas fa-wand-magic-sparkles mr-1.5"></i> Auto-Align Exact
+                        </button>
+                        <button type="button" id="btn-open-json-import-modal" class="btn text-xs py-1.5 px-3 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200">
+                            <i class="fas fa-file-import mr-1.5"></i> Ingest JSON Mapping
+                        </button>
+                        <button type="button" id="btn-export-json-mapping" class="btn text-xs py-1.5 px-3 bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-300">
+                            <i class="fas fa-file-export mr-1.5"></i> Export JSON
+                        </button>
+                        <button type="button" id="btn-open-register-schema-modal" class="btn text-xs py-1.5 px-3 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200">
+                            <i class="fas fa-bookmark mr-1.5"></i> Register Schema Version
                         </button>
                         <button type="button" id="btn-clear-mapping" class="btn btn-secondary text-xs py-1.5 px-3 text-red-600 hover:bg-red-50 hover:border-red-300">
                             <i class="fas fa-trash-can mr-1.5"></i> Clear All
@@ -849,9 +1016,10 @@
 
                 <!-- Grid Header -->
                 <div class="hidden sm:grid grid-cols-12 gap-3 px-4 py-2.5 rounded-lg bg-gray-100 border border-gray-200 text-xs font-bold uppercase tracking-wider text-gray-600 mb-3">
-                    <div class="col-span-4">Source XML Field / Attribute</div>
+                    <div class="col-span-3">Source XML Field / Attribute</div>
                     <div class="col-span-2">Target Table</div>
-                    <div class="col-span-3">Destination Column</div>
+                    <div class="col-span-2">Destination Column</div>
+                    <div class="col-span-2 text-center">Constraint (PK/FK)</div>
                     <div class="col-span-1 text-center">Transform</div>
                     <div class="col-span-2 text-right">Sequence &amp; Actions</div>
                 </div>
@@ -954,6 +1122,38 @@
                         <div>
                             <label class="block font-bold text-gray-700 uppercase tracking-wider mb-1">Description</label>
                             <input type="text" id="job-desc-input" placeholder="e.g. Multi-table ingestion of catalog XML into inventory database" class="input-field text-xs">
+                        </div>
+                    </div>
+
+                    <!-- Pipeline Execution Strategy Selector -->
+                    <div class="mt-4 pt-4 border-t border-slate-200">
+                        <label class="block font-bold text-gray-700 uppercase tracking-wider mb-2 text-xs">
+                            <i class="fas fa-layer-group text-bnp-emerald mr-1"></i> Pipeline Architecture &amp; Execution Strategy
+                        </label>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                            <label class="flex items-start gap-3 p-3 rounded-lg border border-emerald-300 bg-emerald-50/60 hover:bg-emerald-50 cursor-pointer transition">
+                                <input type="radio" name="pipeline-mode" id="pipeline-mode-staged" value="staged" checked class="mt-0.5 text-bnp-emerald focus:ring-bnp-emerald">
+                                <div>
+                                    <div class="font-bold text-gray-900 flex items-center gap-1.5">
+                                        <span>Two-Stage Dynamic Pipeline</span>
+                                        <span class="px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-200 text-emerald-800">RECOMMENDED</span>
+                                    </div>
+                                    <p class="text-gray-600 text-[11px] mt-0.5 leading-snug">
+                                        Stage 1: O(1) Memory StAX streaming into staging table with SHA-256 delta hashing.<br>
+                                        Stage 2: Dynamic schema resolution &amp; upsert into Master Person + 1-to-N child tables with schema evolution.
+                                    </p>
+                                </div>
+                            </label>
+
+                            <label class="flex items-start gap-3 p-3 rounded-lg border border-gray-200 bg-white hover:bg-gray-50 cursor-pointer transition">
+                                <input type="radio" name="pipeline-mode" id="pipeline-mode-direct" value="direct" class="mt-0.5 text-bnp-emerald focus:ring-bnp-emerald">
+                                <div>
+                                    <div class="font-bold text-gray-900">Single-Pass Direct Streaming</div>
+                                    <p class="text-gray-500 text-[11px] mt-0.5 leading-snug">
+                                        Traditional single-pass Spring Batch item reader directly streaming XML chunks into target tables using NamedParameterJdbcTemplate.
+                                    </p>
+                                </div>
+                            </label>
                         </div>
                     </div>
 
@@ -1442,41 +1642,6 @@
                 </div>
             </div>
         </main>
-
-            <!-- RECENT ERROR LOGS (migration_errors JSONB Table Viewer) -->
-            <div class="card p-6">
-                <div class="flex items-center justify-between mb-4">
-                    <div class="flex items-center space-x-3">
-                        <div class="w-8 h-8 rounded-lg bg-red-50 text-red-600 flex items-center justify-center font-bold text-sm">
-                            <i class="fas fa-triangle-exclamation"></i>
-                        </div>
-                        <div>
-                            <h4 class="font-bold text-gray-800 text-sm">Fault-Tolerant Error &amp; Skip Logs</h4>
-                            <p class="text-xs text-gray-500">Captured by DatabaseErrorSkipListener and persisted into target table 'migration_errors'.</p>
-                        </div>
-                    </div>
-                    <span id="errors-count-badge" class="text-xs font-mono font-bold text-red-600 bg-red-50 px-2.5 py-1 rounded-md border border-red-200">0 Errors Logged</span>
-                </div>
-                <div class="overflow-x-auto rounded-xl border border-gray-200 bg-white max-h-60">
-                    <table class="min-w-full divide-y divide-gray-200 text-left text-xs font-mono">
-                        <thead class="bg-gray-50 text-gray-600 sticky top-0">
-                            <tr>
-                                <th class="px-4 py-2.5">Time</th>
-                                <th class="px-4 py-2.5">Phase</th>
-                                <th class="px-4 py-2.5">Error Message</th>
-                                <th class="px-4 py-2.5">Failed Record Payload (JSONB)</th>
-                            </tr>
-                        </thead>
-                        <tbody id="errors-table-body" class="divide-y divide-gray-200 text-gray-700">
-                            <tr>
-                                <td colspan="4" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No errors recorded. All batches committing cleanly.</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </main>
-
 
         <!-- ========================================================================= -->
         <!-- PAGE 4: USER DETAILS MAINTENANCE                                           -->

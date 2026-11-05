@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="6.801" tests="24" errors="0" skipped="0" failures="0">
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="4.745" tests="38" errors="0" skipped="0" failures="0">
   <properties>
     <property name="java.specification.version" value="21"/>
     <property name="sun.jnu.encoding" value="UTF-8"/>
@@ -14,7 +14,7 @@
     <property name="sun.java.launcher" value="SUN_STANDARD"/>
     <property name="user.country" value="IN"/>
     <property name="sun.boot.library.path" value="/usr/lib/jvm/jdk-21.0.12.1-oracle-x64/lib"/>
-    <property name="sun.java.command" value="/home/sv/Projects/xmldbtool/target/surefire/surefirebooter-20261104130546412_3.jar /home/sv/Projects/xmldbtool/target/surefire 2026-11-04T13-05-46_288-jvmRun1 surefire-20261104130546412_1tmp surefire_0-20261104130546412_2tmp"/>
+    <property name="sun.java.command" value="/home/sv/Projects/xmldbtool/target/surefire/surefirebooter-20261105100738904_3.jar /home/sv/Projects/xmldbtool/target/surefire 2026-11-05T10-07-38_811-jvmRun1 surefire-20261105100738904_1tmp surefire_0-20261105100738904_2tmp"/>
     <property name="jdk.debug" value="release"/>
     <property name="surefire.test.class.path" value="/home/sv/Projects/xmldbtool/target/test-classes:/home/sv/Projects/xmldbtool/target/classes:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-web/3.3.4/spring-boot-starter-web-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter/3.3.4/spring-boot-starter-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot/3.3.4/spring-boot-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-autoconfigure/3.3.4/spring-boot-autoconfigure-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-logging/3.3.4/spring-boot-starter-logging-3.3.4.jar:/home/sv/.m2/repository/ch/qos/logback/logback-classic/1.5.8/logback-classic-1.5.8.jar:/home/sv/.m2/repository/ch/qos/logback/logback-core/1.5.8/logback-core-1.5.8.jar:/home/sv/.m2/repository/org/apache/logging/log4j/log4j-to-slf4j/2.23.1/log4j-to-slf4j-2.23.1.jar:/home/sv/.m2/repository/org/apache/logging/log4j/log4j-api/2.23.1/log4j-api-2.23.1.jar:/home/sv/.m2/repository/org/slf4j/jul-to-slf4j/2.0.16/jul-to-slf4j-2.0.16.jar:/home/sv/.m2/repository/jakarta/annotation/jakarta.annotation-api/2.1.1/jakarta.annotation-api-2.1.1.jar:/home/sv/.m2/repository/org/yaml/snakeyaml/2.2/snakeyaml-2.2.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-json/3.3.4/spring-boot-starter-json-3.3.4.jar:/home/sv/.m2/repository/com/fasterxml/jackson/datatype/jackson-datatype-jdk8/2.17.2/jackson-datatype-jdk8-2.17.2.jar:/home/sv/.m2/repository/com/fasterxml/jackson/module/jackson-module-parameter-names/2.17.2/jackson-module-parameter-names-2.17.2.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-tomcat/3.3.4/spring-boot-starter-tomcat-3.3.4.jar:/home/sv/.m2/repository/org/apache/tomcat/embed/tomcat-embed-core/10.1.30/tomcat-embed-core-10.1.30.jar:/home/sv/.m2/repository/org/apache/tomcat/embed/tomcat-embed-websocket/10.1.30/tomcat-embed-websocket-10.1.30.jar:/home/sv/.m2/repository/org/springframework/spring-web/6.1.13/spring-web-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-webmvc/6.1.13/spring-webmvc-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-aop/6.1.13/spring-aop-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-context/6.1.13/spring-context-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-expression/6.1.13/spring-expression-6.1.13.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-batch/3.3.4/spring-boot-starter-batch-3.3.4.jar:/home/sv/.m2/repository/org/springframework/batch/spring-batch-core/5.1.2/spring-batch-core-5.1.2.jar:/home/sv/.m2/repository/org/springframework/batch/spring-batch-infrastructure/5.1.2/spring-batch-infrastructure-5.1.2.jar:/home/sv/.m2/repository/org/springframework/retry/spring-retry/2.0.9/spring-retry-2.0.9.jar:/home/sv/.m2/repository/org/springframework/spring-tx/6.1.13/spring-tx-6.1.13.jar:/home/sv/.m2/repository/io/micrometer/micrometer-core/1.13.4/micrometer-core-1.13.4.jar:/home/sv/.m2/repository/org/hdrhistogram/HdrHistogram/2.2.2/HdrHistogram-2.2.2.jar:/home/sv/.m2/repository/org/latencyutils/LatencyUtils/2.0.3/LatencyUtils-2.0.3.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-jdbc/3.3.4/spring-boot-starter-jdbc-3.3.4.jar:/home/sv/.m2/repository/org/springframework/spring-jdbc/6.1.13/spring-jdbc-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-oxm/6.1.13/spring-oxm-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-beans/6.1.13/spring-beans-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-core/6.1.13/spring-core-6.1.13.jar:/home/sv/.m2/repository/org/springframework/spring-jcl/6.1.13/spring-jcl-6.1.13.jar:/home/sv/.m2/repository/jakarta/xml/bind/jakarta.xml.bind-api/4.0.2/jakarta.xml.bind-api-4.0.2.jar:/home/sv/.m2/repository/jakarta/activation/jakarta.activation-api/2.1.3/jakarta.activation-api-2.1.3.jar:/home/sv/.m2/repository/com/h2database/h2/2.2.224/h2-2.2.224.jar:/home/sv/.m2/repository/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar:/home/sv/.m2/repository/org/checkerframework/checker-qual/3.42.0/checker-qual-3.42.0.jar:/home/sv/.m2/repository/com/oracle/database/jdbc/ojdbc11/23.4.0.24.05/ojdbc11-23.4.0.24.05.jar:/home/sv/.m2/repository/com/fasterxml/jackson/core/jackson-databind/2.17.2/jackson-databind-2.17.2.jar:/home/sv/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.17.2/jackson-annotations-2.17.2.jar:/home/sv/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.17.2/jackson-core-2.17.2.jar:/home/sv/.m2/repository/com/fasterxml/jackson/datatype/jackson-datatype-jsr310/2.17.2/jackson-datatype-jsr310-2.17.2.jar:/home/sv/.m2/repository/com/zaxxer/HikariCP/5.1.0/HikariCP-5.1.0.jar:/home/sv/.m2/repository/org/slf4j/slf4j-api/2.0.16/slf4j-api-2.0.16.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-validation/3.3.4/spring-boot-starter-validation-3.3.4.jar:/home/sv/.m2/repository/org/apache/tomcat/embed/tomcat-embed-el/10.1.30/tomcat-embed-el-10.1.30.jar:/home/sv/.m2/repository/org/hibernate/validator/hibernate-validator/8.0.1.Final/hibernate-validator-8.0.1.Final.jar:/home/sv/.m2/repository/jakarta/validation/jakarta.validation-api/3.0.2/jakarta.validation-api-3.0.2.jar:/home/sv/.m2/repository/org/jboss/logging/jboss-logging/3.5.3.Final/jboss-logging-3.5.3.Final.jar:/home/sv/.m2/repository/com/fasterxml/classmate/1.7.0/classmate-1.7.0.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-actuator/3.3.4/spring-boot-starter-actuator-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-actuator-autoconfigure/3.3.4/spring-boot-actuator-autoconfigure-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-actuator/3.3.4/spring-boot-actuator-3.3.4.jar:/home/sv/.m2/repository/io/micrometer/micrometer-observation/1.13.4/micrometer-observation-1.13.4.jar:/home/sv/.m2/repository/io/micrometer/micrometer-commons/1.13.4/micrometer-commons-1.13.4.jar:/home/sv/.m2/repository/io/micrometer/micrometer-jakarta9/1.13.4/micrometer-jakarta9-1.13.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-starter-test/3.3.4/spring-boot-starter-test-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-test/3.3.4/spring-boot-test-3.3.4.jar:/home/sv/.m2/repository/org/springframework/boot/spring-boot-test-autoconfigure/3.3.4/spring-boot-test-autoconfigure-3.3.4.jar:/home/sv/.m2/repository/com/jayway/jsonpath/json-path/2.9.0/json-path-2.9.0.jar:/home/sv/.m2/repository/net/minidev/json-smart/2.5.1/json-smart-2.5.1.jar:/home/sv/.m2/repository/net/minidev/accessors-smart/2.5.1/accessors-smart-2.5.1.jar:/home/sv/.m2/repository/org/ow2/asm/asm/9.6/asm-9.6.jar:/home/sv/.m2/repository/org/assertj/assertj-core/3.25.3/assertj-core-3.25.3.jar:/home/sv/.m2/repository/net/bytebuddy/byte-buddy/1.14.19/byte-buddy-1.14.19.jar:/home/sv/.m2/repository/org/awaitility/awaitility/4.2.2/awaitility-4.2.2.jar:/home/sv/.m2/repository/org/hamcrest/hamcrest/2.2/hamcrest-2.2.jar:/home/sv/.m2/repository/org/junit/jupiter/junit-jupiter/5.10.3/junit-jupiter-5.10.3.jar:/home/sv/.m2/repository/org/junit/jupiter/junit-jupiter-api/5.10.3/junit-jupiter-api-5.10.3.jar:/home/sv/.m2/repository/org/opentest4j/opentest4j/1.3.0/opentest4j-1.3.0.jar:/home/sv/.m2/repository/org/junit/platform/junit-platform-commons/1.10.3/junit-platform-commons-1.10.3.jar:/home/sv/.m2/repository/org/apiguardian/apiguardian-api/1.1.2/apiguardian-api-1.1.2.jar:/home/sv/.m2/repository/org/junit/jupiter/junit-jupiter-params/5.10.3/junit-jupiter-params-5.10.3.jar:/home/sv/.m2/repository/org/junit/jupiter/junit-jupiter-engine/5.10.3/junit-jupiter-engine-5.10.3.jar:/home/sv/.m2/repository/org/junit/platform/junit-platform-engine/1.10.3/junit-platform-engine-1.10.3.jar:/home/sv/.m2/repository/org/mockito/mockito-core/5.11.0/mockito-core-5.11.0.jar:/home/sv/.m2/repository/net/bytebuddy/byte-buddy-agent/1.14.19/byte-buddy-agent-1.14.19.jar:/home/sv/.m2/repository/org/objenesis/objenesis/3.3/objenesis-3.3.jar:/home/sv/.m2/repository/org/mockito/mockito-junit-jupiter/5.11.0/mockito-junit-jupiter-5.11.0.jar:/home/sv/.m2/repository/org/skyscreamer/jsonassert/1.5.3/jsonassert-1.5.3.jar:/home/sv/.m2/repository/com/vaadin/external/google/android-json/0.0.20131108.vaadin1/android-json-0.0.20131108.vaadin1.jar:/home/sv/.m2/repository/org/springframework/spring-test/6.1.13/spring-test-6.1.13.jar:/home/sv/.m2/repository/org/xmlunit/xmlunit-core/2.9.1/xmlunit-core-2.9.1.jar:/home/sv/.m2/repository/org/springframework/batch/spring-batch-test/5.1.2/spring-batch-test-5.1.2.jar:"/>
     <property name="sun.cpu.endian" value="little"/>
@@ -31,7 +31,7 @@
     <property name="java.specification.name" value="Java Platform API Specification"/>
     <property name="FILE_LOG_CHARSET" value="UTF-8"/>
     <property name="java.awt.headless" value="true"/>
-    <property name="surefire.real.class.path" value="/home/sv/Projects/xmldbtool/target/surefire/surefirebooter-20261104130546412_3.jar"/>
+    <property name="surefire.real.class.path" value="/home/sv/Projects/xmldbtool/target/surefire/surefirebooter-20261105100738904_3.jar"/>
     <property name="sun.management.compiler" value="HotSpot 64-Bit Tiered Compilers"/>
     <property name="java.runtime.version" value="21.0.12.1+1-LTS-4"/>
     <property name="user.name" value="sv"/>
@@ -49,7 +49,7 @@
     <property name="user.dir" value="/home/sv/Projects/xmldbtool"/>
     <property name="os.arch" value="amd64"/>
     <property name="java.vm.specification.name" value="Java Virtual Machine Specification"/>
-    <property name="PID" value="89"/>
+    <property name="PID" value="93"/>
     <property name="CONSOLE_LOG_CHARSET" value="UTF-8"/>
     <property name="native.encoding" value="UTF-8"/>
     <property name="java.library.path" value="/usr/java/packages/lib:/usr/lib64:/lib64:/lib:/usr/lib"/>
@@ -60,9 +60,9 @@
     <property name="sun.io.unicode.encoding" value="UnicodeLittle"/>
     <property name="java.class.version" value="65.0"/>
   </properties>
-  <testcase name="testQualifiedAttributeResolutionNoLeak" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="1.146">
-    <system-out><![CDATA[13:05:47.501 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.enterprise.xmldbtool.DynamicXmlIngestionTest]: DynamicXmlIngestionTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
-13:05:47.646 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.enterprise.xmldbtool.XmlDbToolApplication for test class com.enterprise.xmldbtool.DynamicXmlIngestionTest
+  <testcase name="testQualifiedAttributeResolutionNoLeak" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.633">
+    <system-out><![CDATA[10:07:39.711 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [com.enterprise.xmldbtool.DynamicXmlIngestionTest]: DynamicXmlIngestionTest does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+10:07:39.810 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration com.enterprise.xmldbtool.XmlDbToolApplication for test class com.enterprise.xmldbtool.DynamicXmlIngestionTest
 
   .   ____          _            __ _ _
  /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
@@ -73,26 +73,29 @@
 
  :: Spring Boot ::                (v3.3.4)
 
-2026-11-04T13:05:48.176+05:30  INFO 89 --- [           main] c.e.xmldbtool.DynamicXmlIngestionTest    : Starting DynamicXmlIngestionTest using Java 21.0.12.1 with PID 89 (started by sv in /home/sv/Projects/xmldbtool)
-2026-11-04T13:05:48.178+05:30  INFO 89 --- [           main] c.e.xmldbtool.DynamicXmlIngestionTest    : No active profile set, falling back to 1 default profile: "default"
-2026-11-04T13:05:50.131+05:30  WARN 89 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'databaseConfig' of type [com.enterprise.xmldbtool.config.DatabaseConfig$$SpringCGLIB$$0] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
-2026-11-04T13:05:50.176+05:30  WARN 89 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'batchDataSourceProperties' of type [org.springframework.boot.autoconfigure.jdbc.DataSourceProperties] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
-2026-11-04T13:05:50.185+05:30  WARN 89 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'dataSource' of type [com.zaxxer.hikari.HikariDataSource] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
-2026-11-04T13:05:50.197+05:30  WARN 89 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'transactionManager' of type [org.springframework.jdbc.datasource.DataSourceTransactionManager] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
-2026-11-04T13:05:50.206+05:30  WARN 89 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'spring.batch-org.springframework.boot.autoconfigure.batch.BatchProperties' of type [org.springframework.boot.autoconfigure.batch.BatchProperties] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
-2026-11-04T13:05:50.217+05:30  WARN 89 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'org.springframework.boot.autoconfigure.batch.BatchAutoConfiguration$SpringBootBatchConfiguration' of type [org.springframework.boot.autoconfigure.batch.BatchAutoConfiguration$SpringBootBatchConfiguration] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). The currently created BeanPostProcessor [jobRegistryBeanPostProcessor] is declared through a non-static factory method on that class; consider declaring it as static instead.
-2026-11-04T13:05:50.256+05:30  INFO 89 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
-2026-11-04T13:05:50.771+05:30  INFO 89 --- [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection conn0: url=jdbc:h2:mem:testdb user=SA
-2026-11-04T13:05:50.773+05:30  INFO 89 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
-2026-11-04T13:05:50.873+05:30  INFO 89 --- [           main] c.e.x.config.AppSchemaInitializer        : Initializing PostgreSQL schema for User information and Job Details configuration...
-2026-11-04T13:05:50.883+05:30  INFO 89 --- [           main] c.e.x.config.AppSchemaInitializer        : Verified/Created 'users' and 'app_users' tables in PostgreSQL.
-2026-11-04T13:05:50.920+05:30  INFO 89 --- [           main] c.e.x.config.AppSchemaInitializer        : Pre-seeded default users in PostgreSQL: 'admin' (role: ADMIN) and 'operator' (role: OPERATOR).
-2026-11-04T13:05:50.927+05:30  INFO 89 --- [           main] c.e.x.config.AppSchemaInitializer        : Verified/Created 'job_details' and 'saved_job_configs' tables in PostgreSQL.
-2026-11-04T13:05:50.931+05:30  INFO 89 --- [           main] c.e.x.config.AppSchemaInitializer        : Pre-seeded default sample job configuration in PostgreSQL: 'Enterprise Products Ingestion'.
-2026-11-04T13:05:50.931+05:30  INFO 89 --- [           main] c.e.x.config.AppSchemaInitializer        : Application schema initialized successfully.
-2026-11-04T13:05:51.372+05:30  INFO 89 --- [           main] o.s.b.a.w.s.WelcomePageHandlerMapping    : Adding welcome page: class path resource [static/index.html]
-2026-11-04T13:05:52.181+05:30  INFO 89 --- [           main] o.s.b.a.e.web.EndpointLinksResolver      : Exposing 1 endpoint beneath base path '/actuator'
-2026-11-04T13:05:52.311+05:30  INFO 89 --- [           main] c.e.xmldbtool.DynamicXmlIngestionTest    : Started DynamicXmlIngestionTest in 4.489 seconds (process running for 5.816)
+2026-11-05T10:07:40.144+05:30  INFO 93 --- [           main] c.e.xmldbtool.DynamicXmlIngestionTest    : Starting DynamicXmlIngestionTest using Java 21.0.12.1 with PID 93 (started by sv in /home/sv/Projects/xmldbtool)
+2026-11-05T10:07:40.145+05:30  INFO 93 --- [           main] c.e.xmldbtool.DynamicXmlIngestionTest    : No active profile set, falling back to 1 default profile: "default"
+2026-11-05T10:07:41.119+05:30  WARN 93 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'databaseConfig' of type [com.enterprise.xmldbtool.config.DatabaseConfig$$SpringCGLIB$$0] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
+2026-11-05T10:07:41.141+05:30  WARN 93 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'batchDataSourceProperties' of type [org.springframework.boot.autoconfigure.jdbc.DataSourceProperties] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
+2026-11-05T10:07:41.147+05:30  WARN 93 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'dataSource' of type [com.zaxxer.hikari.HikariDataSource] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
+2026-11-05T10:07:41.154+05:30  WARN 93 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'transactionManager' of type [org.springframework.jdbc.datasource.DataSourceTransactionManager] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
+2026-11-05T10:07:41.160+05:30  WARN 93 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'spring.batch-org.springframework.boot.autoconfigure.batch.BatchProperties' of type [org.springframework.boot.autoconfigure.batch.BatchProperties] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). Is this bean getting eagerly injected into a currently created BeanPostProcessor [jobRegistryBeanPostProcessor]? Check the corresponding BeanPostProcessor declaration and its dependencies.
+2026-11-05T10:07:41.168+05:30  WARN 93 --- [           main] trationDelegate$BeanPostProcessorChecker : Bean 'org.springframework.boot.autoconfigure.batch.BatchAutoConfiguration$SpringBootBatchConfiguration' of type [org.springframework.boot.autoconfigure.batch.BatchAutoConfiguration$SpringBootBatchConfiguration] is not eligible for getting processed by all BeanPostProcessors (for example: not eligible for auto-proxying). The currently created BeanPostProcessor [jobRegistryBeanPostProcessor] is declared through a non-static factory method on that class; consider declaring it as static instead.
+2026-11-05T10:07:41.196+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Starting...
+2026-11-05T10:07:41.477+05:30  INFO 93 --- [           main] com.zaxxer.hikari.pool.HikariPool        : HikariPool-1 - Added connection conn0: url=jdbc:h2:mem:testdb user=SA
+2026-11-05T10:07:41.478+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : HikariPool-1 - Start completed.
+2026-11-05T10:07:41.534+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Initializing PostgreSQL schema for User information, Job Details, and Staging configuration...
+2026-11-05T10:07:41.539+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Verified/Created 'users' and 'app_users' tables in PostgreSQL.
+2026-11-05T10:07:41.563+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Pre-seeded default users in PostgreSQL: 'admin' (role: ADMIN) and 'operator' (role: OPERATOR).
+2026-11-05T10:07:41.568+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Verified/Created 'job_details' and 'saved_job_configs' tables in PostgreSQL.
+2026-11-05T10:07:41.571+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Pre-seeded default sample job configuration in PostgreSQL: 'Enterprise Products Ingestion'.
+2026-11-05T10:07:41.573+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Verified/Created 'staging_xml_records' table for memory-efficient staging ingestion.
+2026-11-05T10:07:41.575+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Verified/Created 'schema_registry_versions' table in PostgreSQL.
+2026-11-05T10:07:41.577+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Pre-seeded Schema Registry versions: 'PFA-WorldCheck-Sanctions' (v2.4.0) and 'Enterprise-Catalog-Products' (v1.0.0).
+2026-11-05T10:07:41.577+05:30  INFO 93 --- [           main] c.e.x.config.AppSchemaInitializer        : Application schema initialized successfully.
+2026-11-05T10:07:41.869+05:30  INFO 93 --- [           main] o.s.b.a.w.s.WelcomePageHandlerMapping    : Adding welcome page: class path resource [static/index.html]
+2026-11-05T10:07:42.289+05:30  INFO 93 --- [           main] o.s.b.a.e.web.EndpointLinksResolver      : Exposing 1 endpoint beneath base path '/actuator'
+2026-11-05T10:07:42.355+05:30  INFO 93 --- [           main] c.e.xmldbtool.DynamicXmlIngestionTest    : Started DynamicXmlIngestionTest in 2.438 seconds (process running for 3.393)
 ]]></system-out>
     <system-err><![CDATA[WARNING: A Java agent has been loaded dynamically (/home/sv/.m2/repository/net/bytebuddy/byte-buddy-agent/1.14.19/byte-buddy-agent-1.14.19.jar)
 WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
@@ -100,72 +103,311 @@ WARNING: If a serviceability tool is not in use, please run with -Djdk.instrumen
 WARNING: Dynamic loading of agents will be disallowed by default in a future release
 ]]></system-err>
   </testcase>
-  <testcase name="testDynamicXmlUnmarshalling" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.05"/>
-  <testcase name="testXmlPreviewGeneration" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.033"/>
-  <testcase name="testMultiTableBatchWriterExecutionWithFks" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.043">
-    <system-out><![CDATA[2026-11-04T13:05:53.580+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
-2026-11-04T13:05:53.587+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'multi_parents': MERGE INTO multi_parents (id, name) KEY (id) VALUES (:id, :name)
-2026-11-04T13:05:53.600+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'multi_children': MERGE INTO multi_children (id, parent_id) KEY (id) VALUES (:id, :parent_id)
+  <testcase name="testDynamicXmlUnmarshalling" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.021"/>
+  <testcase name="testFullPfaBatchJobIngestionSnakeCase" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.317">
+    <system-out><![CDATA[2026-11-05T10:07:43.044+05:30  INFO 93 --- [           main] c.e.x.service.DynamicDataSourceService   : Initialized dynamic Hikari connection pool for target URL: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+2026-11-05T10:07:43.048+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : TargetDB-Pool-1793853463044 - Starting...
+2026-11-05T10:07:43.050+05:30  INFO 93 --- [           main] com.zaxxer.hikari.pool.HikariPool        : TargetDB-Pool-1793853463044 - Added connection conn10: url=jdbc:h2:mem:testdb user=SA
+2026-11-05T10:07:43.050+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : TargetDB-Pool-1793853463044 - Start completed.
+2026-11-05T10:07:43.052+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Configured StaxEventItemReader chunk streaming fragmentRootElementName='Person' (docRoot='PFA')
+2026-11-05T10:07:43.062+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Configured table insertion order sequence based on tag sequence: [country_list, occupation_list, relationship_list, sanctions_references_list, person, person_name, person_description, person_role, person_date, person_sanctions_reference, person_country, person_id_number, person_source, person_image]
+2026-11-05T10:07:43.064+05:30  INFO 93 --- [           main] c.e.x.batch.DatabaseErrorSkipListener    : Verified/Created 'migration_errors' table for fault-tolerant error tracking.
+2026-11-05T10:07:43.064+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:43.101+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Detected header reference tables in mappings; attaching HeaderReferenceIngestionTasklet before streaming records.
+2026-11-05T10:07:43.127+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Successfully launched dynamic XML ingestion Job #1 for table 'person'
+2026-11-05T10:07:43.146+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.job.SimpleStepHandler     : Executing step: [headerReferenceStep]
+2026-11-05T10:07:43.154+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Streaming header reference lists for target tables: [country_list, occupation_list, relationship_list, sanctions_references_list]
+2026-11-05T10:07:43.157+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Reached records collection tag 'Records', stopping header reference stream.
+2026-11-05T10:07:43.157+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'country_list'
+2026-11-05T10:07:43.157+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'occupation_list'
+2026-11-05T10:07:43.157+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'relationship_list'
+2026-11-05T10:07:43.157+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'sanctions_references_list'
+2026-11-05T10:07:43.158+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:43.162+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'country_list': MERGE INTO country_list ("CODE", "NAME", "IS_TERRITORY", "PROFILE_URL") KEY ("CODE") VALUES (:code, :name, :is_territory, :profile_url)
+2026-11-05T10:07:43.165+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'occupation_list': MERGE INTO occupation_list ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.167+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'relationship_list': MERGE INTO relationship_list ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.168+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'sanctions_references_list': MERGE INTO sanctions_references_list ("REFERENCE_ID", "NAME", "STATUS", "DESCRIPTION_2_ID") KEY ("REFERENCE_ID") VALUES (:reference_id, :name, :status, :description_2_id)
+2026-11-05T10:07:43.169+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Successfully persisted 4 header reference rows across 4 lookup tables.
+2026-11-05T10:07:43.174+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.step.AbstractStep         : Step: [headerReferenceStep] executed in 27ms
+2026-11-05T10:07:43.179+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.job.SimpleStepHandler     : Executing step: [dynamicIngestStep]
+2026-11-05T10:07:43.232+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE country_list ADD COLUMN IF NOT EXISTS person_id VARCHAR(255)' to add missing column 'person_id'.
+2026-11-05T10:07:43.233+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'country_list': MERGE INTO country_list ("CODE", "NAME", "IS_TERRITORY", "PROFILE_URL", "PERSON_ID") KEY ("CODE") VALUES (:code, :name, :is_territory, :profile_url, :person_id)
+2026-11-05T10:07:43.236+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'occupation_list': MERGE INTO occupation_list ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.237+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'relationship_list': MERGE INTO relationship_list ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.240+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE sanctions_references_list ADD COLUMN IF NOT EXISTS person_id VARCHAR(255)' to add missing column 'person_id'.
+2026-11-05T10:07:43.241+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'sanctions_references_list': MERGE INTO sanctions_references_list ("REFERENCE_ID", "NAME", "STATUS", "DESCRIPTION_2_ID", "PERSON_ID") KEY ("REFERENCE_ID") VALUES (:reference_id, :name, :status, :description_2_id, :person_id)
+2026-11-05T10:07:43.242+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person': MERGE INTO person ("PERSON_ID", "ACTION", "RECORD_DATE", "GENDER", "ACTIVE_STATUS", "DECEASED", "BIRTH_PLACE", "PROFILE_NOTES") KEY ("PERSON_ID") VALUES (:person_id, :action, :record_date, :gender, :active_status, :deceased, :birth_place, :profile_notes)
+2026-11-05T10:07:43.244+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_name': INSERT INTO person_name ("PERSON_ID", "NAME_TYPE", "FIRST_NAME", "SURNAME") VALUES (:person_id, :name_type, :first_name, :surname)
+2026-11-05T10:07:43.245+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_description': INSERT INTO person_description ("PERSON_ID", "DESCRIPTION_1_ID", "DESCRIPTION_2_ID", "DESCRIPTION_3_ID") VALUES (:person_id, :description_1_id, :description_2_id, :description_3_id)
+2026-11-05T10:07:43.246+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_role': INSERT INTO person_role ("PERSON_ID", "ROLE_TYPE", "OCC_TITLE", "OCC_CAT", "SINCE_DAY", "SINCE_MONTH", "SINCE_YEAR", "TO_DAY", "TO_MONTH", "TO_YEAR") VALUES (:person_id, :role_type, :occ_title, :occ_cat, :since_day, :since_month, :since_year, :to_day, :to_month, :to_year)
+2026-11-05T10:07:43.248+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_date': INSERT INTO person_date ("PERSON_ID", "DATE_TYPE", "day", "month", "year") VALUES (:person_id, :date_type, :day, :month, :year)
+2026-11-05T10:07:43.249+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_sanctions_reference': INSERT INTO person_sanctions_reference ("PERSON_ID", "REFERENCE_ID", "SINCE_DAY", "SINCE_MONTH", "SINCE_YEAR") VALUES (:person_id, :reference_id, :since_day, :since_month, :since_year)
+2026-11-05T10:07:43.250+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_country': INSERT INTO person_country ("PERSON_ID", "COUNTRY_TYPE", "COUNTRY_CODE") VALUES (:person_id, :country_type, :country_code)
+2026-11-05T10:07:43.251+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_id_number': INSERT INTO person_id_number ("PERSON_ID", "ID_TYPE", "ID_VALUE") VALUES (:person_id, :id_type, :id_value)
+2026-11-05T10:07:43.252+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_source': INSERT INTO person_source ("PERSON_ID", "SOURCE_URL") VALUES (:person_id, :source_url)
+2026-11-05T10:07:43.254+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'person_image': INSERT INTO person_image ("PERSON_ID", "IMAGE_URL") VALUES (:person_id, :image_url)
+2026-11-05T10:07:43.259+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.step.AbstractStep         : Step: [dynamicIngestStep] executed in 80ms
+Table country_list count: 2
+Table occupation_list count: 2
+Table relationship_list count: 2
+Table sanctions_references_list count: 2
+Table person count: 1
+Table person_name count: 2
+Table person_description count: 3
+Table person_role count: 2
+Table person_date count: 2
+Table person_sanctions_reference count: 1
+Table person_country count: 4
+Table person_id_number count: 2
+Table person_source count: 9
+Table person_image count: 3
 ]]></system-out>
   </testcase>
-  <testcase name="testNumberedPluralForeignKeys" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.006"/>
-  <testcase name="testUpsertSqlConstructionMySQL" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.008"/>
-  <testcase name="testSampleXmlDiscovery" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.014"/>
-  <testcase name="testSkuResolutionDistinction" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.006"/>
-  <testcase name="testAutoConvertType" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.009"/>
-  <testcase name="testRootAndSecondRootAttributePreview" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.016"/>
-  <testcase name="testPfaPersonUnmarshallingAndProcessing" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.048">
+  <testcase name="testXmlPreviewGeneration" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.015"/>
+  <testcase name="testMultiTableBatchWriterExecutionWithFks" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.018">
+    <system-out><![CDATA[2026-11-05T10:07:43.377+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:43.378+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'multi_parents': MERGE INTO multi_parents ("ID", "NAME") KEY ("ID") VALUES (:id, :name)
+2026-11-05T10:07:43.382+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'multi_children': MERGE INTO multi_children ("ID", "PARENT_ID") KEY ("ID") VALUES (:id, :parent_id)
+]]></system-out>
+  </testcase>
+  <testcase name="testFullPfaBatchJobIngestion" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.245">
+    <system-out><![CDATA[2026-11-05T10:07:43.404+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Configured StaxEventItemReader chunk streaming fragmentRootElementName='Person' (docRoot='PFA')
+2026-11-05T10:07:43.408+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Configured table insertion order sequence based on tag sequence: [CountryList, OccupationList, RelationshipList, SanctionsReferencesList, Person, PersonName, PersonDescription, PersonRole, PersonDate, PersonSanctionsReference, PersonCountry, PersonIDNumber, PersonSource, PersonImage]
+2026-11-05T10:07:43.409+05:30  INFO 93 --- [           main] c.e.x.batch.DatabaseErrorSkipListener    : Verified/Created 'migration_errors' table for fault-tolerant error tracking.
+2026-11-05T10:07:43.409+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:43.414+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Detected header reference tables in mappings; attaching HeaderReferenceIngestionTasklet before streaming records.
+2026-11-05T10:07:43.418+05:30  INFO 93 --- [           main] c.e.x.service.DynamicBatchJobService     : Successfully launched dynamic XML ingestion Job #2 for table 'Person'
+2026-11-05T10:07:43.421+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.job.SimpleStepHandler     : Executing step: [headerReferenceStep]
+2026-11-05T10:07:43.423+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Streaming header reference lists for target tables: [CountryList, OccupationList, RelationshipList, SanctionsReferencesList]
+2026-11-05T10:07:43.425+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Reached records collection tag 'Records', stopping header reference stream.
+2026-11-05T10:07:43.425+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'CountryList'
+2026-11-05T10:07:43.425+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'OccupationList'
+2026-11-05T10:07:43.425+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'RelationshipList'
+2026-11-05T10:07:43.425+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'SanctionsReferencesList'
+2026-11-05T10:07:43.425+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:43.426+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'CountryList': MERGE INTO CountryList ("CODE", "NAME", "IS_TERRITORY", "PROFILE_URL") KEY ("CODE") VALUES (:code, :name, :is_territory, :profile_url)
+2026-11-05T10:07:43.427+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'OccupationList': MERGE INTO OccupationList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.428+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'RelationshipList': MERGE INTO RelationshipList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.428+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'SanctionsReferencesList': MERGE INTO SanctionsReferencesList ("REFERENCE_ID", "NAME", "STATUS", "DESCRIPTION_2_ID") KEY ("REFERENCE_ID") VALUES (:reference_id, :name, :status, :description_2_id)
+2026-11-05T10:07:43.429+05:30  INFO 93 --- [   batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Successfully persisted 4 header reference rows across 4 lookup tables.
+2026-11-05T10:07:43.431+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.step.AbstractStep         : Step: [headerReferenceStep] executed in 9ms
+2026-11-05T10:07:43.434+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.job.SimpleStepHandler     : Executing step: [dynamicIngestStep]
+2026-11-05T10:07:43.457+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE CountryList ADD COLUMN IF NOT EXISTS person_id VARCHAR(255)' to add missing column 'person_id'.
+2026-11-05T10:07:43.457+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'CountryList': MERGE INTO CountryList ("CODE", "NAME", "IS_TERRITORY", "PROFILE_URL", "PERSON_ID") KEY ("CODE") VALUES (:code, :name, :is_territory, :profile_url, :person_id)
+2026-11-05T10:07:43.458+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'OccupationList': MERGE INTO OccupationList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.459+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'RelationshipList': MERGE INTO RelationshipList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.462+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE SanctionsReferencesList ADD COLUMN IF NOT EXISTS person_id VARCHAR(255)' to add missing column 'person_id'.
+2026-11-05T10:07:43.462+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'SanctionsReferencesList': MERGE INTO SanctionsReferencesList ("REFERENCE_ID", "NAME", "STATUS", "DESCRIPTION_2_ID", "PERSON_ID") KEY ("REFERENCE_ID") VALUES (:reference_id, :name, :status, :description_2_id, :person_id)
+2026-11-05T10:07:43.463+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'Person': MERGE INTO Person ("PERSON_ID", "ACTION", "RECORD_DATE", "GENDER", "ACTIVE_STATUS", "DECEASED", "BIRTH_PLACE", "PROFILE_NOTES") KEY ("PERSON_ID") VALUES (:person_id, :action, :record_date, :gender, :active_status, :deceased, :birth_place, :profile_notes)
+2026-11-05T10:07:43.464+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonName': INSERT INTO PersonName ("PERSON_ID", "NAME_TYPE", "FIRST_NAME", "SURNAME") VALUES (:person_id, :name_type, :first_name, :surname)
+2026-11-05T10:07:43.465+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonDescription': INSERT INTO PersonDescription ("PERSON_ID", "DESCRIPTION_1_ID", "DESCRIPTION_2_ID", "DESCRIPTION_3_ID") VALUES (:person_id, :description_1_id, :description_2_id, :description_3_id)
+2026-11-05T10:07:43.466+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonRole': INSERT INTO PersonRole ("PERSON_ID", "ROLE_TYPE", "OCC_TITLE", "OCC_CAT", "SINCE_DAY", "SINCE_MONTH", "SINCE_YEAR", "TO_DAY", "TO_MONTH", "TO_YEAR") VALUES (:person_id, :role_type, :occ_title, :occ_cat, :since_day, :since_month, :since_year, :to_day, :to_month, :to_year)
+2026-11-05T10:07:43.467+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonDate': INSERT INTO PersonDate ("PERSON_ID", "DATE_TYPE", "day", "month", "year") VALUES (:person_id, :date_type, :day, :month, :year)
+2026-11-05T10:07:43.468+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonSanctionsReference': INSERT INTO PersonSanctionsReference ("PERSON_ID", "REFERENCE_ID", "SINCE_DAY", "SINCE_MONTH", "SINCE_YEAR") VALUES (:person_id, :reference_id, :since_day, :since_month, :since_year)
+2026-11-05T10:07:43.469+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonCountry': INSERT INTO PersonCountry ("PERSON_ID", "COUNTRY_TYPE", "COUNTRY_CODE") VALUES (:person_id, :country_type, :country_code)
+2026-11-05T10:07:43.470+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonIDNumber': INSERT INTO PersonIDNumber ("PERSON_ID", "ID_TYPE", "ID_VALUE") VALUES (:person_id, :id_type, :id_value)
+2026-11-05T10:07:43.471+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonSource': INSERT INTO PersonSource ("PERSON_ID", "SOURCE_URL") VALUES (:person_id, :source_url)
+2026-11-05T10:07:43.473+05:30  INFO 93 --- [   batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonImage': INSERT INTO PersonImage ("PERSON_ID", "IMAGE_URL") VALUES (:person_id, :image_url)
+2026-11-05T10:07:43.478+05:30  INFO 93 --- [   batch-exec-1] o.s.batch.core.step.AbstractStep         : Step: [dynamicIngestStep] executed in 43ms
+Job Status: COMPLETED, Message: null
+Table CountryList count: 2
+Table OccupationList count: 2
+Table RelationshipList count: 2
+Table SanctionsReferencesList count: 2
+Table Person count: 1
+Table PersonName count: 2
+Table PersonDescription count: 3
+Table PersonRole count: 2
+Table PersonDate count: 2
+Table PersonSanctionsReference count: 1
+Table PersonCountry count: 4
+Table PersonIDNumber count: 2
+Table PersonSource count: 9
+Table PersonImage count: 3
+]]></system-out>
+  </testcase>
+  <testcase name="testNumberedPluralForeignKeys" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.005"/>
+  <testcase name="testUpsertSqlConstructionMySQL" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.007"/>
+  <testcase name="testFullTwoStageStagedPipeline" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.256">
+    <system-out><![CDATA[2026-11-05T10:07:43.704+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.service.DynamicBatchJobService     : Executing Pipeline Stage 1: StAX XML streaming to flat staging table...
+2026-11-05T10:07:43.801+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.s.StagingXmlStreamingService       : StAX Staging ingestion completed: totalRead=1, staged=1, skippedUnchanged=0, failed=0, elapsedMs=97
+2026-11-05T10:07:43.802+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.service.DynamicBatchJobService     : Executing Pipeline Stage: Ingesting header lookup reference tables...
+2026-11-05T10:07:43.802+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Streaming header reference lists for target tables: [CountryList, OccupationList, RelationshipList, SanctionsReferencesList]
+2026-11-05T10:07:43.804+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Reached records collection tag 'Records', stopping header reference stream.
+2026-11-05T10:07:43.804+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'CountryList'
+2026-11-05T10:07:43.804+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'OccupationList'
+2026-11-05T10:07:43.804+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'RelationshipList'
+2026-11-05T10:07:43.804+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'SanctionsReferencesList'
+2026-11-05T10:07:43.804+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:43.806+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'CountryList': MERGE INTO CountryList ("CODE", "NAME", "IS_TERRITORY", "PROFILE_URL") KEY ("CODE") VALUES (:code, :name, :is_territory, :profile_url)
+2026-11-05T10:07:43.807+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'OccupationList': MERGE INTO OccupationList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.808+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'RelationshipList': MERGE INTO RelationshipList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.809+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'SanctionsReferencesList': MERGE INTO SanctionsReferencesList ("REFERENCE_ID", "NAME", "STATUS", "DESCRIPTION_2_ID") KEY ("REFERENCE_ID") VALUES (:reference_id, :name, :status, :description_2_id)
+2026-11-05T10:07:43.810+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.b.HeaderReferenceIngestionTasklet  : Successfully persisted 4 header reference rows across 4 lookup tables.
+2026-11-05T10:07:43.810+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.service.DynamicBatchJobService     : Executing Pipeline Stage 2: Dynamic schema resolution & canonical normalization...
+2026-11-05T10:07:43.812+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DatabaseErrorSkipListener    : Verified/Created 'migration_errors' table for fault-tolerant error tracking.
+2026-11-05T10:07:43.812+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:43.857+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'CountryList': MERGE INTO CountryList ("CODE", "NAME", "IS_TERRITORY", "PROFILE_URL", "PERSON_ID") KEY ("CODE") VALUES (:code, :name, :is_territory, :profile_url, :person_id)
+2026-11-05T10:07:43.858+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'OccupationList': MERGE INTO OccupationList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.859+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'RelationshipList': MERGE INTO RelationshipList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:43.860+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'SanctionsReferencesList': MERGE INTO SanctionsReferencesList ("REFERENCE_ID", "NAME", "STATUS", "DESCRIPTION_2_ID", "PERSON_ID") KEY ("REFERENCE_ID") VALUES (:reference_id, :name, :status, :description_2_id, :person_id)
+2026-11-05T10:07:43.860+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'Person': MERGE INTO Person ("PERSON_ID", "ACTION", "RECORD_DATE", "GENDER", "ACTIVE_STATUS", "DECEASED", "BIRTH_PLACE", "PROFILE_NOTES", "EXTRA_ATTRIBUTES") KEY ("PERSON_ID") VALUES (:person_id, :action, :record_date, :gender, :active_status, :deceased, :birth_place, :profile_notes, :extra_attributes)
+2026-11-05T10:07:43.861+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonName': INSERT INTO PersonName ("PERSON_ID", "NAME_TYPE", "FIRST_NAME", "SURNAME") VALUES (:person_id, :name_type, :first_name, :surname)
+2026-11-05T10:07:43.862+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonDescription': INSERT INTO PersonDescription ("PERSON_ID", "DESCRIPTION_1_ID", "DESCRIPTION_2_ID", "DESCRIPTION_3_ID") VALUES (:person_id, :description_1_id, :description_2_id, :description_3_id)
+2026-11-05T10:07:43.863+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonRole': INSERT INTO PersonRole ("PERSON_ID", "ROLE_TYPE", "OCC_TITLE", "OCC_CAT", "SINCE_DAY", "SINCE_MONTH", "SINCE_YEAR", "TO_DAY", "TO_MONTH", "TO_YEAR") VALUES (:person_id, :role_type, :occ_title, :occ_cat, :since_day, :since_month, :since_year, :to_day, :to_month, :to_year)
+2026-11-05T10:07:43.863+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonDate': INSERT INTO PersonDate ("PERSON_ID", "DATE_TYPE", "day", "month", "year") VALUES (:person_id, :date_type, :day, :month, :year)
+2026-11-05T10:07:43.864+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonSanctionsReference': INSERT INTO PersonSanctionsReference ("PERSON_ID", "REFERENCE_ID", "SINCE_DAY", "SINCE_MONTH", "SINCE_YEAR") VALUES (:person_id, :reference_id, :since_day, :since_month, :since_year)
+2026-11-05T10:07:43.865+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonCountry': INSERT INTO PersonCountry ("PERSON_ID", "COUNTRY_TYPE", "COUNTRY_CODE") VALUES (:person_id, :country_type, :country_code)
+2026-11-05T10:07:43.866+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonIDNumber': INSERT INTO PersonIDNumber ("PERSON_ID", "ID_TYPE", "ID_VALUE") VALUES (:person_id, :id_type, :id_value)
+2026-11-05T10:07:43.866+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonSource': INSERT INTO PersonSource ("PERSON_ID", "SOURCE_URL") VALUES (:person_id, :source_url)
+2026-11-05T10:07:43.867+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'PersonImage': INSERT INTO PersonImage ("PERSON_ID", "IMAGE_URL") VALUES (:person_id, :image_url)
+2026-11-05T10:07:43.869+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.s.DynamicSchemaResolutionService   : Normalization completed: stagedProcessed=1, normalized=1, failed=0, tableWrites={RelationshipList=1, PersonName=2, PersonSource=9, PersonIDNumber=2, SanctionsReferencesList=1, PersonRole=2, PersonImage=3, CountryList=4, PersonCountry=4, PersonDescription=3, PersonSanctionsReference=1, Person=1, PersonDate=2, OccupationList=1}, elapsedMs=59
+2026-11-05T10:07:43.870+05:30  INFO 93 --- [ed-batch-exec-1] c.e.x.service.DynamicBatchJobService     : Staged metadata-driven XML processing pipeline job completed successfully: JobExecutionId=3
+Staged Pipeline Table CountryList count: 2
+Staged Pipeline Table OccupationList count: 2
+Staged Pipeline Table RelationshipList count: 2
+Staged Pipeline Table SanctionsReferencesList count: 2
+Staged Pipeline Table Person count: 1
+Staged Pipeline Table PersonName count: 2
+Staged Pipeline Table PersonDescription count: 3
+Staged Pipeline Table PersonRole count: 2
+Staged Pipeline Table PersonDate count: 2
+Staged Pipeline Table PersonSanctionsReference count: 1
+Staged Pipeline Table PersonCountry count: 4
+Staged Pipeline Table PersonIDNumber count: 2
+Staged Pipeline Table PersonSource count: 9
+Staged Pipeline Table PersonImage count: 3
+]]></system-out>
+  </testcase>
+  <testcase name="testSchemaDiscoveryProvisionsTables" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.039">
+    <system-out><![CDATA[2026-11-05T10:07:43.922+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Ensured flat staging table 'staging_xml_records' exists in target database.
+2026-11-05T10:07:43.923+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'CountryList' in target database.
+2026-11-05T10:07:43.923+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'OccupationList' in target database.
+2026-11-05T10:07:43.923+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'RelationshipList' in target database.
+2026-11-05T10:07:43.924+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'SanctionsReferencesList' in target database.
+2026-11-05T10:07:43.924+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'Description1List' in target database.
+2026-11-05T10:07:43.925+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'Description2List' in target database.
+2026-11-05T10:07:43.926+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'Description3List' in target database.
+2026-11-05T10:07:43.926+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'DateTypeList' in target database.
+2026-11-05T10:07:43.927+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'NameTypeList' in target database.
+2026-11-05T10:07:43.928+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'RoleTypeList' in target database.
+2026-11-05T10:07:43.928+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'Person' in target database.
+2026-11-05T10:07:43.928+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonName' in target database.
+2026-11-05T10:07:43.928+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonDescription' in target database.
+2026-11-05T10:07:43.929+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonRole' in target database.
+2026-11-05T10:07:43.929+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonDate' in target database.
+2026-11-05T10:07:43.929+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonSanctionsReference' in target database.
+2026-11-05T10:07:43.930+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonCountry' in target database.
+2026-11-05T10:07:43.930+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonIDNumber' in target database.
+2026-11-05T10:07:43.930+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonSource' in target database.
+2026-11-05T10:07:43.930+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonImage' in target database.
+2026-11-05T10:07:43.931+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'PersonFlat' in target database.
+Discovered & Provisioned Tables: [constants, enum_values, indexes, index_columns, information_schema_catalog_name, in_doubt, locks, query_statistics, rights, roles, sessions, session_state, settings, synonyms, users, pg_am, pg_attrdef, pg_attribute, pg_authid, pg_class, pg_constraint, pg_database, pg_description, pg_group, pg_index, pg_inherits, pg_namespace, pg_proc, pg_roles, pg_settings, pg_tablespace, pg_trigger, pg_type, pg_user, app_users, batch_job_execution, batch_job_execution_context, batch_job_execution_params, batch_job_instance, batch_step_execution, batch_step_execution_context, countrylist, country_list, datetypelist, description1list, description2list, description3list, job_details, multi_children, multi_parents, nametypelist, occupationlist, occupation_list, person, personcountry, persondate, persondescription, personflat, personidnumber, personimage, personname, personrole, personsanctionsreference, personsource, person_country, person_date, person_description, person_id_number, person_image, person_name, person_role, person_sanctions_reference, person_source, relationshiplist, relationship_list, roletypelist, sanctionsreferenceslist, sanctions_references_list, saved_job_configs, schema_registry_versions, staging_xml_records, users, check_constraints, collations, columns, column_privileges, constraint_column_usage, domains, domain_constraints, element_types, fields, key_column_usage, parameters, referential_constraints, routines, schemata, sequences, tables, table_constraints, table_privileges, triggers, views]
+]]></system-out>
+  </testcase>
+  <testcase name="testSchemaRegistryPreSeededVersionsAndRetrieval" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.036"/>
+  <testcase name="testSampleXmlDiscovery" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.009"/>
+  <testcase name="testSchemaRegistrySaveAndLoadVersion" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.032">
+    <system-out><![CDATA[2026-11-05T10:07:44.028+05:30  INFO 93 --- [           main] c.e.x.service.SchemaRegistryService      : Registered new schema version: 'Customer-Ledger-Schema' (v1.0.0)
+]]></system-out>
+  </testcase>
+  <testcase name="testSkuResolutionDistinction" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.005"/>
+  <testcase name="testAutoConvertType" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.005"/>
+  <testcase name="testDynamicXmlItemProcessorFkResolution" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.004"/>
+  <testcase name="testRootAndSecondRootAttributePreview" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.017"/>
+  <testcase name="testPfaPersonUnmarshallingAndProcessing" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.012">
     <system-out><![CDATA[Person rows in multiRecords: [{person_id=1447992, action=add, record_date=21-Feb-2023, gender=Male, active_status=Active, deceased=No, birth_place=Sarajevo,Bosnia and Herzegovina, profile_notes=PROFILE CREATED: 02-Aug-2022 UPDATE ADDED: 09-Feb-2023}]
 ]]></system-out>
   </testcase>
-  <testcase name="testHeaderReferenceIngestionTasklet" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.041">
-    <system-out><![CDATA[2026-11-04T13:05:53.749+05:30  INFO 89 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Streaming header reference lists for target tables: [CountryList, OccupationList, RelationshipList, SanctionsReferencesList]
-2026-11-04T13:05:53.753+05:30  INFO 89 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Reached records collection tag 'Records', stopping header reference stream.
-2026-11-04T13:05:53.754+05:30  INFO 89 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'CountryList'
-2026-11-04T13:05:53.754+05:30  INFO 89 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'OccupationList'
-2026-11-04T13:05:53.754+05:30  INFO 89 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'RelationshipList'
-2026-11-04T13:05:53.754+05:30  INFO 89 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'SanctionsReferencesList'
-2026-11-04T13:05:53.755+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
-2026-11-04T13:05:53.757+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'CountryList': MERGE INTO CountryList (code, name, is_territory, profile_url) KEY (code) VALUES (:code, :name, :is_territory, :profile_url)
-2026-11-04T13:05:53.760+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'OccupationList': MERGE INTO OccupationList (code, name) KEY (code) VALUES (:code, :name)
-2026-11-04T13:05:53.762+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'RelationshipList': MERGE INTO RelationshipList (code, name) KEY (code) VALUES (:code, :name)
-2026-11-04T13:05:53.764+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'SanctionsReferencesList': MERGE INTO SanctionsReferencesList (reference_id, name, status, description_2_id) KEY (reference_id) VALUES (:reference_id, :name, :status, :description_2_id)
-2026-11-04T13:05:53.766+05:30  INFO 89 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Successfully persisted 4 header reference rows across 4 lookup tables.
+  <testcase name="testHeaderReferenceIngestionTasklet" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.016">
+    <system-out><![CDATA[2026-11-05T10:07:44.094+05:30  INFO 93 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Streaming header reference lists for target tables: [CountryList, OccupationList, RelationshipList, SanctionsReferencesList]
+2026-11-05T10:07:44.096+05:30  INFO 93 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Reached records collection tag 'Records', stopping header reference stream.
+2026-11-05T10:07:44.096+05:30  INFO 93 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'CountryList'
+2026-11-05T10:07:44.096+05:30  INFO 93 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'OccupationList'
+2026-11-05T10:07:44.097+05:30  INFO 93 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'RelationshipList'
+2026-11-05T10:07:44.097+05:30  INFO 93 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Extracted 1 records for header lookup table 'SanctionsReferencesList'
+2026-11-05T10:07:44.097+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:44.098+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'CountryList': MERGE INTO CountryList ("CODE", "NAME", "IS_TERRITORY", "PROFILE_URL") KEY ("CODE") VALUES (:code, :name, :is_territory, :profile_url)
+2026-11-05T10:07:44.099+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'OccupationList': MERGE INTO OccupationList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:44.101+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'RelationshipList': MERGE INTO RelationshipList ("CODE", "NAME") KEY ("CODE") VALUES (:code, :name)
+2026-11-05T10:07:44.102+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'SanctionsReferencesList': MERGE INTO SanctionsReferencesList ("REFERENCE_ID", "NAME", "STATUS", "DESCRIPTION_2_ID") KEY ("REFERENCE_ID") VALUES (:reference_id, :name, :status, :description_2_id)
+2026-11-05T10:07:44.103+05:30  INFO 93 --- [           main] c.e.x.b.HeaderReferenceIngestionTasklet  : Successfully persisted 4 header reference rows across 4 lookup tables.
 ]]></system-out>
   </testcase>
-  <testcase name="testStrictTagOrderSequenceForeignKeysLiveBatch" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.028">
-    <system-out><![CDATA[2026-11-04T13:05:53.787+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
-2026-11-04T13:05:53.791+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_fk_parents': MERGE INTO test_fk_parents (id, name) KEY (id) VALUES (:id, :name)
-2026-11-04T13:05:53.794+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_fk_children': MERGE INTO test_fk_children (id, parent_id) KEY (id) VALUES (:id, :parent_id)
+  <testcase name="testStrictTagOrderSequenceForeignKeysLiveBatch" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.008">
+    <system-out><![CDATA[2026-11-05T10:07:44.111+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:44.112+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_fk_parents': MERGE INTO test_fk_parents ("ID", "NAME") KEY ("ID") VALUES (:id, :name)
+2026-11-05T10:07:44.113+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_fk_children': MERGE INTO test_fk_children ("ID", "PARENT_ID") KEY ("ID") VALUES (:id, :parent_id)
 ]]></system-out>
   </testcase>
-  <testcase name="testParentChildAttributeNoClobber" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.014"/>
-  <testcase name="testMultiTableOneToManyMappingAndPreview" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.071"/>
-  <testcase name="testDynamicItemProcessor" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.007"/>
-  <testcase name="testLiveUpsertExecution" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.021">
-    <system-out><![CDATA[2026-11-04T13:05:53.917+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
-2026-11-04T13:05:53.918+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_upsert_products': MERGE INTO test_upsert_products (price, id, name) KEY (id) VALUES (:price, :id, :name)
+  <testcase name="testParentChildAttributeNoClobber" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.004"/>
+  <testcase name="testMultiTableOneToManyMappingAndPreview" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.019"/>
+  <testcase name="testSchemaEvolutionHandling" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.002"/>
+  <testcase name="testDynamicItemProcessor" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.003"/>
+  <testcase name="testDeltaXmlFileSchemaEvolutionWithAlterTable" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.017">
+    <system-out><![CDATA[2026-11-05T10:07:44.150+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:44.153+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE test_delta_person ADD COLUMN IF NOT EXISTS risk_score VARCHAR(255)' to add missing column 'risk_score'.
+2026-11-05T10:07:44.155+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE test_delta_person ADD COLUMN IF NOT EXISTS tax_id VARCHAR(255)' to add missing column 'tax_id'.
+2026-11-05T10:07:44.157+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE test_delta_person ADD COLUMN IF NOT EXISTS mother_maiden_name VARCHAR(255)' to add missing column 'mother_maiden_name'.
+2026-11-05T10:07:44.159+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE test_delta_person ADD COLUMN IF NOT EXISTS verification_date VARCHAR(255)' to add missing column 'verification_date'.
+2026-11-05T10:07:44.160+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: 'ALTER TABLE test_delta_person ADD COLUMN IF NOT EXISTS pep_category VARCHAR(255)' to add missing column 'pep_category'.
+2026-11-05T10:07:44.161+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_delta_person': MERGE INTO test_delta_person ("PERSON_ID", "FIRST_NAME", "ACTIVE_STATUS", "RISK_SCORE", "TAX_ID", "MOTHER_MAIDEN_NAME", "VERIFICATION_DATE", "PEP_CATEGORY") KEY ("PERSON_ID") VALUES (:person_id, :first_name, :active_status, :risk_score, :tax_id, :mother_maiden_name, :verification_date, :pep_category)
 ]]></system-out>
   </testcase>
-  <testcase name="testTableInsertionOrderSequenceFromTagMappings" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.007"/>
-  <testcase name="testLocationCodeResolutionFromWarehouseLocation" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.006"/>
-  <testcase name="testMultiRecordCollectionUnmarshallingAndProcessing" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.018"/>
-  <testcase name="testSkipPreviewForLargeXmlFile" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.023">
-    <system-out><![CDATA[2026-11-04T13:05:53.971+05:30  INFO 89 --- [           main] c.e.xmldbtool.service.XmlPreviewService  : XML file size is 2.8 KB (> 100 MB threshold). Generating dummy data based on tags without reading actual file.
+  <testcase name="testDynamicJdbcBatchWriterExplicitPrimaryKeys" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.003">
+    <system-out><![CDATA[2026-11-05T10:07:44.167+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
 ]]></system-out>
   </testcase>
-  <testcase name="testUpsertSqlConstructionPostgres" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.007"/>
-  <testcase name="testTableFailureDoesNotHaltOtherTables" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.036">
-    <system-out><![CDATA[2026-11-04T13:05:54.011+05:30  INFO 89 --- [           main] c.e.x.batch.DatabaseErrorSkipListener    : Verified/Created 'migration_errors' table for fault-tolerant error tracking.
-2026-11-04T13:05:54.011+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
-2026-11-04T13:05:54.012+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_resilient_tbl1': MERGE INTO test_resilient_tbl1 (id, name) KEY (id) VALUES (:id, :name)
-2026-11-04T13:05:54.014+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'non_existent_fail_table': MERGE INTO non_existent_fail_table (id, bad_col) KEY (id) VALUES (:id, :bad_col)
-2026-11-04T13:05:54.020+05:30 ERROR 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Batch write failed for table 'non_existent_fail_table' (Sequence #2) with 1 items. Root database reason: Table "NON_EXISTENT_FAIL_TABLE" not found; SQL statement:
+  <testcase name="testLiveUpsertExecution" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.006">
+    <system-out><![CDATA[2026-11-05T10:07:44.172+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:44.172+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_upsert_products': MERGE INTO test_upsert_products ("PRICE", "ID", "NAME") KEY ("ID") VALUES (:price, :id, :name)
+]]></system-out>
+  </testcase>
+  <testcase name="testTableInsertionOrderSequenceFromTagMappings" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.003"/>
+  <testcase name="testSchemaProvisioningDeltaEvolution" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.009">
+    <system-out><![CDATA[2026-11-05T10:07:44.184+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Delta XML Schema Evolution: Executed ALTER TABLE statement 'ALTER TABLE test_evolve_pfa ADD COLUMN IF NOT EXISTS delta_col_1 VARCHAR(255)' on table 'test_evolve_pfa' to add missing column 'delta_col_1'.
+2026-11-05T10:07:44.186+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Delta XML Schema Evolution: Executed ALTER TABLE statement 'ALTER TABLE test_evolve_pfa ADD COLUMN IF NOT EXISTS delta_col_2 VARCHAR(255)' on table 'test_evolve_pfa' to add missing column 'delta_col_2'.
+2026-11-05T10:07:44.187+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Delta XML Schema Evolution: Executed ALTER TABLE statement 'ALTER TABLE test_evolve_pfa ADD COLUMN IF NOT EXISTS profile_notes TEXT' on table 'test_evolve_pfa' to add missing column 'profile_notes'.
+]]></system-out>
+  </testcase>
+  <testcase name="testLocationCodeResolutionFromWarehouseLocation" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.003"/>
+  <testcase name="testCreateTargetDatabaseSchema" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.008">
+    <system-out><![CDATA[2026-11-05T10:07:44.196+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : CreateSchema-Pool-1793853464195 - Starting...
+2026-11-05T10:07:44.197+05:30  INFO 93 --- [           main] com.zaxxer.hikari.pool.HikariPool        : CreateSchema-Pool-1793853464195 - Added connection conn12: url=jdbc:h2:mem:testdb user=SA
+2026-11-05T10:07:44.197+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : CreateSchema-Pool-1793853464195 - Start completed.
+2026-11-05T10:07:44.197+05:30  INFO 93 --- [           main] c.e.x.service.DynamicDataSourceService   : Executed H2 DDL: CREATE SCHEMA IF NOT EXISTS "demo_compliance_schema"
+2026-11-05T10:07:44.198+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : CreateSchema-Pool-1793853464195 - Shutdown initiated...
+2026-11-05T10:07:44.200+05:30  INFO 93 --- [           main] com.zaxxer.hikari.HikariDataSource       : CreateSchema-Pool-1793853464195 - Shutdown completed.
+]]></system-out>
+  </testcase>
+  <testcase name="testMultiRecordCollectionUnmarshallingAndProcessing" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.007"/>
+  <testcase name="testSkipPreviewForLargeXmlFile" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.009">
+    <system-out><![CDATA[2026-11-05T10:07:44.213+05:30  INFO 93 --- [           main] c.e.xmldbtool.service.XmlPreviewService  : XML file size is 2.8 KB (> 100 MB threshold). Generating dummy data based on tags without reading actual file.
+]]></system-out>
+  </testcase>
+  <testcase name="testUpsertSqlConstructionPostgres" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.002"/>
+  <testcase name="testTableFailureDoesNotHaltOtherTables" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.015">
+    <system-out><![CDATA[2026-11-05T10:07:44.226+05:30  INFO 93 --- [           main] c.e.x.batch.DatabaseErrorSkipListener    : Verified/Created 'migration_errors' table for fault-tolerant error tracking.
+2026-11-05T10:07:44.227+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : DynamicJdbcBatchWriter detected target database engine: H2
+2026-11-05T10:07:44.227+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_resilient_tbl1': MERGE INTO test_resilient_tbl1 ("ID", "NAME") KEY ("ID") VALUES (:id, :name)
+2026-11-05T10:07:44.228+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'non_existent_fail_table': MERGE INTO non_existent_fail_table (id, bad_col) KEY (id) VALUES (:id, :bad_col)
+2026-11-05T10:07:44.232+05:30 ERROR 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Batch write failed for table 'non_existent_fail_table' (Sequence #2) with 1 items. Root database reason: Table "NON_EXISTENT_FAIL_TABLE" not found; SQL statement:
 MERGE INTO non_existent_fail_table (id, bad_col) KEY (id) VALUES (?, ?) [42102-224]. Continuing with remaining tables...
-2026-11-04T13:05:54.021+05:30  WARN 89 --- [           main] c.e.x.batch.DatabaseErrorSkipListener    : Table 'non_existent_fail_table' (Sequence #2) write failed for 1 items: Table "NON_EXISTENT_FAIL_TABLE" not found; SQL statement:
+2026-11-05T10:07:44.232+05:30  WARN 93 --- [           main] c.e.x.batch.DatabaseErrorSkipListener    : Table 'non_existent_fail_table' (Sequence #2) write failed for 1 items: Table "NON_EXISTENT_FAIL_TABLE" not found; SQL statement:
 MERGE INTO non_existent_fail_table (id, bad_col) KEY (id) VALUES (?, ?) [42102-224]. Continuing with other tables...
-2026-11-04T13:05:54.030+05:30  INFO 89 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_resilient_tbl2': MERGE INTO test_resilient_tbl2 (id, title) KEY (id) VALUES (:id, :title)
+2026-11-05T10:07:44.237+05:30  INFO 93 --- [           main] c.e.x.batch.DynamicJdbcBatchWriter       : Constructed dynamic batch UPSERT statement for table 'test_resilient_tbl2': MERGE INTO test_resilient_tbl2 ("ID", "TITLE") KEY ("ID") VALUES (:id, :title)
 ]]></system-out>
   </testcase>
-  <testcase name="testStaxEventItemReader" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.018"/>
+  <testcase name="testStagedXmlStreamingWithDeltaHashing" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.051">
+    <system-out><![CDATA[2026-11-05T10:07:44.264+05:30  INFO 93 --- [           main] c.e.x.s.StagingXmlStreamingService       : StAX Staging ingestion completed: totalRead=1, staged=1, skippedUnchanged=0, failed=0, elapsedMs=22
+2026-11-05T10:07:44.290+05:30  INFO 93 --- [           main] c.e.x.s.StagingXmlStreamingService       : StAX Staging ingestion completed: totalRead=1, staged=0, skippedUnchanged=1, failed=0, elapsedMs=26
+]]></system-out>
+  </testcase>
+  <testcase name="testGenericXmlSchemaDiscoveryProvisionsFlatAndCanonicalTables" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.01">
+    <system-out><![CDATA[2026-11-05T10:07:44.294+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Ensured flat staging table 'staging_xml_records' exists in target database.
+2026-11-05T10:07:44.295+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'record' in target database.
+2026-11-05T10:07:44.295+05:30  INFO 93 --- [           main] c.e.x.service.SchemaProvisioningService  : Successfully provisioned table 'record_flat' in target database.
+]]></system-out>
+  </testcase>
+  <testcase name="testStaxEventItemReader" classname="com.enterprise.xmldbtool.DynamicXmlIngestionTest" time="0.004"/>
 </testsuite>

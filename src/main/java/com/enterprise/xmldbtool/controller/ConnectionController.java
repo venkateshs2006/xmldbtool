@@ -28,4 +28,14 @@ public class ConnectionController {
             return ResponseEntity.badRequest().body(response);
         }
     }
+
+    @PostMapping("/create-schema")
+    public ResponseEntity<DbTestResponse> createSchema(@RequestBody DbConnectionConfig config) {
+        DbTestResponse response = dataSourceService.createSchema(config);
+        if (response.isSuccess()) {
+            return ResponseEntity.ok(response);
+        } else {
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
 }

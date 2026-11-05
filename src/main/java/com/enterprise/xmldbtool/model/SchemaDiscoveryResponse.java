@@ -8,6 +8,7 @@ public class SchemaDiscoveryResponse {
     private String message;
     private List<DiscoveredElement> discoveredXmlElements = new ArrayList<>();
     private List<TableMetadata> discoveredTables = new ArrayList<>();
+    private List<String> createdTables = new ArrayList<>();
 
     public SchemaDiscoveryResponse() {}
 
@@ -27,6 +28,9 @@ public class SchemaDiscoveryResponse {
 
     public List<TableMetadata> getDiscoveredTables() { return discoveredTables; }
     public void setDiscoveredTables(List<TableMetadata> discoveredTables) { this.discoveredTables = discoveredTables; }
+
+    public List<String> getCreatedTables() { return createdTables; }
+    public void setCreatedTables(List<String> createdTables) { this.createdTables = createdTables; }
 
     private long fileSizeBytes;
     private String fileSizeFormatted;

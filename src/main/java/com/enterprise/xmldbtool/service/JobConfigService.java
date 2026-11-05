@@ -88,6 +88,12 @@ public class JobConfigService {
                 }
             }
 
+            try {
+                config.setStagedPipeline(rs.getBoolean("staged_pipeline"));
+            } catch (Exception ignored) {
+                config.setStagedPipeline(false);
+            }
+
             return config;
         }
     };
@@ -151,33 +157,58 @@ public class JobConfigService {
             String dbJson = objectMapper.writeValueAsString(config.getDbConfig());
             String mappingsJson = objectMapper.writeValueAsString(config.getMappings() != null ? config.getMappings() : Collections.emptyList());
             String tableOrderJson = objectMapper.writeValueAsString(config.getTableOrder() != null ? config.getTableOrder() : Collections.emptyList());
+            boolean isStaged = Boolean.TRUE.equals(config.getStagedPipeline());
 
-            String sqlJobDetails = "INSERT INTO job_details (" +
-                    "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
-                    "db_config_json, mappings_json, cron_expression, status, created_by) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            try {
+                String sqlJobDetails = "INSERT INTO job_details (" +
+                        "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
+                        "db_config_json, mappings_json, cron_expression, status, created_by, staged_pipeline) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-            jdbcTemplate.update(
-                    sqlJobDetails,
-                    config.getJobName().trim(),
-                    config.getDescription(),
-                    config.getSourceXmlPath().trim(),
-                    config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : "record",
-                    config.getTargetTable(),
-                    tableOrderJson,
-                    config.getChunkSize() > 0 ? config.getChunkSize() : 1000,
-                    dbJson,
-                    mappingsJson,
-                    config.getCronExpression(),
-                    "READY",
-                    config.getCreatedBy() != null ? config.getCreatedBy() : "admin"
-            );
+                jdbcTemplate.update(
+                        sqlJobDetails,
+                        config.getJobName().trim(),
+                        config.getDescription(),
+                        config.getSourceXmlPath().trim(),
+                        config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : "record",
+                        config.getTargetTable(),
+                        tableOrderJson,
+                        config.getChunkSize() > 0 ? config.getChunkSize() : 1000,
+                        dbJson,
+                        mappingsJson,
+                        config.getCronExpression(),
+                        "READY",
+                        config.getCreatedBy() != null ? config.getCreatedBy() : "admin",
+                        isStaged
+                );
+            } catch (Exception ex) {
+                String sqlJobDetails = "INSERT INTO job_details (" +
+                        "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
+                        "db_config_json, mappings_json, cron_expression, status, created_by) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+                jdbcTemplate.update(
+                        sqlJobDetails,
+                        config.getJobName().trim(),
+                        config.getDescription(),
+                        config.getSourceXmlPath().trim(),
+                        config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : "record",
+                        config.getTargetTable(),
+                        tableOrderJson,
+                        config.getChunkSize() > 0 ? config.getChunkSize() : 1000,
+                        dbJson,
+                        mappingsJson,
+                        config.getCronExpression(),
+                        "READY",
+                        config.getCreatedBy() != null ? config.getCreatedBy() : "admin"
+                );
+            }
 
             try {
                 String sqlSavedJobs = "INSERT INTO saved_job_configs (" +
                         "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
-                        "db_config_json, mappings_json, cron_expression, status, created_by) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                        "db_config_json, mappings_json, cron_expression, status, created_by, staged_pipeline) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                 jdbcTemplate.update(
                         sqlSavedJobs,
                         config.getJobName().trim(),
@@ -191,7 +222,8 @@ public class JobConfigService {
                         mappingsJson,
                         config.getCronExpression(),
                         "READY",
-                        config.getCreatedBy() != null ? config.getCreatedBy() : "admin"
+                        config.getCreatedBy() != null ? config.getCreatedBy() : "admin",
+                        isStaged
                 );
             } catch (Exception ignored) {}
 
@@ -216,33 +248,58 @@ public class JobConfigService {
             String dbJson = config.getDbConfig() != null ? objectMapper.writeValueAsString(config.getDbConfig()) : objectMapper.writeValueAsString(existing.getDbConfig());
             String mappingsJson = config.getMappings() != null ? objectMapper.writeValueAsString(config.getMappings()) : objectMapper.writeValueAsString(existing.getMappings());
             String tableOrderJson = config.getTableOrder() != null ? objectMapper.writeValueAsString(config.getTableOrder()) : objectMapper.writeValueAsString(existing.getTableOrder());
+            boolean isStaged = config.getStagedPipeline() != null ? config.getStagedPipeline() : Boolean.TRUE.equals(existing.getStagedPipeline());
 
-            String sql = "UPDATE job_details SET " +
-                    "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
-                    "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
-                    "mappings_json = ?, cron_expression = ?, updated_at = CURRENT_TIMESTAMP " +
-                    "WHERE id = ?";
+            try {
+                String sql = "UPDATE job_details SET " +
+                        "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
+                        "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
+                        "mappings_json = ?, cron_expression = ?, staged_pipeline = ?, updated_at = CURRENT_TIMESTAMP " +
+                        "WHERE id = ?";
 
-            jdbcTemplate.update(
-                    sql,
-                    config.getJobName() != null ? config.getJobName().trim() : existing.getJobName(),
-                    config.getDescription() != null ? config.getDescription() : existing.getDescription(),
-                    config.getSourceXmlPath() != null ? config.getSourceXmlPath().trim() : existing.getSourceXmlPath(),
-                    config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : existing.getRecordRootElement(),
-                    config.getTargetTable() != null ? config.getTargetTable() : existing.getTargetTable(),
-                    tableOrderJson,
-                    config.getChunkSize() > 0 ? config.getChunkSize() : existing.getChunkSize(),
-                    dbJson,
-                    mappingsJson,
-                    config.getCronExpression() != null ? config.getCronExpression() : existing.getCronExpression(),
-                    id
-            );
+                jdbcTemplate.update(
+                        sql,
+                        config.getJobName() != null ? config.getJobName().trim() : existing.getJobName(),
+                        config.getDescription() != null ? config.getDescription() : existing.getDescription(),
+                        config.getSourceXmlPath() != null ? config.getSourceXmlPath().trim() : existing.getSourceXmlPath(),
+                        config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : existing.getRecordRootElement(),
+                        config.getTargetTable() != null ? config.getTargetTable() : existing.getTargetTable(),
+                        tableOrderJson,
+                        config.getChunkSize() > 0 ? config.getChunkSize() : existing.getChunkSize(),
+                        dbJson,
+                        mappingsJson,
+                        config.getCronExpression() != null ? config.getCronExpression() : existing.getCronExpression(),
+                        isStaged,
+                        id
+                );
+            } catch (Exception ex) {
+                String sql = "UPDATE job_details SET " +
+                        "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
+                        "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
+                        "mappings_json = ?, cron_expression = ?, updated_at = CURRENT_TIMESTAMP " +
+                        "WHERE id = ?";
+
+                jdbcTemplate.update(
+                        sql,
+                        config.getJobName() != null ? config.getJobName().trim() : existing.getJobName(),
+                        config.getDescription() != null ? config.getDescription() : existing.getDescription(),
+                        config.getSourceXmlPath() != null ? config.getSourceXmlPath().trim() : existing.getSourceXmlPath(),
+                        config.getRecordRootElement() != null ? config.getRecordRootElement().trim() : existing.getRecordRootElement(),
+                        config.getTargetTable() != null ? config.getTargetTable() : existing.getTargetTable(),
+                        tableOrderJson,
+                        config.getChunkSize() > 0 ? config.getChunkSize() : existing.getChunkSize(),
+                        dbJson,
+                        mappingsJson,
+                        config.getCronExpression() != null ? config.getCronExpression() : existing.getCronExpression(),
+                        id
+                );
+            }
 
             try {
                 String sqlSavedJobs = "UPDATE saved_job_configs SET " +
                         "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
                         "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
-                        "mappings_json = ?, cron_expression = ?, updated_at = CURRENT_TIMESTAMP " +
+                        "mappings_json = ?, cron_expression = ?, staged_pipeline = ?, updated_at = CURRENT_TIMESTAMP " +
                         "WHERE id = ?";
                 jdbcTemplate.update(
                         sqlSavedJobs,
@@ -256,6 +313,7 @@ public class JobConfigService {
                         dbJson,
                         mappingsJson,
                         config.getCronExpression() != null ? config.getCronExpression() : existing.getCronExpression(),
+                        isStaged,
                         id
                 );
             } catch (Exception ignored) {}

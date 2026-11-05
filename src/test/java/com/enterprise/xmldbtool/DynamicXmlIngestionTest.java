@@ -8,6 +8,11 @@ import com.enterprise.xmldbtool.model.DataPreviewResponse;
 import com.enterprise.xmldbtool.model.DatabaseRowPayload;
 import com.enterprise.xmldbtool.model.DiscoveredElement;
 import com.enterprise.xmldbtool.model.FieldMapping;
+import com.enterprise.xmldbtool.model.DbConnectionConfig;
+import com.enterprise.xmldbtool.model.DbTestResponse;
+import com.enterprise.xmldbtool.service.DynamicBatchJobService;
+import com.enterprise.xmldbtool.service.DynamicDataSourceService;
+import com.enterprise.xmldbtool.service.SchemaProvisioningService;
 import com.enterprise.xmldbtool.service.XmlPreviewService;
 import com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService;
 import org.junit.jupiter.api.DisplayName;
@@ -36,6 +41,24 @@ class DynamicXmlIngestionTest {
 
     @Autowired
     private XmlPreviewService previewService;
+
+    @Autowired
+    private DynamicBatchJobService batchJobService;
+
+    @Autowired
+    private com.enterprise.xmldbtool.service.StagingXmlStreamingService stagingStreamingService;
+
+    @Autowired
+    private com.enterprise.xmldbtool.service.DynamicSchemaResolutionService schemaResolutionService;
+
+    @Autowired
+    private com.enterprise.xmldbtool.service.SchemaRegistryService schemaRegistryService;
+
+    @Autowired
+    private DynamicDataSourceService dataSourceService;
+
+    @Autowired
+    private SchemaProvisioningService provisioningService;
 
     @Autowired
     private javax.sql.DataSource dataSource;
@@ -940,6 +963,920 @@ class DynamicXmlIngestionTest {
                 assertTrue(rs.getInt(1) >= 1, "SanctionsReferencesList must have records");
             }
         }
+    }
+
+    @Test
+    @DisplayName("Verify Full PFA Batch Job Ingestion across lookup tables and entity child tables")
+    void testFullPfaBatchJobIngestion() throws Exception {
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS CountryList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100), is_territory BOOLEAN, profile_url VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS OccupationList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS RelationshipList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS SanctionsReferencesList (reference_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), status VARCHAR(50), description_2_id VARCHAR(50))");
+
+            stmt.execute("CREATE TABLE IF NOT EXISTS Person (person_id INT PRIMARY KEY, action VARCHAR(50), record_date DATE, gender VARCHAR(20), active_status VARCHAR(50), deceased VARCHAR(10), birth_place VARCHAR(255), profile_notes TEXT)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonName (id SERIAL PRIMARY KEY, person_id INT, name_type VARCHAR(100), first_name VARCHAR(100), surname VARCHAR(100))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonDescription (id SERIAL PRIMARY KEY, person_id INT, description_1_id VARCHAR(50), description_2_id VARCHAR(50), description_3_id VARCHAR(50))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonRole (id SERIAL PRIMARY KEY, person_id INT, role_type VARCHAR(100), occ_title VARCHAR(255), occ_cat VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4), to_day VARCHAR(2), to_month VARCHAR(10), to_year VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonDate (id SERIAL PRIMARY KEY, person_id INT, date_type VARCHAR(100), \"day\" VARCHAR(2), \"month\" VARCHAR(10), \"year\" VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonSanctionsReference (id SERIAL PRIMARY KEY, person_id INT, reference_id VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonCountry (id SERIAL PRIMARY KEY, person_id INT, country_type VARCHAR(100), country_code VARCHAR(10))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonIDNumber (id SERIAL PRIMARY KEY, person_id INT, id_type VARCHAR(100), id_value VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonSource (id SERIAL PRIMARY KEY, person_id INT, source_url TEXT)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonImage (id SERIAL PRIMARY KEY, person_id INT, image_url TEXT)");
+
+            stmt.execute("DELETE FROM PersonName");
+            stmt.execute("DELETE FROM PersonDescription");
+            stmt.execute("DELETE FROM PersonRole");
+            stmt.execute("DELETE FROM PersonDate");
+            stmt.execute("DELETE FROM PersonSanctionsReference");
+            stmt.execute("DELETE FROM PersonCountry");
+            stmt.execute("DELETE FROM PersonIDNumber");
+            stmt.execute("DELETE FROM PersonSource");
+            stmt.execute("DELETE FROM PersonImage");
+            stmt.execute("DELETE FROM Person");
+            stmt.execute("DELETE FROM CountryList");
+            stmt.execute("DELETE FROM OccupationList");
+            stmt.execute("DELETE FROM RelationshipList");
+            stmt.execute("DELETE FROM SanctionsReferencesList");
+        }
+
+        List<FieldMapping> mappings = List.of(
+                // Lookup tables
+                new FieldMapping("CountryName/@code", "CountryList", "code", "NONE"),
+                new FieldMapping("CountryName/@name", "CountryList", "name", "NONE"),
+                new FieldMapping("CountryName/@IsTerritory", "CountryList", "is_territory", "NONE"),
+                new FieldMapping("CountryName/@ProfileURL", "CountryList", "profile_url", "NONE"),
+
+                new FieldMapping("Occupation/@code", "OccupationList", "code", "NONE"),
+                new FieldMapping("Occupation/@name", "OccupationList", "name", "NONE"),
+
+                new FieldMapping("Relationship/@code", "RelationshipList", "code", "NONE"),
+                new FieldMapping("Relationship/@name", "RelationshipList", "name", "NONE"),
+
+                new FieldMapping("ReferenceName/@code", "SanctionsReferencesList", "reference_id", "NONE"),
+                new FieldMapping("ReferenceName/@name", "SanctionsReferencesList", "name", "NONE"),
+                new FieldMapping("ReferenceName/@status", "SanctionsReferencesList", "status", "NONE"),
+                new FieldMapping("ReferenceName/@Description2Id", "SanctionsReferencesList", "description_2_id", "NONE"),
+
+                // Person main table
+                new FieldMapping("@id", "Person", "person_id", "NONE"),
+                new FieldMapping("@action", "Person", "action", "NONE"),
+                new FieldMapping("@date", "Person", "record_date", "NONE"),
+                new FieldMapping("Gender", "Person", "gender", "NONE"),
+                new FieldMapping("ActiveStatus", "Person", "active_status", "NONE"),
+                new FieldMapping("Deceased", "Person", "deceased", "NONE"),
+                new FieldMapping("Place/@name", "Person", "birth_place", "NONE"),
+                new FieldMapping("ProfileNotes", "Person", "profile_notes", "NONE"),
+
+                // Child tables
+                new FieldMapping("person_id", "PersonName", "person_id", "NONE"),
+                new FieldMapping("NameType", "PersonName", "name_type", "NONE"),
+                new FieldMapping("FirstName", "PersonName", "first_name", "NONE"),
+                new FieldMapping("Surname", "PersonName", "surname", "NONE"),
+
+                new FieldMapping("person_id", "PersonDescription", "person_id", "NONE"),
+                new FieldMapping("@Description1", "PersonDescription", "description_1_id", "NONE"),
+                new FieldMapping("@Description2", "PersonDescription", "description_2_id", "NONE"),
+                new FieldMapping("@Description3", "PersonDescription", "description_3_id", "NONE"),
+
+                new FieldMapping("person_id", "PersonRole", "person_id", "NONE"),
+                new FieldMapping("RoleType", "PersonRole", "role_type", "NONE"),
+                new FieldMapping("OccTitle", "PersonRole", "occ_title", "NONE"),
+                new FieldMapping("@OccCat", "PersonRole", "occ_cat", "NONE"),
+                new FieldMapping("@SinceDay", "PersonRole", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "PersonRole", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "PersonRole", "since_year", "NONE"),
+                new FieldMapping("@ToDay", "PersonRole", "to_day", "NONE"),
+                new FieldMapping("@ToMonth", "PersonRole", "to_month", "NONE"),
+                new FieldMapping("@ToYear", "PersonRole", "to_year", "NONE"),
+
+                new FieldMapping("person_id", "PersonDate", "person_id", "NONE"),
+                new FieldMapping("DateType", "PersonDate", "date_type", "NONE"),
+                new FieldMapping("@Day", "PersonDate", "day", "NONE"),
+                new FieldMapping("@Month", "PersonDate", "month", "NONE"),
+                new FieldMapping("@Year", "PersonDate", "year", "NONE"),
+
+                new FieldMapping("person_id", "PersonSanctionsReference", "person_id", "NONE"),
+                new FieldMapping("Reference", "PersonSanctionsReference", "reference_id", "NONE"),
+                new FieldMapping("@SinceDay", "PersonSanctionsReference", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "PersonSanctionsReference", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "PersonSanctionsReference", "since_year", "NONE"),
+
+                new FieldMapping("person_id", "PersonCountry", "person_id", "NONE"),
+                new FieldMapping("CountryType", "PersonCountry", "country_type", "NONE"),
+                new FieldMapping("@Code", "PersonCountry", "country_code", "NONE"),
+
+                new FieldMapping("person_id", "PersonIDNumber", "person_id", "NONE"),
+                new FieldMapping("IDType", "PersonIDNumber", "id_type", "NONE"),
+                new FieldMapping("IDValue", "PersonIDNumber", "id_value", "NONE"),
+
+                new FieldMapping("person_id", "PersonSource", "person_id", "NONE"),
+                new FieldMapping("@name", "PersonSource", "source_url", "NONE"),
+
+                new FieldMapping("person_id", "PersonImage", "person_id", "NONE"),
+                new FieldMapping("@URL", "PersonImage", "image_url", "NONE")
+        );
+
+        com.enterprise.xmldbtool.model.JobLaunchRequest req = new com.enterprise.xmldbtool.model.JobLaunchRequest();
+        req.setSourceXmlPath("sample-data/pfa-sample.xml");
+        com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = new com.enterprise.xmldbtool.model.DbConnectionConfig();
+        dbConfig.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL");
+        dbConfig.setUsername("sa");
+        dbConfig.setPassword("");
+        dbConfig.setEngine("H2");
+        req.setDbConfig(dbConfig);
+        req.setRecordRootElement("Person");
+        req.setTargetTable("Person");
+        req.setTableOrder(List.of(
+                "CountryList", "OccupationList", "RelationshipList", "SanctionsReferencesList",
+                "Person", "PersonName", "PersonDescription", "PersonRole", "PersonDate",
+                "PersonSanctionsReference", "PersonCountry", "PersonIDNumber", "PersonSource", "PersonImage"
+        ));
+        req.setMappings(mappings);
+        req.setChunkSize(100);
+
+        com.enterprise.xmldbtool.model.JobLaunchResponse resp = batchJobService.launchIngestionJob(req);
+        assertTrue(resp.isSuccess(), "Job launch must succeed: " + resp.getMessage());
+        assertNotNull(resp.getJobExecutionId());
+
+        // Wait for async job completion
+        long start = System.currentTimeMillis();
+        com.enterprise.xmldbtool.model.JobTelemetryResponse tel = null;
+        while (System.currentTimeMillis() - start < 15000) {
+            tel = batchJobService.getJobTelemetry(resp.getJobExecutionId());
+            if ("COMPLETED".equals(tel.getStatus()) || "FAILED".equals(tel.getStatus())) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertNotNull(tel);
+        System.out.println("Job Status: " + tel.getStatus() + ", Message: " + tel.getMessage());
+        assertEquals("COMPLETED", tel.getStatus(), "Job should complete successfully! Error: " + tel.getMessage());
+
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            for (String tbl : List.of("CountryList", "OccupationList", "RelationshipList", "SanctionsReferencesList",
+                    "Person", "PersonName", "PersonDescription", "PersonRole", "PersonDate",
+                    "PersonSanctionsReference", "PersonCountry", "PersonIDNumber", "PersonSource", "PersonImage")) {
+                try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + tbl)) {
+                    assertTrue(rs.next());
+                    int count = rs.getInt(1);
+                    System.out.println("Table " + tbl + " count: " + count);
+                    assertTrue(count >= 1, "Table " + tbl + " must have records, but found: " + count);
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Verify Full PFA Batch Job Ingestion with snake_case tables")
+    void testFullPfaBatchJobIngestionSnakeCase() throws Exception {
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS country_list (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100), is_territory BOOLEAN, profile_url VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS occupation_list (code VARCHAR(50) PRIMARY KEY, name VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS relationship_list (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS sanctions_references_list (reference_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), status VARCHAR(50), description_2_id VARCHAR(50))");
+
+            stmt.execute("CREATE TABLE IF NOT EXISTS person (person_id INT PRIMARY KEY, action VARCHAR(50), record_date DATE, gender VARCHAR(20), active_status VARCHAR(50), deceased VARCHAR(10), birth_place VARCHAR(255), profile_notes TEXT)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_name (id SERIAL PRIMARY KEY, person_id INT, name_type VARCHAR(100), first_name VARCHAR(100), surname VARCHAR(100))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_description (id SERIAL PRIMARY KEY, person_id INT, description_1_id VARCHAR(50), description_2_id VARCHAR(50), description_3_id VARCHAR(50))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_role (id SERIAL PRIMARY KEY, person_id INT, role_type VARCHAR(100), occ_title VARCHAR(255), occ_cat VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4), to_day VARCHAR(2), to_month VARCHAR(10), to_year VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_date (id SERIAL PRIMARY KEY, person_id INT, date_type VARCHAR(100), \"day\" VARCHAR(2), \"month\" VARCHAR(10), \"year\" VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_sanctions_reference (id SERIAL PRIMARY KEY, person_id INT, reference_id VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_country (id SERIAL PRIMARY KEY, person_id INT, country_type VARCHAR(100), country_code VARCHAR(10))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_id_number (id SERIAL PRIMARY KEY, person_id INT, id_type VARCHAR(100), id_value VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_source (id SERIAL PRIMARY KEY, person_id INT, source_url TEXT)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS person_image (id SERIAL PRIMARY KEY, person_id INT, image_url TEXT)");
+
+            stmt.execute("DELETE FROM person_name");
+            stmt.execute("DELETE FROM person_description");
+            stmt.execute("DELETE FROM person_role");
+            stmt.execute("DELETE FROM person_date");
+            stmt.execute("DELETE FROM person_sanctions_reference");
+            stmt.execute("DELETE FROM person_country");
+            stmt.execute("DELETE FROM person_id_number");
+            stmt.execute("DELETE FROM person_source");
+            stmt.execute("DELETE FROM person_image");
+            stmt.execute("DELETE FROM person");
+            stmt.execute("DELETE FROM country_list");
+            stmt.execute("DELETE FROM occupation_list");
+            stmt.execute("DELETE FROM relationship_list");
+            stmt.execute("DELETE FROM sanctions_references_list");
+        }
+
+        List<FieldMapping> mappings = List.of(
+                // Lookup tables
+                new FieldMapping("CountryName/@code", "country_list", "code", "NONE"),
+                new FieldMapping("CountryName/@name", "country_list", "name", "NONE"),
+                new FieldMapping("CountryName/@IsTerritory", "country_list", "is_territory", "NONE"),
+                new FieldMapping("CountryName/@ProfileURL", "country_list", "profile_url", "NONE"),
+
+                new FieldMapping("Occupation/@code", "occupation_list", "code", "NONE"),
+                new FieldMapping("Occupation/@name", "occupation_list", "name", "NONE"),
+
+                new FieldMapping("Relationship/@code", "relationship_list", "code", "NONE"),
+                new FieldMapping("Relationship/@name", "relationship_list", "name", "NONE"),
+
+                new FieldMapping("ReferenceName/@code", "sanctions_references_list", "reference_id", "NONE"),
+                new FieldMapping("ReferenceName/@name", "sanctions_references_list", "name", "NONE"),
+                new FieldMapping("ReferenceName/@status", "sanctions_references_list", "status", "NONE"),
+                new FieldMapping("ReferenceName/@Description2Id", "sanctions_references_list", "description_2_id", "NONE"),
+
+                // Person main table
+                new FieldMapping("@id", "person", "person_id", "NONE"),
+                new FieldMapping("@action", "person", "action", "NONE"),
+                new FieldMapping("@date", "person", "record_date", "NONE"),
+                new FieldMapping("Gender", "person", "gender", "NONE"),
+                new FieldMapping("ActiveStatus", "person", "active_status", "NONE"),
+                new FieldMapping("Deceased", "person", "deceased", "NONE"),
+                new FieldMapping("Place/@name", "person", "birth_place", "NONE"),
+                new FieldMapping("ProfileNotes", "person", "profile_notes", "NONE"),
+
+                // Child tables
+                new FieldMapping("person_id", "person_name", "person_id", "NONE"),
+                new FieldMapping("NameType", "person_name", "name_type", "NONE"),
+                new FieldMapping("FirstName", "person_name", "first_name", "NONE"),
+                new FieldMapping("Surname", "person_name", "surname", "NONE"),
+
+                new FieldMapping("person_id", "person_description", "person_id", "NONE"),
+                new FieldMapping("@Description1", "person_description", "description_1_id", "NONE"),
+                new FieldMapping("@Description2", "person_description", "description_2_id", "NONE"),
+                new FieldMapping("@Description3", "person_description", "description_3_id", "NONE"),
+
+                new FieldMapping("person_id", "person_role", "person_id", "NONE"),
+                new FieldMapping("RoleType", "person_role", "role_type", "NONE"),
+                new FieldMapping("OccTitle", "person_role", "occ_title", "NONE"),
+                new FieldMapping("@OccCat", "person_role", "occ_cat", "NONE"),
+                new FieldMapping("@SinceDay", "person_role", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "person_role", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "person_role", "since_year", "NONE"),
+                new FieldMapping("@ToDay", "person_role", "to_day", "NONE"),
+                new FieldMapping("@ToMonth", "person_role", "to_month", "NONE"),
+                new FieldMapping("@ToYear", "person_role", "to_year", "NONE"),
+
+                new FieldMapping("person_id", "person_date", "person_id", "NONE"),
+                new FieldMapping("DateType", "person_date", "date_type", "NONE"),
+                new FieldMapping("@Day", "person_date", "day", "NONE"),
+                new FieldMapping("@Month", "person_date", "month", "NONE"),
+                new FieldMapping("@Year", "person_date", "year", "NONE"),
+
+                new FieldMapping("person_id", "person_sanctions_reference", "person_id", "NONE"),
+                new FieldMapping("Reference", "person_sanctions_reference", "reference_id", "NONE"),
+                new FieldMapping("@SinceDay", "person_sanctions_reference", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "person_sanctions_reference", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "person_sanctions_reference", "since_year", "NONE"),
+
+                new FieldMapping("person_id", "person_country", "person_id", "NONE"),
+                new FieldMapping("CountryType", "person_country", "country_type", "NONE"),
+                new FieldMapping("@Code", "person_country", "country_code", "NONE"),
+
+                new FieldMapping("person_id", "person_id_number", "person_id", "NONE"),
+                new FieldMapping("IDType", "person_id_number", "id_type", "NONE"),
+                new FieldMapping("IDValue", "person_id_number", "id_value", "NONE"),
+
+                new FieldMapping("person_id", "person_source", "person_id", "NONE"),
+                new FieldMapping("@name", "person_source", "source_url", "NONE"),
+
+                new FieldMapping("person_id", "person_image", "person_id", "NONE"),
+                new FieldMapping("@URL", "person_image", "image_url", "NONE")
+        );
+
+        com.enterprise.xmldbtool.model.JobLaunchRequest req = new com.enterprise.xmldbtool.model.JobLaunchRequest();
+        req.setSourceXmlPath("sample-data/pfa-sample.xml");
+        com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = new com.enterprise.xmldbtool.model.DbConnectionConfig();
+        dbConfig.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL");
+        dbConfig.setUsername("sa");
+        dbConfig.setPassword("");
+        dbConfig.setEngine("H2");
+        req.setDbConfig(dbConfig);
+        req.setRecordRootElement("Person");
+        req.setTargetTable("person");
+        req.setTableOrder(List.of(
+                "country_list", "occupation_list", "relationship_list", "sanctions_references_list",
+                "person", "person_name", "person_description", "person_role", "person_date",
+                "person_sanctions_reference", "person_country", "person_id_number", "person_source", "person_image"
+        ));
+        req.setMappings(mappings);
+        req.setChunkSize(100);
+
+        com.enterprise.xmldbtool.model.JobLaunchResponse resp = batchJobService.launchIngestionJob(req);
+        assertTrue(resp.isSuccess(), "Job launch must succeed: " + resp.getMessage());
+        assertNotNull(resp.getJobExecutionId());
+
+        long start = System.currentTimeMillis();
+        com.enterprise.xmldbtool.model.JobTelemetryResponse tel = null;
+        while (System.currentTimeMillis() - start < 15000) {
+            tel = batchJobService.getJobTelemetry(resp.getJobExecutionId());
+            if ("COMPLETED".equals(tel.getStatus()) || "FAILED".equals(tel.getStatus())) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertNotNull(tel);
+        assertEquals("COMPLETED", tel.getStatus(), "Job should complete successfully! Error: " + tel.getMessage());
+
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            for (String tbl : List.of("country_list", "occupation_list", "relationship_list", "sanctions_references_list",
+                    "person", "person_name", "person_description", "person_role", "person_date",
+                    "person_sanctions_reference", "person_country", "person_id_number", "person_source", "person_image")) {
+                try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + tbl)) {
+                    assertTrue(rs.next());
+                    int count = rs.getInt(1);
+                    System.out.println("Table " + tbl + " count: " + count);
+                    assertTrue(count >= 1, "Table " + tbl + " must have records, but found: " + count);
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Verify StAX Streaming into Flat Staging with SHA-256 Delta Hashing")
+    void testStagedXmlStreamingWithDeltaHashing() throws Exception {
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS staging_xml_records (" +
+                    "id BIGSERIAL PRIMARY KEY, job_execution_id BIGINT, entity_type VARCHAR(50), " +
+                    "record_identifier VARCHAR(100), record_action VARCHAR(50), record_date VARCHAR(50), " +
+                    "raw_payload TEXT, payload_hash VARCHAR(64), status VARCHAR(30), error_message TEXT, " +
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+            stmt.execute("DELETE FROM staging_xml_records");
+        }
+
+        // First ingestion run: should be STAGED
+        var summary1 = stagingStreamingService.streamXmlToStaging(
+                "sample-data/pfa-sample.xml", "Person", 101L, dataSource, 100);
+        assertTrue(summary1.totalRead() >= 1, "Must read at least 1 record fragment");
+        assertTrue(summary1.stagedCount() >= 1, "Must stage newly discovered records");
+        assertEquals(0, summary1.skippedUnchangedCount(), "First run has no existing hashes to skip");
+
+        // Verify database contents
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement();
+             java.sql.ResultSet rs = stmt.executeQuery("SELECT record_identifier, payload_hash, status FROM staging_xml_records WHERE status = 'STAGED'")) {
+            assertTrue(rs.next());
+            assertEquals("1447992", rs.getString("record_identifier"));
+            String hash = rs.getString("payload_hash");
+            assertNotNull(hash);
+            assertEquals(64, hash.length(), "SHA-256 hash must be 64 characters hex");
+            assertEquals("STAGED", rs.getString("status"));
+        }
+
+        // Second ingestion run with identical data: delta detector must mark as SKIPPED_UNCHANGED
+        var summary2 = stagingStreamingService.streamXmlToStaging(
+                "sample-data/pfa-sample.xml", "Person", 102L, dataSource, 100);
+        assertTrue(summary2.skippedUnchangedCount() >= 1, "Subsequent run with identical hash must be SKIPPED_UNCHANGED");
+    }
+
+    @Test
+    @DisplayName("Verify Schema Evolution handles unmapped and newly added XML attributes dynamically")
+    void testSchemaEvolutionHandling() {
+        Map<String, Object> rawRecord = new LinkedHashMap<>();
+        rawRecord.put("@id", "9910");
+        rawRecord.put("person_id", "9910");
+        rawRecord.put("FirstName", "John");
+        rawRecord.put("Surname", "Doe");
+        // Newly evolved tags in XML schema not present in existing table mapping
+        rawRecord.put("BiometricScore", "0.985");
+        rawRecord.put("RiskClassification", "CRITICAL");
+        rawRecord.put("ComplianceTier", "TIER-1");
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("@id", "Person", "person_id", "NONE"),
+                new FieldMapping("FirstName", "PersonName", "first_name", "NONE"),
+                new FieldMapping("Surname", "PersonName", "surname", "NONE")
+        );
+
+        schemaResolutionService.enrichWithSchemaEvolutionAttributes(rawRecord, mappings);
+
+        assertTrue(rawRecord.containsKey("extra_attributes"), "Schema evolution must capture unmapped tags into extra_attributes JSON");
+        String extraJson = (String) rawRecord.get("extra_attributes");
+        assertNotNull(extraJson);
+        assertTrue(extraJson.contains("BiometricScore"));
+        assertTrue(extraJson.contains("RiskClassification"));
+        assertTrue(extraJson.contains("ComplianceTier"));
+    }
+
+    @Test
+    @DisplayName("Verify Full Two-Stage Staged Pipeline: StAX Flat Staging -> Canonical Relational Normalization")
+    void testFullTwoStageStagedPipeline() throws Exception {
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE IF NOT EXISTS CountryList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100), is_territory BOOLEAN, profile_url VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS OccupationList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS RelationshipList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS SanctionsReferencesList (reference_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), status VARCHAR(50), description_2_id VARCHAR(50))");
+
+            stmt.execute("CREATE TABLE IF NOT EXISTS Person (person_id INT PRIMARY KEY, action VARCHAR(50), record_date DATE, gender VARCHAR(20), active_status VARCHAR(50), deceased VARCHAR(10), birth_place VARCHAR(255), profile_notes TEXT, extra_attributes TEXT)");
+            try {
+                stmt.execute("ALTER TABLE Person ADD COLUMN IF NOT EXISTS extra_attributes TEXT");
+            } catch (Exception ignored) {}
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonName (id SERIAL PRIMARY KEY, person_id INT, name_type VARCHAR(100), first_name VARCHAR(100), surname VARCHAR(100))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonDescription (id SERIAL PRIMARY KEY, person_id INT, description_1_id VARCHAR(50), description_2_id VARCHAR(50), description_3_id VARCHAR(50))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonRole (id SERIAL PRIMARY KEY, person_id INT, role_type VARCHAR(100), occ_title VARCHAR(255), occ_cat VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4), to_day VARCHAR(2), to_month VARCHAR(10), to_year VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonDate (id SERIAL PRIMARY KEY, person_id INT, date_type VARCHAR(100), \"day\" VARCHAR(2), \"month\" VARCHAR(10), \"year\" VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonSanctionsReference (id SERIAL PRIMARY KEY, person_id INT, reference_id VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonCountry (id SERIAL PRIMARY KEY, person_id INT, country_type VARCHAR(100), country_code VARCHAR(10))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonIDNumber (id SERIAL PRIMARY KEY, person_id INT, id_type VARCHAR(100), id_value VARCHAR(255))");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonSource (id SERIAL PRIMARY KEY, person_id INT, source_url TEXT)");
+            stmt.execute("CREATE TABLE IF NOT EXISTS PersonImage (id SERIAL PRIMARY KEY, person_id INT, image_url TEXT)");
+
+            stmt.execute("DELETE FROM PersonName");
+            stmt.execute("DELETE FROM PersonDescription");
+            stmt.execute("DELETE FROM PersonRole");
+            stmt.execute("DELETE FROM PersonDate");
+            stmt.execute("DELETE FROM PersonSanctionsReference");
+            stmt.execute("DELETE FROM PersonCountry");
+            stmt.execute("DELETE FROM PersonIDNumber");
+            stmt.execute("DELETE FROM PersonSource");
+            stmt.execute("DELETE FROM PersonImage");
+            stmt.execute("DELETE FROM Person");
+            stmt.execute("DELETE FROM CountryList");
+            stmt.execute("DELETE FROM OccupationList");
+            stmt.execute("DELETE FROM RelationshipList");
+            stmt.execute("DELETE FROM SanctionsReferencesList");
+            stmt.execute("DELETE FROM staging_xml_records");
+        }
+
+        List<FieldMapping> mappings = List.of(
+                // Lookup tables
+                new FieldMapping("CountryName/@code", "CountryList", "code", "NONE"),
+                new FieldMapping("CountryName/@name", "CountryList", "name", "NONE"),
+                new FieldMapping("CountryName/@IsTerritory", "CountryList", "is_territory", "NONE"),
+                new FieldMapping("CountryName/@ProfileURL", "CountryList", "profile_url", "NONE"),
+
+                new FieldMapping("Occupation/@code", "OccupationList", "code", "NONE"),
+                new FieldMapping("Occupation/@name", "OccupationList", "name", "NONE"),
+
+                new FieldMapping("Relationship/@code", "RelationshipList", "code", "NONE"),
+                new FieldMapping("Relationship/@name", "RelationshipList", "name", "NONE"),
+
+                new FieldMapping("ReferenceName/@code", "SanctionsReferencesList", "reference_id", "NONE"),
+                new FieldMapping("ReferenceName/@name", "SanctionsReferencesList", "name", "NONE"),
+                new FieldMapping("ReferenceName/@status", "SanctionsReferencesList", "status", "NONE"),
+                new FieldMapping("ReferenceName/@Description2Id", "SanctionsReferencesList", "description_2_id", "NONE"),
+
+                // Person master table
+                new FieldMapping("@id", "Person", "person_id", "NONE"),
+                new FieldMapping("@action", "Person", "action", "NONE"),
+                new FieldMapping("@date", "Person", "record_date", "NONE"),
+                new FieldMapping("Gender", "Person", "gender", "NONE"),
+                new FieldMapping("ActiveStatus", "Person", "active_status", "NONE"),
+                new FieldMapping("Deceased", "Person", "deceased", "NONE"),
+                new FieldMapping("Place/@name", "Person", "birth_place", "NONE"),
+                new FieldMapping("ProfileNotes", "Person", "profile_notes", "NONE"),
+                new FieldMapping("extra_attributes", "Person", "extra_attributes", "NONE"),
+
+                // Child 1-to-N tables
+                new FieldMapping("person_id", "PersonName", "person_id", "NONE"),
+                new FieldMapping("NameType", "PersonName", "name_type", "NONE"),
+                new FieldMapping("FirstName", "PersonName", "first_name", "NONE"),
+                new FieldMapping("Surname", "PersonName", "surname", "NONE"),
+
+                new FieldMapping("person_id", "PersonDescription", "person_id", "NONE"),
+                new FieldMapping("@Description1", "PersonDescription", "description_1_id", "NONE"),
+                new FieldMapping("@Description2", "PersonDescription", "description_2_id", "NONE"),
+                new FieldMapping("@Description3", "PersonDescription", "description_3_id", "NONE"),
+
+                new FieldMapping("person_id", "PersonRole", "person_id", "NONE"),
+                new FieldMapping("RoleType", "PersonRole", "role_type", "NONE"),
+                new FieldMapping("OccTitle", "PersonRole", "occ_title", "NONE"),
+                new FieldMapping("@OccCat", "PersonRole", "occ_cat", "NONE"),
+                new FieldMapping("@SinceDay", "PersonRole", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "PersonRole", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "PersonRole", "since_year", "NONE"),
+                new FieldMapping("@ToDay", "PersonRole", "to_day", "NONE"),
+                new FieldMapping("@ToMonth", "PersonRole", "to_month", "NONE"),
+                new FieldMapping("@ToYear", "PersonRole", "to_year", "NONE"),
+
+                new FieldMapping("person_id", "PersonDate", "person_id", "NONE"),
+                new FieldMapping("DateType", "PersonDate", "date_type", "NONE"),
+                new FieldMapping("@Day", "PersonDate", "day", "NONE"),
+                new FieldMapping("@Month", "PersonDate", "month", "NONE"),
+                new FieldMapping("@Year", "PersonDate", "year", "NONE"),
+
+                new FieldMapping("person_id", "PersonSanctionsReference", "person_id", "NONE"),
+                new FieldMapping("Reference", "PersonSanctionsReference", "reference_id", "NONE"),
+                new FieldMapping("@SinceDay", "PersonSanctionsReference", "since_day", "NONE"),
+                new FieldMapping("@SinceMonth", "PersonSanctionsReference", "since_month", "NONE"),
+                new FieldMapping("@SinceYear", "PersonSanctionsReference", "since_year", "NONE"),
+
+                new FieldMapping("person_id", "PersonCountry", "person_id", "NONE"),
+                new FieldMapping("CountryType", "PersonCountry", "country_type", "NONE"),
+                new FieldMapping("@Code", "PersonCountry", "country_code", "NONE"),
+
+                new FieldMapping("person_id", "PersonIDNumber", "person_id", "NONE"),
+                new FieldMapping("IDType", "PersonIDNumber", "id_type", "NONE"),
+                new FieldMapping("IDValue", "PersonIDNumber", "id_value", "NONE"),
+
+                new FieldMapping("person_id", "PersonSource", "person_id", "NONE"),
+                new FieldMapping("@name", "PersonSource", "source_url", "NONE"),
+
+                new FieldMapping("person_id", "PersonImage", "person_id", "NONE"),
+                new FieldMapping("@URL", "PersonImage", "image_url", "NONE")
+        );
+
+        com.enterprise.xmldbtool.model.JobLaunchRequest req = new com.enterprise.xmldbtool.model.JobLaunchRequest();
+        req.setSourceXmlPath("sample-data/pfa-sample.xml");
+        com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = new com.enterprise.xmldbtool.model.DbConnectionConfig();
+        dbConfig.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL");
+        dbConfig.setUsername("sa");
+        dbConfig.setPassword("");
+        dbConfig.setEngine("H2");
+        req.setDbConfig(dbConfig);
+        req.setRecordRootElement("Person");
+        req.setTargetTable("Person");
+        req.setTableOrder(List.of(
+                "CountryList", "OccupationList", "RelationshipList", "SanctionsReferencesList",
+                "Person", "PersonName", "PersonDescription", "PersonRole", "PersonDate",
+                "PersonSanctionsReference", "PersonCountry", "PersonIDNumber", "PersonSource", "PersonImage"
+        ));
+        req.setMappings(mappings);
+        req.setChunkSize(100);
+        req.setStagedPipeline(true); // Trigger 2-Stage Staged Pipeline
+
+        com.enterprise.xmldbtool.model.JobLaunchResponse resp = batchJobService.launchIngestionJob(req);
+        assertTrue(resp.isSuccess(), "Staged Pipeline Job launch must succeed");
+        assertNotNull(resp.getJobExecutionId());
+
+        long start = System.currentTimeMillis();
+        com.enterprise.xmldbtool.model.JobTelemetryResponse tel = null;
+        while (System.currentTimeMillis() - start < 15000) {
+            tel = batchJobService.getJobTelemetry(resp.getJobExecutionId());
+            if ("COMPLETED".equals(tel.getStatus()) || "FAILED".equals(tel.getStatus())) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertNotNull(tel);
+        assertEquals("COMPLETED", tel.getStatus(), "Staged Pipeline job must complete: " + tel.getMessage());
+
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            // Verify staging records were marked NORMALIZED
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM staging_xml_records WHERE status = 'NORMALIZED'")) {
+                assertTrue(rs.next());
+                assertTrue(rs.getInt(1) >= 1, "Staging records must be NORMALIZED");
+            }
+
+            // Verify all canonical tables have records
+            for (String tbl : List.of("CountryList", "OccupationList", "RelationshipList", "SanctionsReferencesList",
+                    "Person", "PersonName", "PersonDescription", "PersonRole", "PersonDate",
+                    "PersonSanctionsReference", "PersonCountry", "PersonIDNumber", "PersonSource", "PersonImage")) {
+                try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + tbl)) {
+                    assertTrue(rs.next());
+                    int count = rs.getInt(1);
+                    System.out.println("Staged Pipeline Table " + tbl + " count: " + count);
+                    assertTrue(count >= 1, "Canonical table " + tbl + " must have records, found: " + count);
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Verify Schema Discovery automatically provisions flat staging table and canonical relational tables")
+    void testSchemaDiscoveryProvisionsTables() throws Exception {
+        com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = new com.enterprise.xmldbtool.model.DbConnectionConfig();
+        dbConfig.setEngine("H2");
+        dbConfig.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL");
+        dbConfig.setUsername("sa");
+        dbConfig.setPassword("");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(dbConfig);
+        request.setSourceXmlPath("sample-data/pfa-sample.xml");
+        request.setRecordRootElement("Person");
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess(), "Schema discovery should succeed");
+        assertNotNull(response.getDiscoveredTables(), "Discovered tables should not be null");
+
+        List<String> tableNames = response.getDiscoveredTables().stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .toList();
+
+        System.out.println("Discovered & Provisioned Tables: " + tableNames);
+
+        // Verify flat staging table exists
+        assertTrue(tableNames.contains("staging_xml_records"), "Must contain flat staging table 'staging_xml_records'");
+
+        // Verify flattened Person table based on XML tags exists
+        assertTrue(tableNames.contains("personflat"), "Must contain PersonFlat flattened table");
+
+        // Verify canonical Master and 1-to-N child tables exist
+        assertTrue(tableNames.contains("person"), "Must contain Master Person table");
+        assertTrue(tableNames.contains("personname"), "Must contain PersonName 1-to-N child table");
+        assertTrue(tableNames.contains("personrole"), "Must contain PersonRole 1-to-N child table");
+        assertTrue(tableNames.contains("persondescription"), "Must contain PersonDescription 1-to-N child table");
+        assertTrue(tableNames.contains("persondate"), "Must contain PersonDate 1-to-N child table");
+        assertTrue(tableNames.contains("personsanctionsreference"), "Must contain PersonSanctionsReference 1-to-N child table");
+        assertTrue(tableNames.contains("personcountry"), "Must contain PersonCountry 1-to-N child table");
+        assertTrue(tableNames.contains("personidnumber"), "Must contain PersonIDNumber 1-to-N child table");
+        assertTrue(tableNames.contains("personsource"), "Must contain PersonSource 1-to-N child table");
+        assertTrue(tableNames.contains("personimage"), "Must contain PersonImage 1-to-N child table");
+
+        // Verify lookup reference tables exist based on header XML tags
+        assertTrue(tableNames.contains("countrylist"), "Must contain CountryList lookup table");
+        assertTrue(tableNames.contains("occupationlist"), "Must contain OccupationList lookup table");
+        assertTrue(tableNames.contains("relationshiplist"), "Must contain RelationshipList lookup table");
+        assertTrue(tableNames.contains("sanctionsreferenceslist"), "Must contain SanctionsReferencesList lookup table");
+        assertTrue(tableNames.contains("description1list"), "Must contain Description1List lookup table");
+        assertTrue(tableNames.contains("description2list"), "Must contain Description2List lookup table");
+        assertTrue(tableNames.contains("description3list"), "Must contain Description3List lookup table");
+        assertTrue(tableNames.contains("datetypelist"), "Must contain DateTypeList lookup table");
+        assertTrue(tableNames.contains("nametypelist"), "Must contain NameTypeList lookup table");
+        assertTrue(tableNames.contains("roletypelist"), "Must contain RoleTypeList lookup table");
+
+        // Verify direct SQL query against provisioned tables succeeds
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM staging_xml_records")) {
+                assertTrue(rs.next());
+            }
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM Person")) {
+                assertTrue(rs.next());
+            }
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM PersonFlat")) {
+                assertTrue(rs.next());
+            }
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM Description1List")) {
+                assertTrue(rs.next());
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("Verify Generic XML schema discovery dynamically provisions flat table and canonical master table")
+    void testGenericXmlSchemaDiscoveryProvisionsFlatAndCanonicalTables() throws Exception {
+        com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = new com.enterprise.xmldbtool.model.DbConnectionConfig();
+        dbConfig.setEngine("H2");
+        dbConfig.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL");
+        dbConfig.setUsername("sa");
+        dbConfig.setPassword("");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(dbConfig);
+        request.setSourceXmlPath("sample-data/large-sample.xml");
+        request.setRecordRootElement("record");
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess(), "Schema discovery should succeed");
+        assertNotNull(response.getDiscoveredTables(), "Discovered tables should not be null");
+
+        List<String> tableNames = response.getDiscoveredTables().stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .toList();
+
+        // Must contain flattened table and canonical master table
+        assertTrue(tableNames.contains("record_flat"), "Must contain generic flattened table 'record_flat'");
+        assertTrue(tableNames.contains("record"), "Must contain generic canonical master table 'record'");
+        assertTrue(tableNames.contains("staging_xml_records"), "Must contain flat staging table");
+    }
+
+    @Test
+    @DisplayName("Verify Schema Registry pre-seeded versions and CRUD retrieval")
+    void testSchemaRegistryPreSeededVersionsAndRetrieval() {
+        assertNotNull(schemaRegistryService, "SchemaRegistryService must be injected");
+        List<com.enterprise.xmldbtool.model.SchemaRegistryVersion> versions = schemaRegistryService.getAllVersions();
+        assertNotNull(versions, "Registry versions should not be null");
+        assertTrue(versions.size() >= 2, "Should have at least 2 seeded versions (PFA Sanctions and Product Catalog)");
+
+        boolean hasPfa = versions.stream().anyMatch(v -> "PFA-WorldCheck-Sanctions".equals(v.getSchemaName()));
+        boolean hasCatalog = versions.stream().anyMatch(v -> "Enterprise-Catalog-Products".equals(v.getSchemaName()));
+        assertTrue(hasPfa, "Should contain PFA-WorldCheck-Sanctions schema");
+        assertTrue(hasCatalog, "Should contain Enterprise-Catalog-Products schema");
+
+        com.enterprise.xmldbtool.model.SchemaRegistryVersion pfaVer = versions.stream()
+                .filter(v -> "PFA-WorldCheck-Sanctions".equals(v.getSchemaName()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(pfaVer);
+        assertEquals("Person", pfaVer.getRootElement());
+        assertNotNull(pfaVer.getMappings());
+        assertFalse(pfaVer.getMappings().isEmpty(), "PFA mappings must not be empty");
+
+        // Verify primary key constraint is configured on person_id
+        boolean hasPersonPk = pfaVer.getMappings().stream().anyMatch(m ->
+                "Person".equalsIgnoreCase(m.getTargetTable()) &&
+                "person_id".equalsIgnoreCase(m.getTargetColumn()) &&
+                "PK".equalsIgnoreCase(m.getConstraintType())
+        );
+        assertTrue(hasPersonPk, "person_id on Person must have PK constraint in registry");
+    }
+
+    @Test
+    @DisplayName("Verify Schema Registry version registration with PK and FK constraints")
+    void testSchemaRegistrySaveAndLoadVersion() {
+        com.enterprise.xmldbtool.model.SchemaRegistryVersion newVer = new com.enterprise.xmldbtool.model.SchemaRegistryVersion();
+        newVer.setSchemaName("Customer-Ledger-Schema");
+        newVer.setVersion("1.0.0");
+        newVer.setEntityType("Customer");
+        newVer.setRootElement("Customer");
+        newVer.setDescription("Customer and Accounts relational schema with PK/FK constraints");
+        newVer.setTableOrder(List.of("Customer", "Account"));
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("Customer/@id", "Customer", "customer_id", "NONE", "PK"),
+                new FieldMapping("Customer/Name", "Customer", "customer_name", "NONE", "NONE"),
+                new FieldMapping("Customer/@id", "Account", "customer_id", "NONE", "FK"),
+                new FieldMapping("Customer/Account/AccountNumber", "Account", "account_number", "NONE", "PK")
+        );
+        newVer.setMappings(mappings);
+
+        com.enterprise.xmldbtool.model.SchemaRegistryVersion saved = schemaRegistryService.saveVersion(newVer);
+        assertNotNull(saved.getId(), "Saved version must have generated ID");
+        assertEquals("Customer-Ledger-Schema", saved.getSchemaName());
+        assertEquals("1.0.0", saved.getVersion());
+
+        com.enterprise.xmldbtool.model.SchemaRegistryVersion retrieved = schemaRegistryService.getVersionById(saved.getId());
+        assertNotNull(retrieved);
+        assertEquals("Customer", retrieved.getRootElement());
+        assertEquals(4, retrieved.getMappings().size());
+
+        // Verify PK and FK constraints retained through JSON serialization
+        FieldMapping custPk = retrieved.getMappings().stream()
+                .filter(m -> "Customer".equals(m.getTargetTable()) && "customer_id".equals(m.getTargetColumn()))
+                .findFirst().orElse(null);
+        assertNotNull(custPk);
+        assertEquals("PK", custPk.getConstraintType());
+
+        FieldMapping acctFk = retrieved.getMappings().stream()
+                .filter(m -> "Account".equals(m.getTargetTable()) && "customer_id".equals(m.getTargetColumn()))
+                .findFirst().orElse(null);
+        assertNotNull(acctFk);
+        assertEquals("FK", acctFk.getConstraintType());
+    }
+
+    @Test
+    @DisplayName("Verify DynamicXmlItemProcessor automatically resolves parent FK for 1-to-N child records")
+    void testDynamicXmlItemProcessorFkResolution() throws Exception {
+        Map<String, Object> xmlRecord = new LinkedHashMap<>();
+        xmlRecord.put("id", "88219");
+        xmlRecord.put("action", "add");
+        xmlRecord.put("gender", "Female");
+
+        // Child entities under _entities_name
+        List<Map<String, Object>> childNames = List.of(
+                Map.of("firstname", "Maria", "surname", "Santos")
+        );
+        xmlRecord.put("_entities_name", childNames);
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("Person/@id", "Person", "person_id", "NONE", "PK"),
+                new FieldMapping("Person/Gender", "Person", "gender", "NONE", "NONE"),
+                new FieldMapping("Person/NameDetails/Name/NameValue/FirstName", "PersonName", "first_name", "NONE", "NONE"),
+                new FieldMapping("Person/NameDetails/Name/NameValue/Surname", "PersonName", "surname", "NONE", "NONE")
+        );
+
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor(
+                "Person",
+                mappings,
+                Map.of(),
+                List.of("Person", "PersonName")
+        );
+
+        DatabaseRowPayload payload = processor.process(xmlRecord);
+        assertNotNull(payload);
+        assertTrue(payload.getRowsByTable().containsKey("Person"));
+        assertTrue(payload.getRowsByTable().containsKey("PersonName"));
+
+        List<Map<String, Object>> childRows = payload.getRowsByTable().get("PersonName");
+        assertEquals(1, childRows.size());
+        Map<String, Object> childRow = childRows.get(0);
+        assertEquals("Maria", childRow.get("first_name"));
+        assertEquals("Santos", childRow.get("surname"));
+        // Foreign key person_id must be populated from master entity
+        assertEquals("88219", String.valueOf(childRow.get("person_id")), "Child record must have parent foreign key injected");
+    }
+
+    @Test
+    @DisplayName("Verify DynamicJdbcBatchWriter supports explicit primary key configuration")
+    void testDynamicJdbcBatchWriterExplicitPrimaryKeys() {
+        DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(dataSource);
+        writer.setExplicitPrimaryKeys(Map.of("custom_table", Set.of("custom_key_id")));
+
+        Set<String> pks = writer.findPrimaryKeys("custom_table", Set.of("custom_key_id", "data_value"));
+        assertNotNull(pks);
+        assertTrue(pks.contains("custom_key_id"), "Primary key set explicitly must be returned");
+    }
+
+    @Test
+    @DisplayName("Verify Create Schema functionality executes CREATE SCHEMA DDL in target DB")
+    void testCreateTargetDatabaseSchema() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("POSTGRESQL");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("demo_compliance_schema");
+
+        DbTestResponse response = dataSourceService.createSchema(config);
+        assertNotNull(response);
+        assertTrue(response.isSuccess(), "Schema creation should succeed: " + response.getMessage());
+
+        // Verify that the schema actually exists in the database
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        List<String> schemas = jdbc.queryForList(
+                "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE UPPER(SCHEMA_NAME) = 'DEMO_COMPLIANCE_SCHEMA'",
+                String.class
+        );
+        assertEquals(1, schemas.size(), "Target schema 'demo_compliance_schema' must exist in database");
+    }
+
+    @Test
+    @DisplayName("Verify delta XML schema evolution automatically issues ALTER TABLE ADD COLUMN during batch writing")
+    void testDeltaXmlFileSchemaEvolutionWithAlterTable() throws Exception {
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+
+        // Step 1: Simulate table created from file1.xml (3 columns)
+        jdbc.execute("CREATE TABLE IF NOT EXISTS test_delta_person (person_id INT PRIMARY KEY, first_name VARCHAR(100), active_status VARCHAR(50))");
+        jdbc.execute("DELETE FROM test_delta_person");
+        jdbc.update("INSERT INTO test_delta_person (person_id, first_name, active_status) VALUES (5001, 'Original Name', 'ACTIVE')");
+
+        // Step 2: Simulate file2.xml (delta file) introducing 5 brand new tags/columns:
+        // risk_score, tax_id, mother_maiden_name, verification_date, pep_category
+        DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(dataSource, List.of("test_delta_person"));
+        writer.setExplicitPrimaryKeys(Map.of("test_delta_person", Set.of("person_id")));
+
+        // Record 1: Updates existing person 5001 with delta columns
+        Map<String, Object> deltaRow1 = new LinkedHashMap<>();
+        deltaRow1.put("person_id", 5001);
+        deltaRow1.put("first_name", "Original Name Updated");
+        deltaRow1.put("active_status", "ACTIVE");
+        deltaRow1.put("risk_score", "98.5");
+        deltaRow1.put("tax_id", "TX-8899");
+        deltaRow1.put("mother_maiden_name", "Smith");
+        deltaRow1.put("verification_date", "2026-11-05");
+        deltaRow1.put("pep_category", "PEP-Tier-1");
+
+        // Record 2: Inserts new person 5002 with all delta columns
+        Map<String, Object> deltaRow2 = new LinkedHashMap<>();
+        deltaRow2.put("person_id", 5002);
+        deltaRow2.put("first_name", "New Delta Person");
+        deltaRow2.put("active_status", "ACTIVE");
+        deltaRow2.put("risk_score", "72.0");
+        deltaRow2.put("tax_id", "TX-9900");
+        deltaRow2.put("mother_maiden_name", "Johnson");
+        deltaRow2.put("verification_date", "2026-11-05");
+        deltaRow2.put("pep_category", "PEP-Tier-2");
+
+        DatabaseRowPayload payload1 = new DatabaseRowPayload("test_delta_person", deltaRow1);
+        DatabaseRowPayload payload2 = new DatabaseRowPayload("test_delta_person", deltaRow2);
+
+        // Batch execution must automatically detect the 5 missing columns and execute ALTER TABLE statements
+        writer.write(new org.springframework.batch.item.Chunk<>(List.of(payload1, payload2)));
+
+        // Step 3: Verify that records were upserted and the new columns contain the values from delta file
+        Map<String, Object> row5001 = jdbc.queryForMap(
+                "SELECT person_id, first_name, risk_score, tax_id, mother_maiden_name, pep_category FROM test_delta_person WHERE person_id = 5001"
+        );
+        assertEquals("Original Name Updated", row5001.get("first_name"));
+        assertEquals("98.5", row5001.get("risk_score"));
+        assertEquals("TX-8899", row5001.get("tax_id"));
+        assertEquals("Smith", row5001.get("mother_maiden_name"));
+        assertEquals("PEP-Tier-1", row5001.get("pep_category"));
+
+        Map<String, Object> row5002 = jdbc.queryForMap(
+                "SELECT person_id, first_name, risk_score, tax_id, mother_maiden_name, pep_category FROM test_delta_person WHERE person_id = 5002"
+        );
+        assertEquals("New Delta Person", row5002.get("first_name"));
+        assertEquals("72.0", row5002.get("risk_score"));
+        assertEquals("TX-9900", row5002.get("tax_id"));
+        assertEquals("Johnson", row5002.get("mother_maiden_name"));
+        assertEquals("PEP-Tier-2", row5002.get("pep_category"));
+    }
+
+    @Test
+    @DisplayName("Verify SchemaProvisioningService evolves existing table schema with ALTER TABLE for delta XML tags")
+    void testSchemaProvisioningDeltaEvolution() throws Exception {
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        jdbc.execute("CREATE TABLE IF NOT EXISTS test_evolve_pfa (id INT PRIMARY KEY, name VARCHAR(100))");
+
+        try (java.sql.Connection conn = dataSource.getConnection();
+             java.sql.Statement stmt = conn.createStatement()) {
+
+            Set<String> newDeltaColumns = Set.of("id", "name", "delta_col_1", "delta_col_2", "profile_notes");
+            List<String> added = provisioningService.evolveExistingTableSchema(stmt, "test_evolve_pfa", newDeltaColumns, false);
+
+            assertTrue(added.contains("delta_col_1"), "delta_col_1 should have been added via ALTER TABLE");
+            assertTrue(added.contains("delta_col_2"), "delta_col_2 should have been added via ALTER TABLE");
+            assertTrue(added.contains("profile_notes"), "profile_notes should have been added via ALTER TABLE");
+        }
+
+        // Verify column can be selected
+        jdbc.execute("INSERT INTO test_evolve_pfa (id, name, delta_col_1, delta_col_2, profile_notes) VALUES (1, 'Test', 'V1', 'V2', 'Notes')");
+        Map<String, Object> row = jdbc.queryForMap("SELECT delta_col_1, delta_col_2, profile_notes FROM test_evolve_pfa WHERE id = 1");
+        assertEquals("V1", row.get("delta_col_1"));
+        assertEquals("V2", row.get("delta_col_2"));
+        assertEquals("Notes", row.get("profile_notes"));
     }
 }
 

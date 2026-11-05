@@ -136,6 +136,19 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                         }
                     }
 
+                    // Enforce primary-foreign key relationship: link child row to master entity ID if missing
+                    if (!tableName.equalsIgnoreCase(this.defaultTargetTable)) {
+                        String fkCol = this.defaultTargetTable.toLowerCase() + "_id";
+                        if (!rowMap.containsKey(fkCol) || rowMap.get(fkCol) == null) {
+                            Object parentId = xmlRecord.get("person_id");
+                            if (parentId == null) parentId = xmlRecord.get("id");
+                            if (parentId == null) parentId = xmlRecord.get("@id");
+                            if (parentId != null) {
+                                rowMap.put(fkCol, parentId);
+                            }
+                        }
+                    }
+
                     if (isValidRow(rowMap, hasIdMapped)) {
                         validRows.add(rowMap);
                     }
@@ -228,8 +241,8 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         }
 
         // 3. Strip entity prefix (e.g. "person_name" or "personname" -> "name", "role", "date")
-        String stripped = normTable.replaceFirst("^person_?", "");
-        if (!stripped.isEmpty() && !stripped.equals(normTable)) {
+        String stripped = normTable.replaceFirst("^person_?", "").replace("_", "");
+        if (!stripped.isEmpty() && !stripped.equals(normTable.replace("_", ""))) {
             list = xmlRecord.get("_entities_" + stripped);
             if (list instanceof List<?> l && !l.isEmpty()) {
                 return (List<Map<String, Object>>) list;
@@ -238,12 +251,14 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
                 if (entry.getKey().startsWith("_entities_") && entry.getValue() instanceof List<?> l && !l.isEmpty()) {
                     String entTag = entry.getKey().substring("_entities_".length());
-                    if (entTag.contains(stripped) || (stripped.equals("name") && entTag.equals("namevalue"))
-                            || (stripped.equals("role") && entTag.equals("occtitle"))
-                            || (stripped.equals("date") && entTag.equals("datevalue"))
-                            || (stripped.equals("country") && entTag.equals("countryvalue"))
-                            || (stripped.equals("idnumber") && (entTag.equals("idvalue") || entTag.equals("id")))
-                            || (stripped.equals("sanctionsreference") && entTag.equals("reference"))) {
+                    if (entTag.contains(stripped) || stripped.contains(entTag)
+                            || (stripped.contains("name") && entTag.equals("namevalue"))
+                            || (stripped.contains("role") && entTag.equals("occtitle"))
+                            || (stripped.contains("date") && entTag.equals("datevalue"))
+                            || (stripped.contains("country") && entTag.equals("countryvalue"))
+                            || (stripped.contains("id") && (entTag.equals("idvalue") || entTag.equals("id") || entTag.equals("ids")))
+                            || (stripped.contains("sanctions") && (entTag.equals("reference") || entTag.equals("references")))
+                            || (stripped.contains("reference") && (entTag.equals("reference") || entTag.equals("references")))) {
                         return (List<Map<String, Object>>) entry.getValue();
                     }
                 }
@@ -338,6 +353,18 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                         k.endsWith("/@" + rawAttr) && !k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/"));
                 if (!hasOtherTagAttr) {
                     return val;
+                }
+            }
+
+            // Check leaf element for nested entity records (e.g. "Person/NameDetails/Name/NameValue/FirstName" -> "FirstName")
+            String leaf = xmlField.substring(xmlField.lastIndexOf("/") + 1).replace("@", "");
+            if (!leaf.isEmpty()) {
+                val = xmlRecord.get(leaf);
+                if (val != null) return val;
+                for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                    if (entry.getKey().equalsIgnoreCase(leaf)) {
+                        return entry.getValue();
+                    }
                 }
             }
 

@@ -83,6 +83,7 @@ public class JobConfigController {
         launchRequest.setChunkSize(config.getChunkSize());
         launchRequest.setDbConfig(config.getDbConfig());
         launchRequest.setMappings(config.getMappings());
+        launchRequest.setStagedPipeline(Boolean.TRUE.equals(config.getStagedPipeline()));
 
         JobLaunchResponse response = batchJobService.launchIngestionJob(launchRequest);
         if (response.isSuccess() && response.getJobExecutionId() != null) {

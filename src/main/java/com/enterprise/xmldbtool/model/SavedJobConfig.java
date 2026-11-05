@@ -22,6 +22,7 @@ public class SavedJobConfig {
     private String lastRunAt;
     private String lastRunStatus;
     private Long lastJobExecutionId;
+    private Boolean stagedPipeline = false;
 
     public SavedJobConfig() {}
 
@@ -78,4 +79,7 @@ public class SavedJobConfig {
 
     public Long getLastJobExecutionId() { return lastJobExecutionId; }
     public void setLastJobExecutionId(Long lastJobExecutionId) { this.lastJobExecutionId = lastJobExecutionId; }
+
+    public Boolean getStagedPipeline() { return stagedPipeline; }
+    public void setStagedPipeline(Boolean stagedPipeline) { this.stagedPipeline = stagedPipeline; }
 }

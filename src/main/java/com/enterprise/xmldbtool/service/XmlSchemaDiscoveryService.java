@@ -33,15 +33,24 @@ public class XmlSchemaDiscoveryService {
     private static final Logger log = LoggerFactory.getLogger(XmlSchemaDiscoveryService.class);
     private final ResourceLoader resourceLoader = new DefaultResourceLoader();
     private final DynamicDataSourceService dataSourceService;
+    private final SchemaProvisioningService provisioningService;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public XmlSchemaDiscoveryService(DynamicDataSourceService dataSourceService, SchemaProvisioningService provisioningService) {
+        this.dataSourceService = dataSourceService;
+        this.provisioningService = provisioningService;
+    }
 
     public XmlSchemaDiscoveryService(DynamicDataSourceService dataSourceService) {
         this.dataSourceService = dataSourceService;
+        this.provisioningService = new SchemaProvisioningService(dataSourceService);
     }
 
     /**
      * Executes schema discovery:
      * 1. Uses lightweight StAX to scan first 1,000 lines of XML for tags and attributes (@attr).
-     * 2. Simultaneously queries target database metadata for tables and columns.
+     * 2. Automatically provisions the flat staging table ('staging_xml_records') and relational tables if requested.
+     * 3. Queries target database metadata for tables and columns.
      */
     public SchemaDiscoveryResponse discoverSchema(SchemaDiscoveryRequest request) {
         SchemaDiscoveryResponse response = new SchemaDiscoveryResponse();
@@ -55,20 +64,71 @@ public class XmlSchemaDiscoveryService {
             List<DiscoveredElement> xmlElements = discoverXmlElements(request.getSourceXmlPath(), request.getSampleLinesLimit());
             response.setDiscoveredXmlElements(xmlElements);
 
-            // 2. Query target DB schema metadata
+            // 2. Query target DB schema metadata and provision tables if required
             if (request.getDbConfig() != null && request.getDbConfig().getUrl() != null) {
+                if (provisioningService != null) {
+                    if (request.isAutoCreateTables()) {
+                        List<String> created = provisioningService.provisionDiscoveredTables(
+                                request.getDbConfig(),
+                                request.getSourceXmlPath(),
+                                request.getRecordRootElement(),
+                                xmlElements
+                        );
+                        response.setCreatedTables(created);
+                    } else {
+                        List<String> staging = provisioningService.ensureStagingTable(request.getDbConfig());
+                        response.setCreatedTables(staging);
+                    }
+                }
+
                 List<TableMetadata> tables = dataSourceService.retrieveDatabaseSchema(request.getDbConfig());
                 response.setDiscoveredTables(tables);
             }
 
             response.setSuccess(true);
-            response.setMessage("Schema discovery completed successfully. Source XML size: " + response.getFileSizeFormatted());
+            String tableMsg = response.getCreatedTables() != null && !response.getCreatedTables().isEmpty()
+                    ? " Provisioned " + response.getCreatedTables().size() + " tables in target DB (including flat staging table)."
+                    : "";
+            response.setMessage("Schema discovery completed successfully." + tableMsg + " Source XML size: " + response.getFileSizeFormatted());
         } catch (Exception ex) {
             log.error("Schema discovery failed: {}", ex.getMessage(), ex);
             response.setSuccess(false);
             response.setMessage("Schema discovery error: " + ex.getMessage());
         }
 
+        return response;
+    }
+
+    /**
+     * Manually triggers table provisioning in the target database based on XML schema.
+     */
+    public SchemaDiscoveryResponse provisionTables(SchemaDiscoveryRequest request) {
+        SchemaDiscoveryResponse response = new SchemaDiscoveryResponse();
+        try {
+            List<DiscoveredElement> xmlElements = discoverXmlElements(request.getSourceXmlPath(), request.getSampleLinesLimit());
+            response.setDiscoveredXmlElements(xmlElements);
+
+            if (request.getDbConfig() != null && request.getDbConfig().getUrl() != null) {
+                if (provisioningService != null) {
+                    List<String> created = provisioningService.provisionDiscoveredTables(
+                            request.getDbConfig(),
+                            request.getSourceXmlPath(),
+                            request.getRecordRootElement(),
+                            xmlElements
+                    );
+                    response.setCreatedTables(created);
+                }
+                List<TableMetadata> tables = dataSourceService.retrieveDatabaseSchema(request.getDbConfig());
+                response.setDiscoveredTables(tables);
+            }
+
+            response.setSuccess(true);
+            response.setMessage("Successfully provisioned " + response.getCreatedTables().size() + " tables in target database.");
+        } catch (Exception ex) {
+            log.error("Table provisioning failed: {}", ex.getMessage(), ex);
+            response.setSuccess(false);
+            response.setMessage("Table provisioning error: " + ex.getMessage());
+        }
         return response;
     }
 
@@ -235,19 +295,29 @@ public class XmlSchemaDiscoveryService {
             java.util.Deque<String> tagStack = new java.util.ArrayDeque<>();
 
             int events = 0;
-            while (streamReader.hasNext() && events < 10000) {
+            while (streamReader.hasNext() && events < 50000) {
                 int event = streamReader.next();
                 events++;
                 if (event == XMLStreamConstants.START_ELEMENT) {
                     String localName = streamReader.getLocalName();
                     if (depth == 0) {
                         docRoot = localName;
-                    } else if (depth == 1 || depth == 2) {
+                    } else {
                         String parent = tagStack.peek();
-                        if (parent != null && (parent.equalsIgnoreCase("records") || parent.equalsIgnoreCase("items") || parent.equalsIgnoreCase("data"))) {
+                        boolean parentIsList = parent != null && (parent.toLowerCase().endsWith("list") || parent.toLowerCase().endsWith("lists"));
+                        if (parent != null && (parent.equalsIgnoreCase("records") || parent.equalsIgnoreCase("items")
+                                || parent.equalsIgnoreCase("data") || parent.equalsIgnoreCase("entries")
+                                || parent.equalsIgnoreCase("dataset"))) {
                             return localName;
                         }
-                        tagCounts.put(localName, tagCounts.getOrDefault(localName, 0) + 1);
+                        if (localName.equalsIgnoreCase("person") || localName.equalsIgnoreCase("record")
+                                || localName.equalsIgnoreCase("item") || localName.equalsIgnoreCase("entity")) {
+                            return localName;
+                        }
+                        if (!parentIsList && !localName.toLowerCase().endsWith("list") && !localName.toLowerCase().endsWith("lists")
+                                && (depth == 1 || depth == 2)) {
+                            tagCounts.put(localName, tagCounts.getOrDefault(localName, 0) + 1);
+                        }
                     }
                     tagStack.push(localName);
                     depth++;
@@ -265,13 +335,17 @@ public class XmlSchemaDiscoveryService {
                 if (tag.equalsIgnoreCase("person") || tag.equalsIgnoreCase("record") || tag.equalsIgnoreCase("item") || tag.equalsIgnoreCase("entity")) {
                     return tag;
                 }
-                if (entry.getValue() > 1 && !tag.equalsIgnoreCase(docRoot)) {
+            }
+
+            for (Map.Entry<String, Integer> entry : tagCounts.entrySet()) {
+                String tag = entry.getKey();
+                if (entry.getValue() > 1 && !tag.equalsIgnoreCase(docRoot) && !tag.toLowerCase().endsWith("list")) {
                     return tag;
                 }
             }
 
             for (String tag : tagCounts.keySet()) {
-                if (!tag.endsWith("List") && !tag.endsWith("list") && !tag.equalsIgnoreCase(docRoot)) {
+                if (!tag.toLowerCase().endsWith("list") && !tag.equalsIgnoreCase(docRoot)) {
                     return tag;
                 }
             }

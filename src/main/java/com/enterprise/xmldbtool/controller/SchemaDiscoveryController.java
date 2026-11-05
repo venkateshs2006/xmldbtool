@@ -28,4 +28,14 @@ public class SchemaDiscoveryController {
             return ResponseEntity.badRequest().body(response);
         }
     }
+
+    @PostMapping("/create-tables")
+    public ResponseEntity<SchemaDiscoveryResponse> createTables(@RequestBody SchemaDiscoveryRequest request) {
+        SchemaDiscoveryResponse response = discoveryService.provisionTables(request);
+        if (response.isSuccess()) {
+            return ResponseEntity.ok(response);
+        } else {
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
 }

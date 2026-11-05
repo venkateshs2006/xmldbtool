@@ -46,12 +46,14 @@ const AppState = {
     pollIntervalMs: 1000,
     isLivePollingPaused: false,
     peakThroughput: 0,
+    staticTelemetryCache: {},
 
     // Cached Job Configs & History
     savedJobs: [],
     currentReviewJob: null,
     executionHistory: [],
-    usersList: []
+    usersList: [],
+    schemaRegistryVersions: []
 };
 
 // Global Chart References
@@ -70,6 +72,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initUserMaintenanceHandlers();
     initExecutionSummaryHandlers();
     initCharts();
+    loadSchemaRegistryVersions();
 
     // Check existing session
     checkAuthSession();
@@ -237,7 +240,7 @@ function switchPage(pageName) {
     } else if (pageName === 'execution-summary') {
         document.getElementById('nav-btn-execution-summary').classList.add('active');
         document.getElementById('page-execution-summary').classList.remove('hidden');
-        startUnifiedLiveTelemetryEngine();
+        handleExecutionSummaryTabOpen();
     } else if (pageName === 'users') {
         document.getElementById('nav-btn-users').classList.add('active');
         document.getElementById('page-users').classList.remove('hidden');
@@ -321,6 +324,20 @@ function initStepHandlers() {
         testDatabaseConnection();
     });
 
+    // Step 1: Create Target Schema buttons
+    const btnCreateSchema = document.getElementById('btn-create-schema');
+    if (btnCreateSchema) {
+        btnCreateSchema.addEventListener('click', createTargetDatabaseSchema);
+    }
+    const btnCreateSchemaFooter = document.getElementById('btn-create-schema-footer');
+    if (btnCreateSchemaFooter) {
+        btnCreateSchemaFooter.addEventListener('click', createTargetDatabaseSchema);
+    }
+    const btnCreateSchemaQuick = document.getElementById('btn-create-schema-quick');
+    if (btnCreateSchemaQuick) {
+        btnCreateSchemaQuick.addEventListener('click', createTargetDatabaseSchema);
+    }
+
     // Close Connection Modal
     document.getElementById('btn-close-conn-modal').addEventListener('click', () => {
         document.getElementById('connValidationModal').classList.add('hidden');
@@ -338,6 +355,87 @@ function initStepHandlers() {
         showToast('Loaded demo file path: sample-data/large-sample.xml', 'info', 'Sample XML');
     });
 
+    // Step 2: Schema Registry Select
+    const schemaRegSelect = document.getElementById('schema-registry-select');
+    if (schemaRegSelect) {
+        schemaRegSelect.addEventListener('change', () => {
+            onSchemaRegistryVersionSelected();
+        });
+    }
+
+    const btnRefreshSchemaReg = document.getElementById('btn-refresh-schema-registry');
+    if (btnRefreshSchemaReg) {
+        btnRefreshSchemaReg.addEventListener('click', () => {
+            loadSchemaRegistryVersions(true);
+        });
+    }
+
+    // Step 2 & 4: JSON Mapping Modals & Buttons
+    const btnOpenJsonStep2 = document.getElementById('btn-open-json-import-modal-step2');
+    if (btnOpenJsonStep2) {
+        btnOpenJsonStep2.addEventListener('click', () => openJsonMappingModal('import'));
+    }
+
+    const btnOpenJsonStep4 = document.getElementById('btn-open-json-import-modal');
+    if (btnOpenJsonStep4) {
+        btnOpenJsonStep4.addEventListener('click', () => openJsonMappingModal('import'));
+    }
+
+    const btnExportJson = document.getElementById('btn-export-json-mapping');
+    if (btnExportJson) {
+        btnExportJson.addEventListener('click', () => openJsonMappingModal('export'));
+    }
+
+    const btnCloseJson = document.getElementById('btn-close-json-modal');
+    const btnCloseJson2 = document.getElementById('btn-close-json-modal-2');
+    if (btnCloseJson) btnCloseJson.addEventListener('click', () => document.getElementById('jsonMappingModal').classList.add('hidden'));
+    if (btnCloseJson2) btnCloseJson2.addEventListener('click', () => document.getElementById('jsonMappingModal').classList.add('hidden'));
+
+    const btnApplyJson = document.getElementById('btn-apply-json-mapping');
+    if (btnApplyJson) btnApplyJson.addEventListener('click', () => applyJsonMapping());
+
+    const btnCopyJson = document.getElementById('btn-copy-mapping-json');
+    if (btnCopyJson) {
+        btnCopyJson.addEventListener('click', () => {
+            const text = document.getElementById('json-mapping-textarea').value;
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('JSON copied to clipboard.', 'success', 'Copied');
+            }).catch(() => {
+                showToast('Unable to copy to clipboard.', 'warning');
+            });
+        });
+    }
+
+    const jsonFileInput = document.getElementById('json-mapping-file-input');
+    if (jsonFileInput) {
+        jsonFileInput.addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                document.getElementById('json-mapping-textarea').value = event.target.result;
+                showToast(`Loaded ${file.name} into JSON editor.`, 'info', 'File Read');
+            };
+            reader.readAsText(file);
+        });
+    }
+
+    // Step 4: Register Schema Version Modals & Buttons
+    const btnOpenRegister = document.getElementById('btn-open-register-schema-modal');
+    if (btnOpenRegister) {
+        btnOpenRegister.addEventListener('click', () => openRegisterSchemaModal());
+    }
+
+    const btnCloseRegister = document.getElementById('btn-close-register-schema-modal');
+    const btnCloseRegister2 = document.getElementById('btn-close-register-schema-modal-2');
+    if (btnCloseRegister) btnCloseRegister.addEventListener('click', () => document.getElementById('registerSchemaModal').classList.add('hidden'));
+    if (btnCloseRegister2) btnCloseRegister2.addEventListener('click', () => document.getElementById('registerSchemaModal').classList.add('hidden'));
+
+    const btnSubmitRegister = document.getElementById('btn-submit-register-schema');
+    if (btnSubmitRegister) {
+        btnSubmitRegister.addEventListener('click', () => submitRegisterSchema());
+    }
+
     // Step 2: Source XML Next (Triggers Schema Discovery)
     document.getElementById('btn-step2-next').addEventListener('click', () => {
         collectSourceForm();
@@ -352,6 +450,14 @@ function initStepHandlers() {
     document.getElementById('btn-rescan').addEventListener('click', () => {
         runSchemaDiscovery();
     });
+
+    // Step 3: Create Tables & Flat Table
+    const btnCreateTables = document.getElementById('btn-create-discovered-tables');
+    if (btnCreateTables) {
+        btnCreateTables.addEventListener('click', () => {
+            createTargetTablesInDb();
+        });
+    }
 
     // Step 3: Next to Mapping
     document.getElementById('btn-step3-next').addEventListener('click', () => {
@@ -614,6 +720,73 @@ function updateDbStatusBadge(connected, info = '') {
     }
 }
 
+async function createTargetDatabaseSchema() {
+    collectDbConnectionForm();
+
+    const schema = AppState.dbConnection.schema ? AppState.dbConnection.schema.trim() : '';
+    if (!schema) {
+        showToast('Please specify a target schema name to create.', 'warning', 'Schema Required');
+        const schemaInput = document.getElementById('db-schema');
+        if (schemaInput) schemaInput.focus();
+        return;
+    }
+
+    const btnCreate = document.getElementById('btn-create-schema');
+    const btnFooter = document.getElementById('btn-create-schema-footer');
+    const origHtml = btnCreate ? btnCreate.innerHTML : '';
+    if (btnCreate) {
+        btnCreate.disabled = true;
+        btnCreate.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Creating...';
+    }
+    if (btnFooter) {
+        btnFooter.disabled = true;
+        btnFooter.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i> Creating Schema...';
+    }
+
+    try {
+        const response = await fetch('/api/db/create-schema', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                engine: AppState.dbConnection.engine,
+                host: AppState.dbConnection.host,
+                port: AppState.dbConnection.port,
+                databaseName: AppState.dbConnection.databaseName,
+                schema: schema,
+                username: AppState.dbConnection.username,
+                password: AppState.dbConnection.password,
+                url: AppState.dbConnection.url
+            })
+        });
+
+        let result = {};
+        try {
+            result = await response.json();
+        } catch (e) {
+            result = { message: 'Server error: ' + response.status + ' ' + response.statusText };
+        }
+
+        if (response.ok && result.success) {
+            AppState.dbConnection.connected = true;
+            updateDbStatusBadge(true, `${result.databaseProductName || AppState.dbConnection.engine} (${schema})`);
+            showToast(result.message || `Target schema '${schema}' created and verified successfully.`, 'success', 'Schema Provisioned');
+        } else {
+            showToast(result.message || 'Failed to create target schema.', 'error', 'Schema Creation Failed');
+        }
+    } catch (err) {
+        showToast(err.message || 'Network exception while creating schema.', 'error', 'Network Error');
+    } finally {
+        if (btnCreate) {
+            btnCreate.disabled = false;
+            btnCreate.innerHTML = origHtml || '<i class="fas fa-folder-plus mr-1.5 text-purple-600"></i><span>Create Schema</span>';
+        }
+        if (btnFooter) {
+            btnFooter.disabled = false;
+            btnFooter.innerHTML = '<i class="fas fa-folder-plus mr-1.5 text-purple-600"></i><span>Create Target Schema</span>';
+        }
+    }
+}
+
 // =========================================================================
 // API: Schema Discovery (Step 3)
 // =========================================================================
@@ -631,7 +804,8 @@ async function runSchemaDiscovery() {
         },
         sourceXmlPath: AppState.source.filePath,
         recordRootElement: AppState.source.rootElement,
-        sampleLinesLimit: 1000
+        sampleLinesLimit: 1000,
+        autoCreateTables: true
     };
 
     const btnStep2Next = document.getElementById('btn-step2-next');
@@ -661,7 +835,11 @@ async function runSchemaDiscovery() {
 
             renderDiscoveredSchema();
             navigateToStep(3);
-            showToast(`Discovered ${AppState.schema.xmlTags.length} XML elements and ${AppState.schema.tables.length} database tables.`, 'success', 'Schema Discovered');
+
+            const createdMsg = result.createdTables && result.createdTables.length > 0
+                ? ` Provisioned ${result.createdTables.length} tables in target DB (including flat staging table).`
+                : '';
+            showToast(`Discovered ${AppState.schema.xmlTags.length} XML elements and ${AppState.schema.tables.length} database tables.${createdMsg}`, 'success', 'Schema Discovered');
         } else {
             showToast(result.message || 'Failed to complete schema discovery.', 'error', 'Discovery Error');
         }
@@ -723,16 +901,43 @@ function renderDiscoveredSchema() {
     tblContainer.innerHTML = '';
 
     if (AppState.schema.tables.length === 0) {
-        tblContainer.innerHTML = `<div class="text-center py-10 text-gray-400 text-xs">No tables found in target database schema.</div>`;
+        tblContainer.innerHTML = `
+            <div class="text-center py-8 px-4 rounded-xl border border-dashed border-emerald-300 bg-emerald-50/50">
+                <i class="fas fa-layer-group text-bnp-emerald text-2xl mb-2"></i>
+                <div class="font-bold text-gray-800 text-xs">No Tables Found in Target Database</div>
+                <p class="text-gray-500 text-[11px] mt-1 max-w-sm mx-auto">Click below to automatically create the flat staging table ('staging_xml_records') and canonical relational tables in your target database.</p>
+                <button type="button" id="btn-provision-tables-empty" class="mt-3 btn btn-primary text-xs py-1.5 px-3">
+                    <i class="fas fa-magic mr-1.5"></i> Create Tables &amp; Flat Table Now
+                </button>
+            </div>
+        `;
+        const btnEmpty = document.getElementById('btn-provision-tables-empty');
+        if (btnEmpty) btnEmpty.addEventListener('click', createTargetTablesInDb);
     } else {
         AppState.schema.tables.forEach(table => {
             const card = document.createElement('div');
             card.className = 'p-3 rounded-lg bg-white border border-gray-200 text-xs shadow-sm';
+
+            const tName = (table.tableName || '').toLowerCase();
+            let tableBadge = '';
+            if (tName === 'staging_xml_records') {
+                tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-purple-100 text-purple-800 border border-purple-200">FLAT STAGING</span>';
+            } else if (tName === 'personflat' || tName === 'person_flat' || tName.endsWith('_flat')) {
+                tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">FLATTENED</span>';
+            } else if (tName === 'person' || tName === 'products' || tName === 'catalog') {
+                tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">MASTER ENTITY</span>';
+            } else if (tName.endsWith('list')) {
+                tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-100 text-amber-800 border border-amber-200">LOOKUP</span>';
+            } else if (tName.startsWith('person')) {
+                tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">1-TO-N CHILD</span>';
+            }
+
             card.innerHTML = `
                 <div class="flex items-center justify-between font-bold text-gray-800 mb-2">
                     <div class="flex items-center space-x-2">
                         <i class="fas fa-table text-bnp-emerald"></i>
                         <span class="font-mono">${escapeHtml(table.tableName)}</span>
+                        ${tableBadge}
                     </div>
                     <span class="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-50 text-bnp-emerald font-bold">${(table.columns || []).length} cols</span>
                 </div>
@@ -749,6 +954,56 @@ function renderDiscoveredSchema() {
     }
 }
 
+async function createTargetTablesInDb() {
+    const btn = document.getElementById('btn-create-discovered-tables');
+    const origHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i> Creating Tables...`;
+    }
+
+    const payload = {
+        dbConfig: {
+            engine: AppState.dbConnection.engine,
+            host: AppState.dbConnection.host,
+            port: AppState.dbConnection.port,
+            databaseName: AppState.dbConnection.databaseName,
+            schema: AppState.dbConnection.schema,
+            username: AppState.dbConnection.username,
+            password: AppState.dbConnection.password,
+            url: AppState.dbConnection.url
+        },
+        sourceXmlPath: AppState.source.filePath,
+        recordRootElement: AppState.source.rootElement,
+        sampleLinesLimit: 1000,
+        autoCreateTables: true
+    };
+
+    try {
+        const response = await fetch('/api/schema/create-tables', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (response.ok && result.success) {
+            AppState.schema.tables = result.discoveredTables || [];
+            renderDiscoveredSchema();
+            const count = result.createdTables ? result.createdTables.length : AppState.schema.tables.length;
+            showToast(`Successfully created ${count} tables in target DB (including flat staging table).`, 'success', 'Tables Provisioned');
+        } else {
+            showToast(result.message || 'Failed to create tables.', 'error', 'Creation Error');
+        }
+    } catch (e) {
+        showToast(e.message || 'Error communicating with server.', 'error', 'Network Error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = origHtml;
+        }
+    }
+}
+
 // =========================================================================
 // STEP 4: MAPPING & DETERMINISTIC TAG ORDER SEQUENCE
 // =========================================================================
@@ -757,7 +1012,20 @@ function initMappingGrid() {
     if (!container) return;
 
     if (container.children.length === 0) {
-        autoAlignMappings();
+        if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
+            AppState.mapping.fieldMappings.forEach(m => {
+                addMappingRow(
+                    m.xmlField || '',
+                    m.targetTable || '',
+                    m.targetColumn || '',
+                    m.transform || m.transformation || 'NONE',
+                    m.constraintType || 'NONE'
+                );
+            });
+            updateTableSequenceBanner();
+        } else {
+            autoAlignMappings();
+        }
     } else {
         updateTableSequenceBanner();
     }
@@ -853,10 +1121,24 @@ function autoAlignMappings() {
 
         if (bestTable) {
             matchCount++;
-            addMappingRow(rawName, bestTable, bestColumn, 'NONE');
+            let constraint = 'NONE';
+            const lowerCol = bestColumn.toLowerCase();
+            const lowerTbl = bestTable.toLowerCase();
+            const rootElem = (AppState.source.rootElement || 'person').toLowerCase();
+
+            if (lowerCol === 'id' || lowerCol === `${lowerTbl}_id` || lowerCol === `${rootElem}_id` || lowerCol === 'person_id') {
+                if (lowerTbl === rootElem || lowerTbl === 'person') {
+                    constraint = 'PK';
+                } else if (lowerCol === `${rootElem}_id` || lowerCol === 'person_id') {
+                    constraint = 'FK';
+                } else if (lowerCol === 'id' || lowerCol === `${lowerTbl}_id`) {
+                    constraint = 'PK';
+                }
+            }
+            addMappingRow(rawName, bestTable, bestColumn, 'NONE', constraint);
         } else if (idx < 6 && !tagPrefix) {
             const firstTbl = AppState.schema.tables[0];
-            addMappingRow(rawName, firstTbl.tableName, '', 'NONE');
+            addMappingRow(rawName, firstTbl.tableName, '', 'NONE', 'NONE');
         }
     });
 
@@ -870,7 +1152,7 @@ function clearMappings() {
     showToast('All mapping rows cleared.', 'info');
 }
 
-function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', selectedTransform = 'NONE') {
+function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', selectedTransform = 'NONE', selectedConstraint = 'NONE') {
     const container = document.getElementById('mapping-rows-container');
     const row = document.createElement('div');
     row.className = 'mapping-row grid grid-cols-12 gap-2.5 items-center p-2.5 rounded-lg bg-white border border-gray-200 hover:border-bnp-emerald transition shadow-xs text-xs';
@@ -889,8 +1171,12 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
         tableOptions += `<option value="${escapeHtml(tbl.tableName)}" ${sel}>${escapeHtml(tbl.tableName)}</option>`;
     });
 
+    const isPk = selectedConstraint === 'PK';
+    const isFk = selectedConstraint === 'FK';
+    const constraintClass = isPk ? 'border-amber-400 bg-amber-50 text-amber-800' : (isFk ? 'border-blue-400 bg-blue-50 text-blue-800' : 'text-gray-600');
+
     row.innerHTML = `
-        <div class="col-span-12 sm:col-span-4">
+        <div class="col-span-12 sm:col-span-3">
             <select class="map-xml-field input-field text-xs font-mono py-1.5">
                 ${xmlOptions}
             </select>
@@ -900,9 +1186,16 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
                 ${tableOptions}
             </select>
         </div>
-        <div class="col-span-6 sm:col-span-3">
+        <div class="col-span-6 sm:col-span-2">
             <select class="map-target-col input-field text-xs font-mono py-1.5">
                 <option value="">-- Select Column --</option>
+            </select>
+        </div>
+        <div class="col-span-6 sm:col-span-2 text-center">
+            <select class="map-constraint-type input-field text-[11px] font-mono py-1.5 px-1 text-center font-bold ${constraintClass}">
+                <option value="NONE" ${selectedConstraint === 'NONE' ? 'selected' : ''}>NONE</option>
+                <option value="PK" ${selectedConstraint === 'PK' ? 'selected' : ''}>PK (Primary Key)</option>
+                <option value="FK" ${selectedConstraint === 'FK' ? 'selected' : ''}>FK (Foreign Key)</option>
             </select>
         </div>
         <div class="col-span-6 sm:col-span-1 text-center">
@@ -931,6 +1224,19 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
     // Populate columns based on selected table
     const tableSelect = row.querySelector('.map-target-table');
     const colSelect = row.querySelector('.map-target-col');
+    const constraintSelect = row.querySelector('.map-constraint-type');
+
+    constraintSelect.addEventListener('change', () => {
+        const val = constraintSelect.value;
+        constraintSelect.className = 'map-constraint-type input-field text-[11px] font-mono py-1.5 px-1 text-center font-bold';
+        if (val === 'PK') {
+            constraintSelect.classList.add('border-amber-400', 'bg-amber-50', 'text-amber-800');
+        } else if (val === 'FK') {
+            constraintSelect.classList.add('border-blue-400', 'bg-blue-50', 'text-blue-800');
+        } else {
+            constraintSelect.classList.add('text-gray-600');
+        }
+    });
 
     const updateColumns = (tblName, preselectCol = '') => {
         colSelect.innerHTML = '<option value="">-- Select Column --</option>';
@@ -1103,13 +1409,16 @@ function collectFieldMappings() {
         const targetTable = r.querySelector('.map-target-table')?.value;
         const targetColumn = r.querySelector('.map-target-col')?.value;
         const transform = r.querySelector('.map-transform')?.value || 'NONE';
+        const constraintType = r.querySelector('.map-constraint-type')?.value || 'NONE';
 
         if (xmlField && targetColumn) {
             mappings.push({
                 xmlField,
                 targetTable: targetTable || AppState.mapping.targetTable,
                 targetColumn,
-                transformation: transform
+                transformation: transform,
+                transform: transform,
+                constraintType: constraintType
             });
         }
     });
@@ -1295,7 +1604,19 @@ function renderPreviewTable(rows, columns, tableName = '') {
     let trHead = '<tr>';
     trHead += '<th class="px-3 py-3 w-16 text-gray-500 font-bold">#</th>';
     columns.forEach(col => {
-        trHead += `<th class="px-4 py-3 font-bold text-gray-800">${escapeHtml(col)}</th>`;
+        let constraintBadge = '';
+        const mapping = (AppState.mapping.fieldMappings || []).find(m =>
+            (m.targetTable || '').toLowerCase() === (tableName || '').toLowerCase() &&
+            (m.targetColumn || '').toLowerCase() === col.toLowerCase()
+        );
+        if (mapping) {
+            if (mapping.constraintType === 'PK') {
+                constraintBadge = `<span class="px-1.5 py-0.2 rounded text-[8px] bg-amber-100 text-amber-800 font-bold ml-1 border border-amber-300">PK</span>`;
+            } else if (mapping.constraintType === 'FK') {
+                constraintBadge = `<span class="px-1.5 py-0.2 rounded text-[8px] bg-blue-100 text-blue-800 font-bold ml-1 border border-blue-300">FK</span>`;
+            }
+        }
+        trHead += `<th class="px-4 py-3 font-bold text-gray-800">${escapeHtml(col)}${constraintBadge}</th>`;
     });
     trHead += '</tr>';
     thead.innerHTML = trHead;
@@ -1342,6 +1663,9 @@ async function saveJobConfiguration(runImmediately = false) {
         return;
     }
 
+    const stagedRadio = document.getElementById('pipeline-mode-staged');
+    const isStagedPipeline = stagedRadio ? stagedRadio.checked : true;
+
     const payload = {
         jobName,
         description,
@@ -1350,6 +1674,7 @@ async function saveJobConfiguration(runImmediately = false) {
         targetTable: AppState.mapping.targetTable,
         tableOrder: AppState.mapping.tableOrder,
         chunkSize: AppState.source.chunkSize,
+        stagedPipeline: isStagedPipeline,
         dbConfig: {
             engine: AppState.dbConnection.engine,
             host: AppState.dbConnection.host,
@@ -1398,6 +1723,248 @@ async function saveJobConfiguration(runImmediately = false) {
     } finally {
         targetBtn.disabled = false;
         targetBtn.innerHTML = origHtml;
+    }
+}
+
+// =========================================================================
+// SCHEMA REGISTRY & JSON MAPPING INTEGRATION
+// =========================================================================
+async function loadSchemaRegistryVersions(notify = false) {
+    const select = document.getElementById('schema-registry-select');
+    if (!select) return;
+
+    try {
+        const response = await fetch('/api/schema-registry/versions');
+        if (response.ok) {
+            const versions = await response.json();
+            AppState.schemaRegistryVersions = versions;
+            let html = '<option value="">-- Dynamic XML Auto-Discovery --</option>';
+            versions.forEach(v => {
+                html += `<option value="${v.id}">${escapeHtml(v.schemaName)} v${escapeHtml(v.version)} (${escapeHtml(v.entityType || v.rootElement)})</option>`;
+            });
+            select.innerHTML = html;
+            if (notify) {
+                showToast(`Loaded ${versions.length} versions from Schema Registry.`, 'success', 'Registry Refreshed');
+            }
+        }
+    } catch (e) {
+        console.warn('Could not load schema registry versions:', e);
+    }
+}
+
+function onSchemaRegistryVersionSelected() {
+    const select = document.getElementById('schema-registry-select');
+    if (!select || !select.value) return;
+
+    const vId = parseInt(select.value, 10);
+    const selected = (AppState.schemaRegistryVersions || []).find(v => v.id === vId);
+    if (!selected) return;
+
+    if (selected.rootElement) {
+        const rootInput = document.getElementById('xml-root-element');
+        if (rootInput) rootInput.value = selected.rootElement;
+        AppState.source.rootElement = selected.rootElement;
+    }
+
+    if (selected.mappings && selected.mappings.length > 0) {
+        AppState.mapping.fieldMappings = selected.mappings;
+        if (selected.tableOrder && selected.tableOrder.length > 0) {
+            AppState.mapping.tableOrder = selected.tableOrder;
+        }
+        const container = document.getElementById('mapping-rows-container');
+        if (container && container.children.length > 0) {
+            container.innerHTML = '';
+            selected.mappings.forEach(m => {
+                addMappingRow(
+                    m.xmlField || '',
+                    m.targetTable || '',
+                    m.targetColumn || '',
+                    m.transform || m.transformation || 'NONE',
+                    m.constraintType || 'NONE'
+                );
+            });
+            updateTableSequenceBanner();
+        }
+        showToast(`Selected schema '${selected.schemaName} v${selected.version}' (${selected.mappings.length} mappings).`, 'success', 'Schema Registry Loaded');
+    }
+}
+
+function openJsonMappingModal(mode = 'import') {
+    const modal = document.getElementById('jsonMappingModal');
+    const title = document.getElementById('json-modal-title');
+    const textarea = document.getElementById('json-mapping-textarea');
+    if (!modal || !title || !textarea) return;
+
+    if (mode === 'export') {
+        title.textContent = 'Export JSON Mapping Document';
+        const mappings = collectFieldMappings();
+        const exportData = {
+            schemaName: 'Custom-XML-Mapping',
+            version: '1.0.0',
+            rootElement: document.getElementById('xml-root-element')?.value.trim() || 'Person',
+            chunkSize: parseInt(document.getElementById('batch-chunk-size')?.value, 10) || 1000,
+            tableOrder: AppState.mapping.tableOrder || [],
+            mappings: mappings
+        };
+        textarea.value = JSON.stringify(exportData, null, 2);
+    } else {
+        title.textContent = 'JSON Mapping Document Ingestion';
+        if (!textarea.value.trim() || textarea.value.includes('Custom-XML-Mapping')) {
+            textarea.value = JSON.stringify([
+                {
+                    xmlField: "Person/@id",
+                    targetTable: "Person",
+                    targetColumn: "person_id",
+                    constraintType: "PK",
+                    transform: "NONE"
+                },
+                {
+                    xmlField: "Person/Gender",
+                    targetTable: "Person",
+                    targetColumn: "gender",
+                    constraintType: "NONE",
+                    transform: "NONE"
+                },
+                {
+                    xmlField: "Person/NameDetails/Name/NameValue/FirstName",
+                    targetTable: "PersonName",
+                    targetColumn: "first_name",
+                    constraintType: "NONE",
+                    transform: "NONE"
+                },
+                {
+                    xmlField: "Person/@id",
+                    targetTable: "PersonName",
+                    targetColumn: "person_id",
+                    constraintType: "FK",
+                    transform: "NONE"
+                }
+            ], null, 2);
+        }
+    }
+    modal.classList.remove('hidden');
+}
+
+function applyJsonMapping() {
+    const raw = document.getElementById('json-mapping-textarea').value.trim();
+    if (!raw) {
+        showToast('Please provide a JSON mapping payload.', 'warning');
+        return;
+    }
+    try {
+        const parsed = JSON.parse(raw);
+        let mappings = [];
+        let tableOrder = [];
+        let rootElem = null;
+        let chunkSize = null;
+
+        if (Array.isArray(parsed)) {
+            mappings = parsed;
+        } else if (typeof parsed === 'object' && parsed !== null) {
+            mappings = parsed.mappings || [];
+            tableOrder = parsed.tableOrder || [];
+            rootElem = parsed.rootElement || parsed.rootTag || parsed.recordRootElement;
+            chunkSize = parsed.chunkSize || parsed.batchChunkSize;
+        }
+
+        if (rootElem) {
+            const rootInput = document.getElementById('xml-root-element');
+            if (rootInput) rootInput.value = rootElem;
+            AppState.source.rootElement = rootElem;
+        }
+        if (chunkSize) {
+            const chunkInput = document.getElementById('batch-chunk-size');
+            if (chunkInput) chunkInput.value = chunkSize;
+            AppState.source.chunkSize = chunkSize;
+        }
+        if (tableOrder.length > 0) {
+            AppState.mapping.tableOrder = tableOrder;
+        }
+
+        if (mappings.length > 0) {
+            AppState.mapping.fieldMappings = mappings;
+            const container = document.getElementById('mapping-rows-container');
+            if (container) {
+                container.innerHTML = '';
+                mappings.forEach(m => {
+                    addMappingRow(
+                        m.xmlField || '',
+                        m.targetTable || '',
+                        m.targetColumn || '',
+                        m.transform || m.transformation || 'NONE',
+                        m.constraintType || 'NONE'
+                    );
+                });
+                updateTableSequenceBanner();
+            }
+            showToast(`Successfully ingested JSON mapping with ${mappings.length} field mappings.`, 'success', 'JSON Applied');
+        } else {
+            showToast('JSON document parsed, but no field mappings array found.', 'warning');
+        }
+
+        document.getElementById('jsonMappingModal').classList.add('hidden');
+    } catch (err) {
+        showToast(`Invalid JSON syntax: ${err.message}`, 'error', 'JSON Parse Error');
+    }
+}
+
+function openRegisterSchemaModal() {
+    const modal = document.getElementById('registerSchemaModal');
+    if (!modal) return;
+    const mappings = collectFieldMappings();
+    if (mappings.length === 0) {
+        showToast('Please configure at least one field mapping before registering a schema version.', 'warning');
+        return;
+    }
+    document.getElementById('reg-schema-mapping-count').textContent = mappings.length;
+    document.getElementById('reg-schema-root').value = document.getElementById('xml-root-element')?.value.trim() || 'Person';
+    document.getElementById('reg-schema-name').value = 'Custom-Schema';
+    document.getElementById('reg-schema-version').value = '1.0.0';
+    document.getElementById('reg-schema-entity').value = document.getElementById('xml-root-element')?.value.trim() || 'Person';
+    modal.classList.remove('hidden');
+}
+
+async function submitRegisterSchema() {
+    const schemaName = document.getElementById('reg-schema-name').value.trim();
+    const version = document.getElementById('reg-schema-version').value.trim();
+    const entityType = document.getElementById('reg-schema-entity').value.trim();
+    const rootElement = document.getElementById('reg-schema-root').value.trim();
+    const description = document.getElementById('reg-schema-desc').value.trim();
+
+    if (!schemaName || !version) {
+        showToast('Schema Name and Semantic Version are required.', 'warning');
+        return;
+    }
+
+    const mappings = collectFieldMappings();
+    const payload = {
+        schemaName,
+        version,
+        entityType,
+        rootElement,
+        description,
+        mappings,
+        tableOrder: AppState.mapping.tableOrder || []
+    };
+
+    try {
+        const res = await fetch('/api/schema-registry/versions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const saved = await res.json();
+        if (res.ok && saved.id) {
+            showToast(`Schema version '${saved.schemaName} v${saved.version}' registered successfully!`, 'success', 'Registered');
+            document.getElementById('registerSchemaModal').classList.add('hidden');
+            await loadSchemaRegistryVersions();
+            const sel = document.getElementById('schema-registry-select');
+            if (sel) sel.value = saved.id;
+        } else {
+            showToast(saved.message || 'Failed to register schema version.', 'error');
+        }
+    } catch (err) {
+        showToast(err.message || 'Network error registering schema version.', 'error');
     }
 }
 
@@ -1468,10 +2035,18 @@ async function loadSavedJobs() {
                 ? job.tableOrder.join(', ')
                 : (job.targetTable || '--');
 
+            const isStaged = job.stagedPipeline !== false;
+            const pipelineBadge = isStaged
+                ? `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-purple-50 text-purple-700 border border-purple-200" title="Two-Stage Dynamic Pipeline (StAX Staging + Delta Upsert)"><i class="fas fa-layer-group text-[8px]"></i> STAGED</span>`
+                : `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-100 text-slate-600 border border-slate-200" title="Single-Pass Direct Streaming"><i class="fas fa-bolt text-[8px]"></i> DIRECT</span>`;
+
             tr.innerHTML = `
                 <td class="px-4 py-3.5 text-gray-400 font-mono">${idx + 1}</td>
                 <td class="px-4 py-3.5">
-                    <div class="font-bold text-gray-900">${escapeHtml(job.jobName)}</div>
+                    <div class="flex items-center gap-2">
+                        <div class="font-bold text-gray-900">${escapeHtml(job.jobName)}</div>
+                        ${pipelineBadge}
+                    </div>
                     <div class="text-[11px] text-gray-500 mt-0.5 truncate max-w-xs">${escapeHtml(job.description || 'No description')}</div>
                 </td>
                 <td class="px-4 py-3.5 font-mono text-gray-800">${escapeHtml(displayTable)}</td>
@@ -1521,6 +2096,13 @@ function openReviewModal(job) {
     const targetTbl = job.tableOrder && job.tableOrder.length > 0 ? job.tableOrder.join(', ') : (job.targetTable || '--');
     document.getElementById('review-modal-target-table').textContent = targetTbl;
 
+    const pipelineModeEl = document.getElementById('review-modal-pipeline-mode');
+    if (pipelineModeEl) {
+        pipelineModeEl.innerHTML = job.stagedPipeline !== false
+            ? `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-purple-50 text-purple-700 border border-purple-200"><i class="fas fa-layer-group mr-1"></i>STAGED</span>`
+            : `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-slate-100 text-slate-700 border border-slate-200"><i class="fas fa-bolt mr-1"></i>DIRECT</span>`;
+    }
+
     // Database details
     const dbDetails = document.getElementById('review-modal-db-details');
     if (job.dbConfig) {
@@ -1553,16 +2135,24 @@ function openReviewModal(job) {
     if (job.mappings && job.mappings.length > 0) {
         job.mappings.forEach(m => {
             const tr = document.createElement('tr');
+            let constraintBadge = `<span class="text-gray-400 text-[10px] font-mono">--</span>`;
+            if (m.constraintType === 'PK') {
+                constraintBadge = `<span class="px-1.5 py-0.2 rounded text-[9px] bg-amber-100 text-amber-800 font-bold border border-amber-300">PK</span>`;
+            } else if (m.constraintType === 'FK') {
+                constraintBadge = `<span class="px-1.5 py-0.2 rounded text-[9px] bg-blue-100 text-blue-800 font-bold border border-blue-300">FK</span>`;
+            }
+
             tr.innerHTML = `
                 <td class="px-3 py-1.5 font-bold text-gray-800">${escapeHtml(m.xmlField)}</td>
                 <td class="px-3 py-1.5 text-gray-600">${escapeHtml(m.targetTable || job.targetTable || '--')}</td>
                 <td class="px-3 py-1.5 text-bnp-emerald font-bold">${escapeHtml(m.targetColumn)}</td>
-                <td class="px-3 py-1.5"><span class="px-1.5 py-0.2 rounded text-[9px] bg-slate-100 text-slate-700 font-bold">${escapeHtml(m.transformation || 'NONE')}</span></td>
+                <td class="px-3 py-1.5">${constraintBadge}</td>
+                <td class="px-3 py-1.5"><span class="px-1.5 py-0.2 rounded text-[9px] bg-slate-100 text-slate-700 font-bold">${escapeHtml(m.transformation || m.transform || 'NONE')}</span></td>
             `;
             tbody.appendChild(tr);
         });
     } else {
-        tbody.innerHTML = `<tr><td colspan="4" class="px-3 py-4 text-center text-gray-400">No field mappings defined.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" class="px-3 py-4 text-center text-gray-400">No field mappings defined.</td></tr>`;
     }
 
     document.getElementById('jobReviewModal').classList.remove('hidden');
@@ -1612,6 +2202,65 @@ async function deleteJobConfig(jobId, jobName = '') {
 // PAGE 3: EXECUTION SUMMARY & HARDWARE TELEMETRY (Live 1s Polling & Diagnostics)
 // =========================================================================
 
+// Helper to check terminal status
+function isTerminalStatus(status) {
+    if (!status) return false;
+    const s = String(status).toUpperCase();
+    return s === 'COMPLETED' || s === 'FAILED' || s === 'STOPPED' || s === 'ABANDONED';
+}
+
+function setStaticTelemetryIndicator(status = 'COMPLETED') {
+    const indicator = document.getElementById('live-telemetry-indicator');
+    const label = document.getElementById('label-toggle-polling');
+    const icon = document.getElementById('icon-toggle-polling');
+
+    if (indicator) {
+        const isSuccess = String(status).toUpperCase() === 'COMPLETED';
+        indicator.className = `inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold ${
+            isSuccess ? 'bg-emerald-50 text-emerald-800 border border-emerald-300' : 'bg-slate-100 text-slate-700 border border-slate-300'
+        } shadow-2xs`;
+        indicator.innerHTML = `
+            <span class="w-2 h-2 rounded-full ${isSuccess ? 'bg-emerald-600' : 'bg-slate-400'}"></span>
+            <span id="live-indicator-text">STATIC DATA (${escapeHtml(status)})</span>
+        `;
+    }
+    if (label) label.textContent = 'Static View';
+    if (icon) icon.className = 'fas fa-check-circle text-emerald-600';
+
+    const syncEl = document.getElementById('span-last-refreshed');
+    if (syncEl) syncEl.textContent = `Static: Job ${status}`;
+}
+
+function setLiveTelemetryIndicator() {
+    const indicator = document.getElementById('live-telemetry-indicator');
+    const label = document.getElementById('label-toggle-polling');
+    const icon = document.getElementById('icon-toggle-polling');
+
+    if (indicator) {
+        indicator.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-2xs';
+        indicator.innerHTML = `
+            <span class="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+            <span class="w-2 h-2 rounded-full bg-emerald-600 -ml-3.5"></span>
+            <span id="live-indicator-text">LIVE TELEMETRY (1s)</span>
+        `;
+    }
+    if (label) label.textContent = 'Pause Live';
+    if (icon) icon.className = 'fas fa-pause text-amber-500';
+}
+
+async function handleExecutionSummaryTabOpen() {
+    const hasRunning = (AppState.executionHistory || []).some(e => e.status === 'RUNNING' || e.status === 'STARTED') || !!AppState.activeJobExecutionId;
+    if (hasRunning) {
+        startUnifiedLiveTelemetryEngine();
+    } else {
+        stopUnifiedLiveTelemetryEngine();
+        // Single static fetch to populate view without sending frequent updates
+        await runLiveTelemetryCycle(true);
+        const latest = (AppState.executionHistory && AppState.executionHistory.length > 0) ? AppState.executionHistory[0].status : 'COMPLETED';
+        setStaticTelemetryIndicator(latest);
+    }
+}
+
 function initExecutionSummaryHandlers() {
     // 1. Manual Refresh Button
     const btnRefresh = document.getElementById('btn-refresh-history');
@@ -1619,9 +2268,18 @@ function initExecutionSummaryHandlers() {
         btnRefresh.addEventListener('click', async () => {
             const icon = btnRefresh.querySelector('.fa-sync-alt');
             if (icon) icon.classList.add('fa-spin');
-            await runLiveTelemetryCycle();
+
+            // Invalidate cache for selected job so manual refresh can query fresh static data on demand
+            const dropdown = document.getElementById('history-job-dropdown');
+            if (dropdown && dropdown.value !== 'ALL' && AppState.staticTelemetryCache) {
+                delete AppState.staticTelemetryCache[dropdown.value];
+            } else if (AppState.staticTelemetryCache) {
+                AppState.staticTelemetryCache = {};
+            }
+
+            await runLiveTelemetryCycle(true);
             setTimeout(() => { if (icon) icon.classList.remove('fa-spin'); }, 500);
-            showToast('Metrics and execution history refreshed.', 'info');
+            showToast('Metrics and execution data refreshed.', 'info');
         });
     }
 
@@ -1629,29 +2287,31 @@ function initExecutionSummaryHandlers() {
     const btnTogglePolling = document.getElementById('btn-toggle-telemetry-polling');
     if (btnTogglePolling) {
         btnTogglePolling.addEventListener('click', () => {
-            AppState.isLivePollingPaused = !AppState.isLivePollingPaused;
-            const icon = document.getElementById('icon-toggle-polling');
-            const label = document.getElementById('label-toggle-polling');
-            const indicator = document.getElementById('live-telemetry-indicator');
-            const indicatorText = document.getElementById('live-indicator-text');
+            const hasRunning = (AppState.executionHistory || []).some(e => e.status === 'RUNNING' || e.status === 'STARTED');
 
-            if (AppState.isLivePollingPaused) {
+            if (AppState.telemetryPollingTimer) {
+                AppState.isLivePollingPaused = true;
+                stopUnifiedLiveTelemetryEngine();
+                const icon = document.getElementById('icon-toggle-polling');
+                const label = document.getElementById('label-toggle-polling');
+                const indicator = document.getElementById('live-telemetry-indicator');
                 if (icon) icon.className = 'fas fa-play text-emerald-500';
                 if (label) label.textContent = 'Resume Live';
                 if (indicator) {
                     indicator.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-gray-100 text-gray-600 border border-gray-300 shadow-2xs';
+                    indicator.innerHTML = `<span class="w-2 h-2 rounded-full bg-gray-400"></span><span id="live-indicator-text">PAUSED</span>`;
                 }
-                if (indicatorText) indicatorText.textContent = 'PAUSED';
                 showToast('Live telemetry polling paused.', 'info');
             } else {
-                if (icon) icon.className = 'fas fa-pause text-amber-500';
-                if (label) label.textContent = 'Pause Live';
-                if (indicator) {
-                    indicator.className = 'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-2xs';
+                AppState.isLivePollingPaused = false;
+                if (hasRunning || AppState.activeJobExecutionId) {
+                    startUnifiedLiveTelemetryEngine();
+                    showToast('Live telemetry polling resumed (1s).', 'success');
+                } else {
+                    // Job is completed: do one-off refresh and keep static (do not poll)
+                    runLiveTelemetryCycle(true);
+                    showToast('Job is completed. Showing static metrics (no active signals).', 'info', 'Static Data');
                 }
-                if (indicatorText) indicatorText.textContent = 'LIVE TELEMETRY (1s)';
-                runLiveTelemetryCycle();
-                showToast('Live telemetry polling resumed (1s).', 'success');
             }
         });
     }
@@ -1686,9 +2346,24 @@ function initExecutionSummaryHandlers() {
     const dropdown = document.getElementById('history-job-dropdown');
     if (dropdown) {
         dropdown.addEventListener('change', () => {
-            applyExecutionHistoryFilter(dropdown.value);
-            if (dropdown.value !== 'ALL') {
-                pollJobTelemetry(dropdown.value);
+            const selectedVal = dropdown.value;
+            applyExecutionHistoryFilter(selectedVal);
+            if (selectedVal !== 'ALL') {
+                const found = (AppState.executionHistory || []).find(e => String(e.executionId) === String(selectedVal));
+                if (found && isTerminalStatus(found.status)) {
+                    stopUnifiedLiveTelemetryEngine();
+                    setStaticTelemetryIndicator(found.status);
+                } else if (found && (found.status === 'RUNNING' || found.status === 'STARTED')) {
+                    startUnifiedLiveTelemetryEngine();
+                }
+                pollJobTelemetry(selectedVal);
+            } else {
+                const anyRunning = (AppState.executionHistory || []).some(e => e.status === 'RUNNING' || e.status === 'STARTED');
+                if (!anyRunning) {
+                    stopUnifiedLiveTelemetryEngine();
+                    const latest = (AppState.executionHistory && AppState.executionHistory.length > 0) ? AppState.executionHistory[0].status : 'COMPLETED';
+                    setStaticTelemetryIndicator(latest);
+                }
             }
         });
     }
@@ -1696,6 +2371,7 @@ function initExecutionSummaryHandlers() {
 
 function startUnifiedLiveTelemetryEngine() {
     stopUnifiedLiveTelemetryEngine();
+    setLiveTelemetryIndicator();
     runLiveTelemetryCycle();
     AppState.telemetryPollingTimer = setInterval(runLiveTelemetryCycle, AppState.pollIntervalMs || 1000);
 }
@@ -1711,8 +2387,8 @@ function stopUnifiedLiveTelemetryEngine() {
     }
 }
 
-async function runLiveTelemetryCycle() {
-    if (AppState.isLivePollingPaused) return;
+async function runLiveTelemetryCycle(isManualOneOff = false) {
+    if (AppState.isLivePollingPaused && !isManualOneOff) return;
 
     // Update live sync indicator
     const syncEl = document.getElementById('span-last-refreshed');
@@ -1724,28 +2400,37 @@ async function runLiveTelemetryCycle() {
     // 2. Refresh Spring Batch execution history
     await loadExecutionHistory(true);
 
-    // 3. Determine target job to poll
+    // 3. Determine if any job is currently actively running
+    const running = (AppState.executionHistory || []).find(e => e.status === 'RUNNING' || e.status === 'STARTED');
+
+    // 4. Determine target job to poll
     const dropdown = document.getElementById('history-job-dropdown');
     const selectedVal = dropdown?.value || 'ALL';
 
     let targetJobId = null;
     if (selectedVal !== 'ALL') {
         targetJobId = selectedVal;
-    } else {
-        // Look for actively RUNNING or STARTED job
-        const running = (AppState.executionHistory || []).find(e => e.status === 'RUNNING' || e.status === 'STARTED');
-        if (running) {
-            targetJobId = running.executionId;
-        } else if (AppState.activeJobExecutionId) {
-            targetJobId = AppState.activeJobExecutionId;
-        } else if (AppState.executionHistory && AppState.executionHistory.length > 0) {
-            // Default to most recent execution
-            targetJobId = AppState.executionHistory[0].executionId;
-        }
+    } else if (running) {
+        targetJobId = running.executionId;
+    } else if (AppState.activeJobExecutionId) {
+        targetJobId = AppState.activeJobExecutionId;
+    } else if (AppState.executionHistory && AppState.executionHistory.length > 0) {
+        targetJobId = AppState.executionHistory[0].executionId;
     }
 
     if (targetJobId) {
         await pollJobTelemetry(targetJobId);
+    }
+
+    // 5. If no job is actively running anywhere in the system, stop sending frequent update signals!
+    if (!running && !AppState.activeJobExecutionId) {
+        if (AppState.telemetryPollingTimer && !isManualOneOff) {
+            stopUnifiedLiveTelemetryEngine();
+            const latestStatus = (AppState.executionHistory && AppState.executionHistory.length > 0)
+                ? AppState.executionHistory[0].status
+                : 'COMPLETED';
+            setStaticTelemetryIndicator(latestStatus);
+        }
     }
 }
 
@@ -2189,6 +2874,13 @@ function renderExecutionRows(executions) {
                 const dropdown = document.getElementById('history-job-dropdown');
                 if (dropdown) dropdown.value = execId;
                 applyExecutionHistoryFilter(execId);
+                const found = (AppState.executionHistory || []).find(item => String(item.executionId) === String(execId));
+                if (found && isTerminalStatus(found.status)) {
+                    stopUnifiedLiveTelemetryEngine();
+                    setStaticTelemetryIndicator(found.status);
+                } else if (found && (found.status === 'RUNNING' || found.status === 'STARTED')) {
+                    startUnifiedLiveTelemetryEngine();
+                }
                 pollJobTelemetry(execId);
                 document.getElementById('selected-job-status-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }
@@ -2199,6 +2891,9 @@ function renderExecutionRows(executions) {
 function startActiveJobMonitor(jobExecutionId) {
     AppState.activeJobExecutionId = jobExecutionId;
     AppState.peakThroughput = 0;
+    if (AppState.staticTelemetryCache) {
+        delete AppState.staticTelemetryCache[jobExecutionId];
+    }
     const dropdown = document.getElementById('history-job-dropdown');
     if (dropdown) {
         let opt = Array.from(dropdown.options).find(o => String(o.value) === String(jobExecutionId));
@@ -2213,44 +2908,75 @@ function startActiveJobMonitor(jobExecutionId) {
     startUnifiedLiveTelemetryEngine();
 }
 
+function renderTelemetryData(data) {
+    if (!data) return;
+    // 1. Throughput & Streaming state
+    updateThroughputAndState(data);
+
+    // 2. Total Transferred Card
+    updateTransferredFromTelemetry(data);
+
+    // 3. Target Tables Live Ingestion Breakdown
+    updateTableBreakdown(data);
+
+    // 4. Selected Job Status Details Panel
+    updateSelectedJobStatusPanel(data);
+
+    // 5. Visual Analytics Charts
+    updateCharts(data);
+
+    // 6. Recent Error Logs
+    updateErrorsTable(data.recentErrors || []);
+
+    // 7. Failure Diagnostic Alert Panel
+    checkAndDisplayFailureAlert(data);
+}
+
 async function pollJobTelemetry(jobExecutionId) {
+    if (!jobExecutionId) return;
+
+    // 1. If static data is already cached for this completed job, display static data without server signal
+    if (AppState.staticTelemetryCache && AppState.staticTelemetryCache[jobExecutionId]) {
+        const cached = AppState.staticTelemetryCache[jobExecutionId];
+        renderTelemetryData(cached);
+        return;
+    }
+
     try {
         const response = await fetch(`/api/jobs/${jobExecutionId}/telemetry`);
         if (!response.ok) return;
         const data = await response.json();
 
-        // 1. Throughput & Streaming state
-        updateThroughputAndState(data);
+        // Render live or static data to UI
+        renderTelemetryData(data);
 
-        // 2. Total Transferred Card
-        updateTransferredFromTelemetry(data);
+        // If job is completed or reached terminal state:
+        if (isTerminalStatus(data.status)) {
+            // Cache static final data so subsequent views do not hit server
+            AppState.staticTelemetryCache = AppState.staticTelemetryCache || {};
+            AppState.staticTelemetryCache[jobExecutionId] = data;
 
-        // 3. Target Tables Live Ingestion Breakdown
-        updateTableBreakdown(data);
-
-        // 4. Selected Job Status Details Panel
-        updateSelectedJobStatusPanel(data);
-
-        // 5. Visual Analytics Charts
-        updateCharts(data);
-
-        // 6. Recent Error Logs
-        updateErrorsTable(data.recentErrors || []);
-
-        // 7. Failure Diagnostic Alert Panel
-        checkAndDisplayFailureAlert(data);
-
-        // 8. Job completion/failure toasts for active job
-        if (AppState.activeJobExecutionId && String(AppState.activeJobExecutionId) === String(jobExecutionId)) {
-            if (data.status === 'COMPLETED') {
-                showToast(`Job #${jobExecutionId} completed successfully!`, 'success', 'Ingestion Complete');
+            // Toast notification on completion
+            if (AppState.activeJobExecutionId && String(AppState.activeJobExecutionId) === String(jobExecutionId)) {
+                if (data.status === 'COMPLETED') {
+                    showToast(`Job #${jobExecutionId} completed successfully!`, 'success', 'Ingestion Complete');
+                } else if (data.status === 'FAILED') {
+                    showToast(`Job #${jobExecutionId} failed. See diagnostic alert.`, 'error', 'Job Failed');
+                } else if (data.status === 'STOPPED') {
+                    showToast(`Job #${jobExecutionId} was stopped.`, 'warning', 'Job Stopped');
+                }
                 AppState.activeJobExecutionId = null;
-            } else if (data.status === 'FAILED') {
-                showToast(`Job #${jobExecutionId} failed. See diagnostic alert.`, 'error', 'Job Failed');
-                AppState.activeJobExecutionId = null;
-            } else if (data.status === 'STOPPED') {
-                showToast(`Job #${jobExecutionId} was stopped.`, 'warning', 'Job Stopped');
-                AppState.activeJobExecutionId = null;
+            }
+
+            // Check if there are other jobs actively running
+            const hasOtherRunning = (AppState.executionHistory || []).some(
+                e => String(e.executionId) !== String(jobExecutionId) && (e.status === 'RUNNING' || e.status === 'STARTED')
+            );
+
+            if (!hasOtherRunning) {
+                // STOP SENDING FREQUENT UPDATE SIGNALS TO SERVER
+                stopUnifiedLiveTelemetryEngine();
+                setStaticTelemetryIndicator(data.status);
             }
         }
     } catch (e) {

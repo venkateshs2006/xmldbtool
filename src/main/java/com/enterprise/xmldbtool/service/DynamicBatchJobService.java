@@ -43,8 +43,10 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.*;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -61,6 +63,8 @@ public class DynamicBatchJobService {
     private final DynamicXmlUnmarshaller dynamicXmlUnmarshaller;
     private final DynamicDataSourceService dataSourceService;
     private final XmlSchemaDiscoveryService discoveryService;
+    private final StagingXmlStreamingService stagingService;
+    private final DynamicSchemaResolutionService resolutionService;
     private final ResourceLoader resourceLoader = new DefaultResourceLoader();
 
     // In-memory cache of active job listeners for real-time telemetry error reporting
@@ -80,7 +84,9 @@ public class DynamicBatchJobService {
                                  PlatformTransactionManager transactionManager,
                                  DynamicXmlUnmarshaller dynamicXmlUnmarshaller,
                                  DynamicDataSourceService dataSourceService,
-                                 XmlSchemaDiscoveryService discoveryService) {
+                                 XmlSchemaDiscoveryService discoveryService,
+                                 StagingXmlStreamingService stagingService,
+                                 DynamicSchemaResolutionService resolutionService) {
         this.jobRepository = jobRepository;
         this.jobLauncher = jobLauncher;
         this.jobExplorer = jobExplorer;
@@ -88,6 +94,8 @@ public class DynamicBatchJobService {
         this.dynamicXmlUnmarshaller = dynamicXmlUnmarshaller;
         this.dataSourceService = dataSourceService;
         this.discoveryService = discoveryService;
+        this.stagingService = stagingService;
+        this.resolutionService = resolutionService;
     }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -99,6 +107,9 @@ public class DynamicBatchJobService {
      * Dynamically builds and launches Spring Batch Job for high-volume XML ingestion.
      */
     public JobLaunchResponse launchIngestionJob(JobLaunchRequest request) {
+        if (request != null && request.isStagedPipeline()) {
+            return launchStagedPipelineJob(request);
+        }
         try {
             long timestamp = System.currentTimeMillis();
             String jobName = "dynamicXmlIngestJob_" + timestamp;
@@ -112,6 +123,24 @@ public class DynamicBatchJobService {
             // Stream by repeating record item fragments (e.g. Person, record).
             String effectiveFragmentRoot = request.getRecordRootElement();
             String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
+
+            // Check if mappings imply Person or another specific entity
+            if (request.getMappings() != null) {
+                boolean hasPersonMapping = request.getMappings().stream().anyMatch(m -> {
+                    String tbl = m.getTargetTable();
+                    String col = m.getTargetColumn();
+                    String f = m.getXmlField();
+                    return (tbl != null && (tbl.equalsIgnoreCase("person") || tbl.toLowerCase().startsWith("person_") || tbl.toLowerCase().startsWith("person")))
+                            || (col != null && col.equalsIgnoreCase("person_id"))
+                            || (f != null && f.toLowerCase().startsWith("person/"));
+                });
+                if (hasPersonMapping && (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty()
+                        || "record".equalsIgnoreCase(effectiveFragmentRoot) || effectiveFragmentRoot.toLowerCase().endsWith("list")
+                        || effectiveFragmentRoot.equalsIgnoreCase("countryname"))) {
+                    effectiveFragmentRoot = "Person";
+                }
+            }
+
             if (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty() || "record".equalsIgnoreCase(effectiveFragmentRoot)) {
                 String detectedRoot = discoveryService.detectRecordRootElement(request.getSourceXmlPath());
                 if (detectedRoot != null && !detectedRoot.trim().isEmpty() && !detectedRoot.equalsIgnoreCase(docRoot)) {
@@ -167,6 +196,18 @@ public class DynamicBatchJobService {
 
             // 4. Dynamic Pure JDBC Writer with skip listener & fault tolerance
             DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(targetDataSource, tableOrder, skipListener);
+            if (request.getMappings() != null) {
+                Map<String, Set<String>> explicitPks = new HashMap<>();
+                for (com.enterprise.xmldbtool.model.FieldMapping m : request.getMappings()) {
+                    if ("PK".equalsIgnoreCase(m.getConstraintType()) && m.getTargetTable() != null && m.getTargetColumn() != null) {
+                        explicitPks.computeIfAbsent(m.getTargetTable().toLowerCase(), k -> new LinkedHashSet<>())
+                                .add(m.getTargetColumn().toLowerCase());
+                    }
+                }
+                if (!explicitPks.isEmpty()) {
+                    writer.setExplicitPrimaryKeys(explicitPks);
+                }
+            }
 
             int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
 
@@ -256,6 +297,122 @@ public class DynamicBatchJobService {
             return new JobLaunchResponse(true, "Job launched successfully.", jobExecution.getId(), "STARTED");
         } catch (Exception ex) {
             log.error("Failed to launch batch ingestion job: {}", ex.getMessage(), ex);
+            return new JobLaunchResponse(false, "Job launch failed: " + ex.getMessage(), null, "FAILED");
+        }
+    }
+
+    /**
+     * Executes the Two-Stage Metadata-Driven XML Processing Pipeline:
+     * Stage 1: Memory-efficient StAX streaming into flat staging table with SHA-256 delta hashing.
+     * Stage 2: Dynamic schema resolution & canonical normalization into relational tables (Master + 1-to-N relationships).
+     */
+    public JobLaunchResponse launchStagedPipelineJob(JobLaunchRequest request) {
+        try {
+            long timestamp = System.currentTimeMillis();
+            String jobName = "stagedXmlPipelineJob_" + timestamp;
+            DataSource targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
+
+            String effectiveFragmentRoot = request.getRecordRootElement();
+            if (effectiveFragmentRoot == null || effectiveFragmentRoot.trim().isEmpty() || "record".equalsIgnoreCase(effectiveFragmentRoot)) {
+                String detectedRoot = discoveryService.detectRecordRootElement(request.getSourceXmlPath());
+                if (detectedRoot != null && !detectedRoot.trim().isEmpty()) {
+                    effectiveFragmentRoot = detectedRoot;
+                } else {
+                    effectiveFragmentRoot = "Person";
+                }
+            }
+
+            List<String> tableOrder = DynamicJdbcBatchWriter.determineTableOrder(
+                    request.getTableOrder(),
+                    request.getMappings(),
+                    request.getTargetTable()
+            );
+
+            String allTables = (tableOrder != null && !tableOrder.isEmpty())
+                    ? String.join(", ", tableOrder)
+                    : (request.getTargetTable() != null ? request.getTargetTable() : "MULTI_TABLE");
+
+            JobParameters params = new JobParametersBuilder()
+                    .addString("sourceXmlPath", request.getSourceXmlPath())
+                    .addString("targetTable", allTables)
+                    .addString("targetTables", allTables)
+                    .addString("pipelineMode", "STAGED_METADATA_DRIVEN")
+                    .addLong("time", timestamp)
+                    .toJobParameters();
+
+            JobExecution jobExecution = jobRepository.createJobExecution(jobName, params);
+
+            final String finalRecordRoot = effectiveFragmentRoot;
+            final int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
+
+            SimpleAsyncTaskExecutor asyncExecutor = new SimpleAsyncTaskExecutor("staged-batch-exec-");
+            asyncExecutor.execute(() -> {
+                try {
+                    jobExecution.setStatus(BatchStatus.STARTED);
+                    jobExecution.setStartTime(LocalDateTime.now());
+                    jobRepository.update(jobExecution);
+
+                    // 1. Stage 1: Stream XML to flat staging with StAX and SHA-256 delta hashing
+                    log.info("Executing Pipeline Stage 1: StAX XML streaming to flat staging table...");
+                    StagingXmlStreamingService.StagingSummary stagingSummary = stagingService.streamXmlToStaging(
+                            request.getSourceXmlPath(),
+                            finalRecordRoot,
+                            jobExecution.getId(),
+                            targetDataSource,
+                            chunkSize
+                    );
+
+                    // 2. Stage 1.5: If header reference tables are mapped, stream them
+                    boolean hasHeaderTables = request.getMappings() != null && request.getMappings().stream().anyMatch(m -> {
+                        String tbl = m.getTargetTable();
+                        if (tbl == null || tbl.trim().isEmpty()) return false;
+                        String norm = tbl.trim().toLowerCase();
+                        return norm.endsWith("list") || norm.endsWith("lists")
+                                || (!norm.equals("person") && !norm.startsWith("person")
+                                && !norm.equals(finalRecordRoot.toLowerCase()));
+                    });
+                    if (hasHeaderTables) {
+                        log.info("Executing Pipeline Stage: Ingesting header lookup reference tables...");
+                        HeaderReferenceIngestionTasklet headerTasklet = new HeaderReferenceIngestionTasklet(
+                                request.getSourceXmlPath(),
+                                finalRecordRoot,
+                                request.getMappings(),
+                                targetDataSource
+                        );
+                        headerTasklet.execute(null, null);
+                    }
+
+                    // 3. Stage 2: Dynamic Schema Resolution & Canonical Projection from staging with delta upsert
+                    log.info("Executing Pipeline Stage 2: Dynamic schema resolution & canonical normalization...");
+                    DynamicSchemaResolutionService.NormalizationSummary normSummary = resolutionService.normalizeStagingToCanonical(
+                            jobExecution.getId(),
+                            targetDataSource,
+                            request.getMappings(),
+                            tableOrder,
+                            request.getTargetTable(),
+                            chunkSize
+                    );
+
+                    jobExecution.getExecutionContext().putLong("actualRowsRead", stagingSummary.totalRead());
+                    jobExecution.getExecutionContext().putLong("actualRowsWritten", normSummary.normalizedCount());
+                    jobExecution.getExecutionContext().put("tableWriteCounts", new LinkedHashMap<>(normSummary.tableWriteCounts()));
+                    jobExecution.setStatus(BatchStatus.COMPLETED);
+                    jobExecution.setEndTime(LocalDateTime.now());
+                    jobExecution.setExitStatus(org.springframework.batch.core.ExitStatus.COMPLETED);
+                    jobRepository.update(jobExecution);
+                    log.info("Staged metadata-driven XML processing pipeline job completed successfully: JobExecutionId={}", jobExecution.getId());
+                } catch (Exception ex) {
+                    log.error("Staged metadata-driven XML pipeline job failed: {}", ex.getMessage(), ex);
+                    jobExecution.setStatus(BatchStatus.FAILED);
+                    jobExecution.setEndTime(LocalDateTime.now());
+                    jobExecution.setExitStatus(new org.springframework.batch.core.ExitStatus("FAILED", ex.getMessage()));
+                    jobRepository.update(jobExecution);
+                }
+            });
+
+            return new JobLaunchResponse(true, "Staged XML Processing Pipeline launched successfully in background.", jobExecution.getId(), "STARTED");
+        } catch (Exception ex) {
+            log.error("Failed to launch staged XML pipeline job: {}", ex.getMessage(), ex);
             return new JobLaunchResponse(false, "Job launch failed: " + ex.getMessage(), null, "FAILED");
         }
     }

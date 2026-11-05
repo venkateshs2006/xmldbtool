@@ -12,6 +12,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -79,6 +80,16 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
 
     public Map<String, Long> getTableWriteCounts() {
         return new LinkedHashMap<>(tableWriteCounts);
+    }
+
+    public void setExplicitPrimaryKeys(Map<String, Set<String>> explicitPks) {
+        if (explicitPks != null) {
+            for (Map.Entry<String, Set<String>> entry : explicitPks.entrySet()) {
+                if (entry.getKey() != null && entry.getValue() != null && !entry.getValue().isEmpty()) {
+                    this.pkCache.put(entry.getKey().toLowerCase(), new LinkedHashSet<>(entry.getValue()));
+                }
+            }
+        }
     }
 
     public DynamicJdbcBatchWriter(DataSource dataSource) {
@@ -366,6 +377,9 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                     // Savepoints might not be supported on all drivers/modes
                 }
             }
+            // Dynamically ensure missing columns from delta XML files are added via ALTER TABLE
+            ensureColumnsExist(tableName, columnNames);
+
             String insertOrUpsertSql = getOrCreateInsertSql(tableName, columnNames);
 
             try {
@@ -390,6 +404,27 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                     } catch (Exception ignored) {}
                 }
             } catch (Exception ex) {
+                // If write failed because of a missing column from delta schema evolution, attempt self-healing ALTER TABLE and retry once
+                String exMsg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
+                if (exMsg.contains("not found") || exMsg.contains("does not exist") || exMsg.contains("ora-00904") || exMsg.contains("column")) {
+                    try {
+                        log.info("Attempting self-healing ALTER TABLE for table '{}' due to missing column error: {}", tableName, ex.getMessage());
+                        ensureColumnsExist(tableName, columnNames);
+                        insertOrUpsertSql = getOrCreateInsertSql(tableName, columnNames);
+                        MapSqlParameterSource[] retryArray = batchParams.toArray(new MapSqlParameterSource[0]);
+                        int[] updateCounts = jdbcTemplate.batchUpdate(insertOrUpsertSql, retryArray);
+                        long writtenCount = updateCounts.length;
+                        totalRowsWritten.addAndGet(writtenCount);
+                        tableWriteCounts.compute(tableName, (k, v) -> (v == null ? 0L : v) + writtenCount);
+                        if (savepoint != null && conn != null) {
+                            try { conn.releaseSavepoint(savepoint); } catch (Exception ignored) {}
+                        }
+                        continue; // Self-healing succeeded, move to next table
+                    } catch (Exception retryEx) {
+                        log.warn("Self-healing retry for table '{}' failed: {}", tableName, retryEx.getMessage());
+                    }
+                }
+
                 if (savepoint != null && conn != null) {
                     try {
                         conn.rollback(savepoint);
@@ -489,6 +524,143 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         return s;
     }
 
+    private final Map<String, Map<String, String>> tableColumnCaseMapCache = new ConcurrentHashMap<>();
+
+    private static final Set<String> RESERVED_KEYWORDS = Set.of(
+            "day", "month", "year", "date", "time", "order", "group", "user", "value", "values",
+            "key", "keys", "table", "tables", "from", "where", "select", "insert", "update",
+            "delete", "create", "drop", "alter", "add", "constraint", "primary", "foreign",
+            "check", "default", "case", "when", "then", "else", "end", "all", "and", "or",
+            "not", "as", "by", "for", "in", "is", "like", "to", "with", "limit", "offset",
+            "session", "current", "zone", "action", "role", "level", "position"
+    );
+
+    public Map<String, String> getActualColumnNames(String tableName) {
+        if (tableName == null) return Collections.emptyMap();
+        return tableColumnCaseMapCache.computeIfAbsent(tableName.toLowerCase(), tblKey -> {
+            Map<String, String> colMap = new LinkedHashMap<>();
+            if (dataSource != null) {
+                try (Connection conn = dataSource.getConnection()) {
+                    DatabaseMetaData meta = conn.getMetaData();
+                    String schema = null;
+                    try {
+                        schema = conn.getSchema();
+                    } catch (Throwable ignored) {}
+
+                    for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                        try (ResultSet rs = meta.getColumns(null, schema, tName, null)) {
+                            while (rs.next()) {
+                                String colName = rs.getString("COLUMN_NAME");
+                                if (colName != null) {
+                                    colMap.put(colName.toLowerCase(), colName);
+                                }
+                            }
+                        }
+                        if (!colMap.isEmpty()) break;
+                    }
+                } catch (Exception ex) {
+                    log.warn("Could not query column metadata for table '{}': {}", tableName, ex.getMessage());
+                }
+            }
+            return colMap;
+        });
+    }
+
+    public static String quoteIdentifier(String colName, String dbProduct, Map<String, String> actualCols) {
+        if (colName == null) return "";
+        String actualCol = (actualCols != null) ? actualCols.get(colName.toLowerCase()) : null;
+        String effectiveName = (actualCol != null) ? actualCol : colName;
+
+        String db = dbProduct != null ? dbProduct.toLowerCase() : "";
+        boolean isMysql = db.contains("mysql") || db.contains("mariadb");
+
+        boolean quote = RESERVED_KEYWORDS.contains(colName.toLowerCase())
+                || (actualCol != null && !isMysql)
+                || colName.contains(" ") || colName.contains("-");
+
+        if (quote) {
+            if (isMysql) {
+                return "`" + effectiveName.replace("`", "``") + "`";
+            }
+            return "\"" + effectiveName.replace("\"", "\"\"") + "\"";
+        }
+        return effectiveName;
+    }
+
+    /**
+     * Automatically detects and resolves schema evolution for delta files.
+     * If incoming batch records contain columns that do not yet exist in the target table,
+     * dynamically issues ALTER TABLE ... ADD COLUMN DDL statements across PostgreSQL, Oracle, and H2.
+     */
+    public synchronized void ensureColumnsExist(String tableName, Set<String> targetColumns) {
+        if (dataSource == null || tableName == null || targetColumns == null || targetColumns.isEmpty()) {
+            return;
+        }
+        Map<String, String> actualCols = getActualColumnNames(tableName);
+        if (actualCols.isEmpty()) {
+            // Table might not exist yet or no columns returned by metadata
+            return;
+        }
+
+        Set<String> missingCols = new LinkedHashSet<>();
+        for (String col : targetColumns) {
+            if (col != null && !col.trim().isEmpty() && !actualCols.containsKey(col.toLowerCase().trim())) {
+                missingCols.add(col.trim());
+            }
+        }
+
+        if (missingCols.isEmpty()) {
+            return;
+        }
+
+        boolean isOracle = databaseProductName != null && databaseProductName.toLowerCase().contains("oracle");
+        boolean isPostgres = databaseProductName != null && databaseProductName.toLowerCase().contains("postgresql");
+
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement()) {
+
+            for (String col : missingCols) {
+                String safeCol = col.replaceAll("[^a-zA-Z0-9_]", "_");
+                if (safeCol.isEmpty()) continue;
+
+                String norm = safeCol.toLowerCase();
+                String colType = "VARCHAR(255)";
+                if (norm.contains("note") || norm.contains("desc") || norm.contains("payload")
+                        || norm.contains("extra") || norm.contains("attribute") || norm.contains("json")
+                        || norm.contains("roles") || norm.contains("source") || norm.contains("image")) {
+                    colType = isOracle ? "CLOB" : "TEXT";
+                }
+
+                String quotedCol = RESERVED_KEYWORDS.contains(norm) ? "\"" + safeCol + "\"" : safeCol;
+                String alterSql;
+                if (isOracle) {
+                    String oraType = colType.equals("TEXT") ? "CLOB" : (colType.equals("VARCHAR(255)") ? "VARCHAR2(255)" : colType);
+                    alterSql = "ALTER TABLE " + tableName + " ADD (" + quotedCol + " " + oraType + ")";
+                } else {
+                    // PostgreSQL, H2 and others
+                    alterSql = "ALTER TABLE " + tableName + " ADD COLUMN IF NOT EXISTS " + quotedCol + " " + colType;
+                }
+
+                try {
+                    stmt.execute(alterSql);
+                    log.info("Delta Feed Schema Evolution: Dynamically executed ALTER TABLE: '{}' to add missing column '{}'.", alterSql, safeCol);
+                } catch (Exception ex) {
+                    if (ex.getMessage() != null && (ex.getMessage().contains("already exists") || ex.getMessage().contains("duplicate column") || ex.getMessage().contains("ORA-01430"))) {
+                        log.debug("Column '{}' already exists in table '{}'.", safeCol, tableName);
+                    } else {
+                        log.warn("Notice executing ALTER TABLE statement '{}': {}", alterSql, ex.getMessage());
+                    }
+                }
+            }
+
+            // Invalidate caches so newly added columns are recognized in UPSERT statements
+            tableColumnCaseMapCache.remove(tableName.toLowerCase());
+            sqlCache.entrySet().removeIf(e -> e.getKey().startsWith(tableName + ":"));
+        } catch (Exception ex) {
+            log.error("Failed to alter table '{}' for missing delta columns {}: {}", tableName, missingCols, ex.getMessage());
+        }
+    }
+
     /**
      * Constructs and caches dynamic SQL UPSERT statement (INSERT ... ON CONFLICT DO UPDATE).
      * If the record already exists, updates non-primary key columns; otherwise inserts.
@@ -497,7 +669,8 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         String cacheKey = tableName + ":" + String.join(",", columns);
         return sqlCache.computeIfAbsent(cacheKey, k -> {
             Set<String> pkColumns = findPrimaryKeys(tableName, columns);
-            String generated = constructUpsertSql(tableName, columns, pkColumns, this.databaseProductName);
+            Map<String, String> actualCols = getActualColumnNames(tableName);
+            String generated = constructUpsertSql(tableName, columns, pkColumns, this.databaseProductName, actualCols);
             log.info("Constructed dynamic batch UPSERT statement for table '{}': {}", tableName, generated);
             return generated;
         });
@@ -593,6 +766,13 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
      * Constructs cross-database UPSERT SQL statement (INSERT ... ON CONFLICT DO UPDATE).
      */
     public static String constructUpsertSql(String tableName, Set<String> columns, Set<String> pkColumns, String dbProduct) {
+        return constructUpsertSql(tableName, columns, pkColumns, dbProduct, Collections.emptyMap());
+    }
+
+    /**
+     * Constructs cross-database UPSERT SQL statement (INSERT ... ON CONFLICT DO UPDATE).
+     */
+    public static String constructUpsertSql(String tableName, Set<String> columns, Set<String> pkColumns, String dbProduct, Map<String, String> actualCols) {
         if (tableName == null || columns == null || columns.isEmpty()) {
             throw new IllegalArgumentException("Table name and columns cannot be empty");
         }
@@ -618,7 +798,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                 insertSql.append(", ");
                 placeholders.append(", ");
             }
-            insertSql.append(col);
+            insertSql.append(quoteIdentifier(col, dbProduct, actualCols));
             placeholders.append(":").append(col);
             idx++;
         }
@@ -640,7 +820,8 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             int uIdx = 0;
             for (String col : nonPkCols) {
                 if (uIdx > 0) onDup.append(", ");
-                onDup.append(col).append(" = VALUES(").append(col).append(")");
+                String quoted = quoteIdentifier(col, dbProduct, actualCols);
+                onDup.append(quoted).append(" = VALUES(").append(quoted).append(")");
                 uIdx++;
             }
             return insertSql.append(onDup).toString();
@@ -656,7 +837,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                     mergeSql.append(", ");
                     mPlaceholders.append(", ");
                 }
-                mergeSql.append(col);
+                mergeSql.append(quoteIdentifier(col, dbProduct, actualCols));
                 mPlaceholders.append(":").append(col);
                 mIdx++;
             }
@@ -664,7 +845,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             int kIdx = 0;
             for (String pk : matchedPks) {
                 if (kIdx > 0) mergeSql.append(", ");
-                mergeSql.append(pk);
+                mergeSql.append(quoteIdentifier(pk, dbProduct, actualCols));
                 kIdx++;
             }
             mergeSql.append(")").append(mPlaceholders).append(")");
@@ -676,7 +857,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         int pkIdx = 0;
         for (String pk : matchedPks) {
             if (pkIdx > 0) onConflict.append(", ");
-            onConflict.append(pk);
+            onConflict.append(quoteIdentifier(pk, dbProduct, actualCols));
             pkIdx++;
         }
         onConflict.append(")");
@@ -688,7 +869,8 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             int uIdx = 0;
             for (String col : nonPkCols) {
                 if (uIdx > 0) onConflict.append(", ");
-                onConflict.append(col).append(" = EXCLUDED.").append(col);
+                String quoted = quoteIdentifier(col, dbProduct, actualCols);
+                onConflict.append(quoted).append(" = EXCLUDED.").append(quoted);
                 uIdx++;
             }
         }
