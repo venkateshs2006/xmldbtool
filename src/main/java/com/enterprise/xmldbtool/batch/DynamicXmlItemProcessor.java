@@ -140,9 +140,22 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                     if (!tableName.equalsIgnoreCase(this.defaultTargetTable)) {
                         String fkCol = this.defaultTargetTable.toLowerCase() + "_id";
                         if (!rowMap.containsKey(fkCol) || rowMap.get(fkCol) == null) {
-                            Object parentId = xmlRecord.get("person_id");
+                            Object parentId = xmlRecord.get(fkCol);
                             if (parentId == null) parentId = xmlRecord.get("id");
                             if (parentId == null) parentId = xmlRecord.get("@id");
+                            if (parentId == null) parentId = xmlRecord.get("code");
+                            if (parentId == null) parentId = xmlRecord.get("@code");
+                            if (parentId == null && this.mappings != null) {
+                                for (FieldMapping m : this.mappings) {
+                                    if ("PK".equalsIgnoreCase(m.getConstraintType()) && m.getTargetTable() != null && m.getTargetTable().equalsIgnoreCase(this.defaultTargetTable)) {
+                                        parentId = xmlRecord.get(m.getTargetColumn());
+                                        if (parentId == null && m.getXmlField() != null) {
+                                            parentId = resolveXmlValue(xmlRecord, m.getXmlField(), m.getTargetColumn());
+                                        }
+                                        if (parentId != null) break;
+                                    }
+                                }
+                            }
                             if (parentId != null) {
                                 rowMap.put(fkCol, parentId);
                             }
@@ -235,13 +248,31 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             return (List<Map<String, Object>>) list;
         }
 
-        // 2. If table is main entity (e.g. Person, record) and no direct _entities_* was found, it's a single record
-        if (normTable.equals("person") || normTable.equals("record")) {
+        // Check if sub-tag column contains serialized JSON array/object from staging table
+        Object subTagJson = xmlRecord.get(normTable);
+        if (subTagJson == null) subTagJson = xmlRecord.get(singular);
+        if (subTagJson instanceof String jsonStr && (jsonStr.trim().startsWith("[") || jsonStr.trim().startsWith("{"))) {
+            try {
+                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                if (jsonStr.trim().startsWith("[")) {
+                    List<Map<String, Object>> parsed = mapper.readValue(jsonStr, new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
+                    if (!parsed.isEmpty()) return parsed;
+                } else {
+                    Map<String, Object> parsed = mapper.readValue(jsonStr, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                    if (!parsed.isEmpty()) return List.of(parsed);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 2. If table is main entity and no direct _entities_* was found, it's a single record
+        String defaultNorm = this.defaultTargetTable != null ? this.defaultTargetTable.toLowerCase().trim() : "record";
+        if (normTable.equals(defaultNorm) || normTable.equals("record") || normTable.equals("records")) {
             return Collections.emptyList();
         }
 
-        // 3. Strip entity prefix (e.g. "person_name" or "personname" -> "name", "role", "date")
-        String stripped = normTable.replaceFirst("^person_?", "").replace("_", "");
+        // 3. Strip entity prefix (e.g. "order_item" or "orderitem" -> "item", "person_name" -> "name")
+        String prefixRegex = "^" + java.util.regex.Pattern.quote(defaultNorm) + "_?";
+        String stripped = normTable.replaceFirst(prefixRegex, "").replace("_", "");
         if (!stripped.isEmpty() && !stripped.equals(normTable.replace("_", ""))) {
             list = xmlRecord.get("_entities_" + stripped);
             if (list instanceof List<?> l && !l.isEmpty()) {

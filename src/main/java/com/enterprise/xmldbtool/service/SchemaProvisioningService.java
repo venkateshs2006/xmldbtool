@@ -1,12 +1,27 @@
 package com.enterprise.xmldbtool.service;
 
+import com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller;
 import com.enterprise.xmldbtool.model.DbConnectionConfig;
 import com.enterprise.xmldbtool.model.DiscoveredElement;
+import com.enterprise.xmldbtool.model.FieldMapping;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.DefaultResourceLoader;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Service;
 
 import javax.sql.DataSource;
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamReader;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
@@ -14,11 +29,14 @@ import java.sql.Statement;
 import java.util.*;
 
 /**
- * Service responsible for provisioning database tables in the target database:
- * 1. The flat staging table ('staging_xml_records') used for O(1) memory StAX streaming.
- * 2. Canonical normalized relational tables (Master Entity + 1-to-N child tables).
- * 3. Lookup / Reference tables derived from XML headers (e.g., CountryList, OccupationList).
- * 4. A flattened entity table ('PersonFlat') for direct denormalized ingestion.
+ * Enterprise Dynamic Database Schema Provisioning Service:
+ * 100% metadata-driven and dynamic table creation with zero hardcoded domain tags or schema assumptions:
+ * 1. Flat staging table ('staging_xml_records') used for O(1) memory StAX chunk streaming.
+ * 2. Dedicated flattened staging tables ('<rootTag>_flat') for every discovered/specified root tag.
+ * 3. Declarative target relational tables derived from mapping configurations with PK/FK constraints.
+ * 4. Master entity (<rootTag>) and normalized 1-to-N child tables (<rootTag>_<childGroup>) with automatic FK linking.
+ * 5. Lookup / Reference tables dynamically discovered from XML header lists.
+ * 6. Automated Schema Evolution (ALTER TABLE ADD COLUMN) for delta feeds.
  */
 @Service
 public class SchemaProvisioningService {
@@ -26,6 +44,7 @@ public class SchemaProvisioningService {
     private static final Logger log = LoggerFactory.getLogger(SchemaProvisioningService.class);
 
     private final DynamicDataSourceService dataSourceService;
+    private final ResourceLoader resourceLoader = new DefaultResourceLoader();
 
     public SchemaProvisioningService(DynamicDataSourceService dataSourceService) {
         this.dataSourceService = dataSourceService;
@@ -53,6 +72,8 @@ public class SchemaProvisioningService {
                             "record_identifier VARCHAR2(100), " +
                             "record_action VARCHAR2(50), " +
                             "record_date VARCHAR2(50), " +
+                            "xml_version VARCHAR2(50), " +
+                            "schema_version VARCHAR2(50), " +
                             "raw_payload CLOB NOT NULL, " +
                             "payload_hash VARCHAR2(64) NOT NULL, " +
                             "status VARCHAR2(30) DEFAULT 'STAGED', " +
@@ -66,6 +87,8 @@ public class SchemaProvisioningService {
                     if (!ex.getMessage().contains("ORA-00955")) {
                         log.warn("Oracle staging table creation note: {}", ex.getMessage());
                     }
+                    try { stmt.execute("ALTER TABLE staging_xml_records ADD (xml_version VARCHAR2(50))"); } catch (Exception ignored) {}
+                    try { stmt.execute("ALTER TABLE staging_xml_records ADD (schema_version VARCHAR2(50))"); } catch (Exception ignored) {}
                 }
             } else {
                 // PostgreSQL and H2
@@ -76,6 +99,8 @@ public class SchemaProvisioningService {
                         "record_identifier VARCHAR(100), " +
                         "record_action VARCHAR(50), " +
                         "record_date VARCHAR(50), " +
+                        "xml_version VARCHAR(50), " +
+                        "schema_version VARCHAR(50), " +
                         "raw_payload TEXT NOT NULL, " +
                         "payload_hash VARCHAR(64) NOT NULL, " +
                         "status VARCHAR(30) DEFAULT 'STAGED', " +
@@ -87,6 +112,8 @@ public class SchemaProvisioningService {
                 created.add("staging_xml_records");
 
                 try {
+                    stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS xml_version VARCHAR(50)");
+                    stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS schema_version VARCHAR(50)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_staging_status ON staging_xml_records(status)");
                 } catch (Exception ignored) {}
@@ -98,21 +125,46 @@ public class SchemaProvisioningService {
         return created;
     }
 
-    /**
-     * Provisions both the flat staging table and canonical relational schema tables in the target database.
-     */
     public List<String> provisionDiscoveredTables(DbConnectionConfig config,
                                                  String sourceXmlPath,
                                                  String recordRootElement,
                                                  List<DiscoveredElement> discoveredXmlElements) {
+        List<String> roots = (recordRootElement != null && !recordRootElement.trim().isEmpty())
+                ? Arrays.stream(recordRootElement.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList()
+                : List.of("record");
+        return provisionDiscoveredTables(config, sourceXmlPath, roots, discoveredXmlElements, Collections.emptyList());
+    }
+
+    public List<String> provisionDiscoveredTables(DbConnectionConfig config,
+                                                 String sourceXmlPath,
+                                                 List<String> recordRootElements,
+                                                 List<DiscoveredElement> discoveredXmlElements) {
+        return provisionDiscoveredTables(config, sourceXmlPath, recordRootElements, discoveredXmlElements, Collections.emptyList());
+    }
+
+    /**
+     * Fully dynamic table provisioning in the target database based on discovered XML hierarchy and/or mapping configurations.
+     */
+    public List<String> provisionDiscoveredTables(DbConnectionConfig config,
+                                                 String sourceXmlPath,
+                                                 List<String> recordRootElements,
+                                                 List<DiscoveredElement> discoveredXmlElements,
+                                                 List<FieldMapping> mappings) {
         List<String> createdTables = new ArrayList<>();
         if (config == null || config.getUrl() == null) return createdTables;
 
-        // 1. Ensure flat staging table is created
+        // 1. Ensure staging table is created
         createdTables.addAll(ensureStagingTable(config));
 
-        // 2. Identify XML schema type and provision relational tables
-        boolean isPfa = isPfaSchema(recordRootElement, discoveredXmlElements, sourceXmlPath);
+        // 2. Discover XML elements dynamically if not already provided
+        List<DiscoveredElement> effectiveElements = (discoveredXmlElements != null && !discoveredXmlElements.isEmpty())
+                ? discoveredXmlElements
+                : discoverXmlElementsInternal(sourceXmlPath, 1000);
+
+        // 3. Determine effective root tags dynamically
+        List<String> effectiveRoots = (recordRootElements != null && !recordRootElements.isEmpty())
+                ? recordRootElements
+                : detectRootsFromElements(effectiveElements);
 
         DataSource ds = dataSourceService.getOrCreateDataSource(config);
         boolean isOracle = config.getUrl().toLowerCase().contains(":oracle:");
@@ -120,11 +172,32 @@ public class SchemaProvisioningService {
         try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement()) {
 
-            if (isPfa) {
-                createdTables.addAll(provisionPfaRelationalTables(stmt, isOracle, discoveredXmlElements));
-            } else {
-                createdTables.addAll(provisionGenericXmlTables(stmt, recordRootElement, discoveredXmlElements, isOracle));
+            // 4. For EVERY specified root tag, ensure dedicated staging table (<rootTag>_stage) and flattened tables are created
+            for (String rootTag : effectiveRoots) {
+                if (rootTag == null || rootTag.trim().isEmpty()) continue;
+                String safe = rootTag.replaceAll("[^a-zA-Z0-9_]", "_");
+                String stageTable = safe.toLowerCase() + "_stage";
+                createdTables.addAll(provisionSpecificStagingTable(stmt, stageTable, rootTag, effectiveElements, isOracle));
+                for (String flatTable : List.of(safe.toLowerCase() + "_flat", safe + "Flat")) {
+                    createdTables.addAll(provisionSpecificFlattenedTable(stmt, flatTable, rootTag, effectiveElements, isOracle));
+                }
             }
+
+            // 5. If declarative UI / JSON mappings are provided, provision all mapped tables with PK/FK constraints
+            boolean hasUserMappings = mappings != null && !mappings.isEmpty();
+            if (hasUserMappings) {
+                createdTables.addAll(provisionMappedTables(stmt, mappings, effectiveElements, isOracle));
+            } else {
+                // 6. Provision canonical Master & 1-to-N Child tables dynamically derived from discovered XML elements
+                for (String rootTag : effectiveRoots) {
+                    if (rootTag == null || rootTag.trim().isEmpty()) continue;
+                    createdTables.addAll(provisionDynamicRelationalTables(stmt, rootTag, effectiveElements, isOracle));
+                }
+
+                // 7. Provision lookup / reference tables dynamically derived from discovered XML elements
+                createdTables.addAll(provisionLookupTables(stmt, effectiveElements, isOracle));
+            }
+
         } catch (Exception ex) {
             log.error("Failed to provision relational schema tables: {}", ex.getMessage(), ex);
         }
@@ -132,157 +205,205 @@ public class SchemaProvisioningService {
         return createdTables;
     }
 
-    private boolean isPfaSchema(String recordRootElement, List<DiscoveredElement> xmlElements, String sourceXmlPath) {
-        if (recordRootElement != null && (recordRootElement.equalsIgnoreCase("Person") || recordRootElement.equalsIgnoreCase("PFA"))) {
-            return true;
-        }
-        if (sourceXmlPath != null && sourceXmlPath.toLowerCase().contains("pfa")) {
-            return true;
-        }
-        if (xmlElements != null) {
-            for (DiscoveredElement el : xmlElements) {
-                String name = el.getName().toLowerCase();
-                if (name.contains("countrylist") || name.contains("occupationlist")
-                        || name.contains("birthplace") || name.contains("sanctionsreferences")
-                        || name.contains("namedetails") || name.contains("roledetail")) {
-                    return true;
-                }
+    /**
+     * Provisions target database tables directly from declarative mapping configurations (e.g. from mapping JSON).
+     */
+    public List<String> provisionMappedTables(Statement stmt,
+                                             List<FieldMapping> mappings,
+                                             List<DiscoveredElement> discoveredXmlElements,
+                                             boolean isOracle) {
+        List<String> tables = new ArrayList<>();
+        if (stmt == null || mappings == null || mappings.isEmpty()) return tables;
+
+        Map<String, List<FieldMapping>> byTable = new LinkedHashMap<>();
+        for (FieldMapping m : mappings) {
+            if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
+                byTable.computeIfAbsent(m.getTargetTable().trim(), k -> new ArrayList<>()).add(m);
             }
         }
-        return false;
-    }
 
-    private List<String> provisionPfaRelationalTables(Statement stmt, boolean isOracle, List<DiscoveredElement> discoveredXmlElements) {
-        List<String> tables = new ArrayList<>();
-
-        // Extract extra tags/columns from delta XML file for schema evolution
-        Set<String> personCols = new LinkedHashSet<>(List.of(
-                "person_id", "action", "record_date", "gender", "active_status", "deceased", "birth_place", "profile_notes", "extra_attributes"
-        ));
-        Set<String> flatCols = new LinkedHashSet<>(List.of(
-                "person_id", "action", "record_date", "gender", "active_status", "deceased", "birth_place", "first_name", "surname", "name_type", "primary_occupation", "roles", "date_of_birth", "citizenship", "sanctions_id", "profile_notes", "extra_attributes", "raw_payload"
-        ));
-
+        Map<String, String> typeLookup = new HashMap<>();
         if (discoveredXmlElements != null) {
             for (DiscoveredElement el : discoveredXmlElements) {
-                String rawName = el.getName();
-                String col = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
-                col = col.replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
-                if (!col.isEmpty()) {
-                    personCols.add(col);
-                    flatCols.add(col);
+                if (el.getName() != null && el.getDetectedType() != null) {
+                    typeLookup.put(el.getName().toLowerCase(), el.getDetectedType());
+                    String simple = el.getName().contains("/")
+                            ? el.getName().substring(el.getName().lastIndexOf("/") + 1).toLowerCase()
+                            : el.getName().toLowerCase();
+                    typeLookup.put(simple.replace("@", ""), el.getDetectedType());
                 }
             }
         }
 
-        if (isOracle) {
-            executeTableSqlSafe(stmt, "CountryList", "CREATE TABLE CountryList (code VARCHAR2(50) PRIMARY KEY, name VARCHAR2(100), is_territory NUMBER(1), profile_url VARCHAR2(255))", tables, Set.of("code", "name", "is_territory", "profile_url"), isOracle);
-            executeTableSqlSafe(stmt, "OccupationList", "CREATE TABLE OccupationList (code VARCHAR2(50) PRIMARY KEY, name VARCHAR2(255))", tables, Set.of("code", "name"), isOracle);
-            executeTableSqlSafe(stmt, "RelationshipList", "CREATE TABLE RelationshipList (code VARCHAR2(50) PRIMARY KEY, name VARCHAR2(100))", tables, Set.of("code", "name"), isOracle);
-            executeTableSqlSafe(stmt, "SanctionsReferencesList", "CREATE TABLE SanctionsReferencesList (reference_id VARCHAR2(50) PRIMARY KEY, name VARCHAR2(255), status VARCHAR2(50), description_2_id VARCHAR2(50))", tables, Set.of("reference_id", "name", "status", "description_2_id"), isOracle);
-            executeTableSqlSafe(stmt, "Description1List", "CREATE TABLE Description1List (description_1_id VARCHAR2(50) PRIMARY KEY, record_type VARCHAR2(50), name VARCHAR2(255))", tables, Set.of("description_1_id", "record_type", "name"), isOracle);
-            executeTableSqlSafe(stmt, "Description2List", "CREATE TABLE Description2List (description_2_id VARCHAR2(50) PRIMARY KEY, description_1_id VARCHAR2(50), name VARCHAR2(255))", tables, Set.of("description_2_id", "description_1_id", "name"), isOracle);
-            executeTableSqlSafe(stmt, "Description3List", "CREATE TABLE Description3List (description_3_id VARCHAR2(50) PRIMARY KEY, description_2_id VARCHAR2(50), name VARCHAR2(255))", tables, Set.of("description_3_id", "description_2_id", "name"), isOracle);
-            executeTableSqlSafe(stmt, "DateTypeList", "CREATE TABLE DateTypeList (id VARCHAR2(50) PRIMARY KEY, record_type VARCHAR2(50), name VARCHAR2(100))", tables, Set.of("id", "record_type", "name"), isOracle);
-            executeTableSqlSafe(stmt, "NameTypeList", "CREATE TABLE NameTypeList (name_type_id VARCHAR2(50) PRIMARY KEY, record_type VARCHAR2(50), name VARCHAR2(100))", tables, Set.of("name_type_id", "record_type", "name"), isOracle);
-            executeTableSqlSafe(stmt, "RoleTypeList", "CREATE TABLE RoleTypeList (id VARCHAR2(50) PRIMARY KEY, name VARCHAR2(100))", tables, Set.of("id", "name"), isOracle);
+        for (Map.Entry<String, List<FieldMapping>> entry : byTable.entrySet()) {
+            String tableName = entry.getKey();
+            List<FieldMapping> tblMappings = entry.getValue();
 
-            executeTableSqlSafe(stmt, "Person", "CREATE TABLE Person (person_id NUMBER(10) PRIMARY KEY, action VARCHAR2(50), record_date DATE, gender VARCHAR2(20), active_status VARCHAR2(50), deceased VARCHAR2(10), birth_place VARCHAR2(255), profile_notes CLOB, extra_attributes CLOB)", tables, personCols, isOracle);
-            executeTableSqlSafe(stmt, "PersonName", "CREATE TABLE PersonName (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), name_type VARCHAR2(100), first_name VARCHAR2(100), surname VARCHAR2(100))", tables, Set.of("id", "person_id", "name_type", "first_name", "surname"), isOracle);
-            executeTableSqlSafe(stmt, "PersonDescription", "CREATE TABLE PersonDescription (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), description_1_id VARCHAR2(50), description_2_id VARCHAR2(50), description_3_id VARCHAR2(50))", tables, Set.of("id", "person_id", "description_1_id", "description_2_id", "description_3_id"), isOracle);
-            executeTableSqlSafe(stmt, "PersonRole", "CREATE TABLE PersonRole (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), role_type VARCHAR2(100), occ_title VARCHAR2(255), occ_cat VARCHAR2(50), since_day VARCHAR2(2), since_month VARCHAR2(10), since_year VARCHAR2(4), to_day VARCHAR2(2), to_month VARCHAR2(10), to_year VARCHAR2(4))", tables, Set.of("id", "person_id", "role_type", "occ_title", "occ_cat", "since_day", "since_month", "since_year", "to_day", "to_month", "to_year"), isOracle);
-            executeTableSqlSafe(stmt, "PersonDate", "CREATE TABLE PersonDate (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), date_type VARCHAR2(100), \"day\" VARCHAR2(2), \"month\" VARCHAR2(10), \"year\" VARCHAR2(4))", tables, Set.of("id", "person_id", "date_type", "day", "month", "year"), isOracle);
-            executeTableSqlSafe(stmt, "PersonSanctionsReference", "CREATE TABLE PersonSanctionsReference (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), reference_id VARCHAR2(50), since_day VARCHAR2(2), since_month VARCHAR2(10), since_year VARCHAR2(4))", tables, Set.of("id", "person_id", "reference_id", "since_day", "since_month", "since_year"), isOracle);
-            executeTableSqlSafe(stmt, "PersonCountry", "CREATE TABLE PersonCountry (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), country_type VARCHAR2(100), country_code VARCHAR2(10))", tables, Set.of("id", "person_id", "country_type", "country_code"), isOracle);
-            executeTableSqlSafe(stmt, "PersonIDNumber", "CREATE TABLE PersonIDNumber (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), id_type VARCHAR2(100), id_value VARCHAR2(255))", tables, Set.of("id", "person_id", "id_type", "id_value"), isOracle);
-            executeTableSqlSafe(stmt, "PersonSource", "CREATE TABLE PersonSource (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), source_url CLOB)", tables, Set.of("id", "person_id", "source_url"), isOracle);
-            executeTableSqlSafe(stmt, "PersonImage", "CREATE TABLE PersonImage (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, person_id NUMBER(10), image_url CLOB)", tables, Set.of("id", "person_id", "image_url"), isOracle);
+            Set<String> desiredCols = new LinkedHashSet<>();
+            String pkCol = null;
+            for (FieldMapping m : tblMappings) {
+                if ("PK".equalsIgnoreCase(m.getConstraintType()) && m.getTargetColumn() != null) {
+                    pkCol = m.getTargetColumn().trim();
+                    break;
+                }
+            }
 
-            // Flattened Person table
-            executeTableSqlSafe(stmt, "PersonFlat", "CREATE TABLE PersonFlat (person_id NUMBER(10) PRIMARY KEY, action VARCHAR2(50), record_date DATE, gender VARCHAR2(20), active_status VARCHAR2(50), deceased VARCHAR2(10), birth_place VARCHAR2(255), first_name VARCHAR2(100), surname VARCHAR2(100), name_type VARCHAR2(100), primary_occupation VARCHAR2(255), roles CLOB, date_of_birth VARCHAR2(50), citizenship VARCHAR2(50), sanctions_id VARCHAR2(100), profile_notes CLOB, extra_attributes CLOB, raw_payload CLOB)", tables, flatCols, isOracle);
-        } else {
-            // PostgreSQL and H2
-            executeTableSqlSafe(stmt, "CountryList", "CREATE TABLE IF NOT EXISTS CountryList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100), is_territory BOOLEAN, profile_url VARCHAR(255))", tables, Set.of("code", "name", "is_territory", "profile_url"), isOracle);
-            executeTableSqlSafe(stmt, "OccupationList", "CREATE TABLE IF NOT EXISTS OccupationList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(255))", tables, Set.of("code", "name"), isOracle);
-            executeTableSqlSafe(stmt, "RelationshipList", "CREATE TABLE IF NOT EXISTS RelationshipList (code VARCHAR(50) PRIMARY KEY, name VARCHAR(100))", tables, Set.of("code", "name"), isOracle);
-            executeTableSqlSafe(stmt, "SanctionsReferencesList", "CREATE TABLE IF NOT EXISTS SanctionsReferencesList (reference_id VARCHAR(50) PRIMARY KEY, name VARCHAR(255), status VARCHAR(50), description_2_id VARCHAR(50))", tables, Set.of("reference_id", "name", "status", "description_2_id"), isOracle);
-            executeTableSqlSafe(stmt, "Description1List", "CREATE TABLE IF NOT EXISTS Description1List (description_1_id VARCHAR(50) PRIMARY KEY, record_type VARCHAR(50), name VARCHAR(255))", tables, Set.of("description_1_id", "record_type", "name"), isOracle);
-            executeTableSqlSafe(stmt, "Description2List", "CREATE TABLE IF NOT EXISTS Description2List (description_2_id VARCHAR(50) PRIMARY KEY, description_1_id VARCHAR(50), name VARCHAR(255))", tables, Set.of("description_2_id", "description_1_id", "name"), isOracle);
-            executeTableSqlSafe(stmt, "Description3List", "CREATE TABLE IF NOT EXISTS Description3List (description_3_id VARCHAR(50) PRIMARY KEY, description_2_id VARCHAR(50), name VARCHAR(255))", tables, Set.of("description_3_id", "description_2_id", "name"), isOracle);
-            executeTableSqlSafe(stmt, "DateTypeList", "CREATE TABLE IF NOT EXISTS DateTypeList (id VARCHAR(50) PRIMARY KEY, record_type VARCHAR(50), name VARCHAR(100))", tables, Set.of("id", "record_type", "name"), isOracle);
-            executeTableSqlSafe(stmt, "NameTypeList", "CREATE TABLE IF NOT EXISTS NameTypeList (name_type_id VARCHAR(50) PRIMARY KEY, record_type VARCHAR(50), name VARCHAR(100))", tables, Set.of("name_type_id", "record_type", "name"), isOracle);
-            executeTableSqlSafe(stmt, "RoleTypeList", "CREATE TABLE IF NOT EXISTS RoleTypeList (id VARCHAR(50) PRIMARY KEY, name VARCHAR(100))", tables, Set.of("id", "name"), isOracle);
+            StringBuilder colDefs = new StringBuilder();
+            if (pkCol != null) {
+                desiredCols.add(pkCol.toLowerCase());
+                String pkType = isOracle ? "NUMBER(19) PRIMARY KEY" : "BIGINT PRIMARY KEY";
+                colDefs.append(pkCol).append(" ").append(pkType);
+            } else {
+                desiredCols.add("id");
+                String idType = isOracle ? "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" : "id BIGSERIAL PRIMARY KEY";
+                colDefs.append(idType);
+            }
 
-            executeTableSqlSafe(stmt, "Person", "CREATE TABLE IF NOT EXISTS Person (person_id INT PRIMARY KEY, action VARCHAR(50), record_date DATE, gender VARCHAR(20), active_status VARCHAR(50), deceased VARCHAR(10), birth_place VARCHAR(255), profile_notes TEXT, extra_attributes TEXT)", tables, personCols, isOracle);
+            for (FieldMapping m : tblMappings) {
+                String col = m.getTargetColumn();
+                if (col == null || col.trim().isEmpty()) continue;
+                col = col.trim();
+                String colNorm = col.toLowerCase();
+                if (desiredCols.contains(colNorm)) continue;
+                desiredCols.add(colNorm);
 
-            executeTableSqlSafe(stmt, "PersonName", "CREATE TABLE IF NOT EXISTS PersonName (id SERIAL PRIMARY KEY, person_id INT, name_type VARCHAR(100), first_name VARCHAR(100), surname VARCHAR(100))", tables, Set.of("id", "person_id", "name_type", "first_name", "surname"), isOracle);
-            executeTableSqlSafe(stmt, "PersonDescription", "CREATE TABLE IF NOT EXISTS PersonDescription (id SERIAL PRIMARY KEY, person_id INT, description_1_id VARCHAR(50), description_2_id VARCHAR(50), description_3_id VARCHAR(50))", tables, Set.of("id", "person_id", "description_1_id", "description_2_id", "description_3_id"), isOracle);
-            executeTableSqlSafe(stmt, "PersonRole", "CREATE TABLE IF NOT EXISTS PersonRole (id SERIAL PRIMARY KEY, person_id INT, role_type VARCHAR(100), occ_title VARCHAR(255), occ_cat VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4), to_day VARCHAR(2), to_month VARCHAR(10), to_year VARCHAR(4))", tables, Set.of("id", "person_id", "role_type", "occ_title", "occ_cat", "since_day", "since_month", "since_year", "to_day", "to_month", "to_year"), isOracle);
-            executeTableSqlSafe(stmt, "PersonDate", "CREATE TABLE IF NOT EXISTS PersonDate (id SERIAL PRIMARY KEY, person_id INT, date_type VARCHAR(100), \"day\" VARCHAR(2), \"month\" VARCHAR(10), \"year\" VARCHAR(4))", tables, Set.of("id", "person_id", "date_type", "day", "month", "year"), isOracle);
-            executeTableSqlSafe(stmt, "PersonSanctionsReference", "CREATE TABLE IF NOT EXISTS PersonSanctionsReference (id SERIAL PRIMARY KEY, person_id INT, reference_id VARCHAR(50), since_day VARCHAR(2), since_month VARCHAR(10), since_year VARCHAR(4))", tables, Set.of("id", "person_id", "reference_id", "since_day", "since_month", "since_year"), isOracle);
-            executeTableSqlSafe(stmt, "PersonCountry", "CREATE TABLE IF NOT EXISTS PersonCountry (id SERIAL PRIMARY KEY, person_id INT, country_type VARCHAR(100), country_code VARCHAR(10))", tables, Set.of("id", "person_id", "country_type", "country_code"), isOracle);
-            executeTableSqlSafe(stmt, "PersonIDNumber", "CREATE TABLE IF NOT EXISTS PersonIDNumber (id SERIAL PRIMARY KEY, person_id INT, id_type VARCHAR(100), id_value VARCHAR(255))", tables, Set.of("id", "person_id", "id_type", "id_value"), isOracle);
-            executeTableSqlSafe(stmt, "PersonSource", "CREATE TABLE IF NOT EXISTS PersonSource (id SERIAL PRIMARY KEY, person_id INT, source_url TEXT)", tables, Set.of("id", "person_id", "source_url"), isOracle);
-            executeTableSqlSafe(stmt, "PersonImage", "CREATE TABLE IF NOT EXISTS PersonImage (id SERIAL PRIMARY KEY, person_id INT, image_url TEXT)", tables, Set.of("id", "person_id", "image_url"), isOracle);
+                String xmlField = m.getXmlField() != null ? m.getXmlField().toLowerCase() : "";
+                String detectedType = typeLookup.get(xmlField);
+                if (detectedType == null) {
+                    String simpleXml = xmlField.contains("/") ? xmlField.substring(xmlField.lastIndexOf("/") + 1).replace("@", "") : xmlField.replace("@", "");
+                    detectedType = typeLookup.get(simpleXml);
+                }
 
-            // Flattened Person table
-            executeTableSqlSafe(stmt, "PersonFlat", "CREATE TABLE IF NOT EXISTS PersonFlat (person_id INT PRIMARY KEY, action VARCHAR(50), record_date DATE, gender VARCHAR(20), active_status VARCHAR(50), deceased VARCHAR(10), birth_place VARCHAR(255), first_name VARCHAR(100), surname VARCHAR(100), name_type VARCHAR(100), primary_occupation VARCHAR(255), roles TEXT, date_of_birth VARCHAR(50), citizenship VARCHAR(50), sanctions_id VARCHAR(100), profile_notes TEXT, extra_attributes TEXT, raw_payload TEXT)", tables, flatCols, isOracle);
+                String sqlColType = "VARCHAR(255)";
+                if (detectedType != null) {
+                    if (detectedType.equalsIgnoreCase("BIGINT") || detectedType.equalsIgnoreCase("INT") || detectedType.equalsIgnoreCase("INTEGER")) {
+                        sqlColType = isOracle ? "NUMBER(19)" : "BIGINT";
+                    } else if (detectedType.equalsIgnoreCase("NUMERIC") || detectedType.equalsIgnoreCase("DECIMAL")) {
+                        sqlColType = isOracle ? "NUMBER(15,2)" : "NUMERIC(15,2)";
+                    } else if (detectedType.equalsIgnoreCase("BOOLEAN")) {
+                        sqlColType = isOracle ? "NUMBER(1)" : "BOOLEAN";
+                    } else if (detectedType.equalsIgnoreCase("TIMESTAMP") || detectedType.equalsIgnoreCase("DATE")) {
+                        sqlColType = isOracle ? "DATE" : "TIMESTAMP";
+                    }
+                }
+                if (colNorm.contains("note") || colNorm.contains("desc") || colNorm.contains("payload")
+                        || colNorm.contains("extra") || colNorm.contains("attribute") || colNorm.contains("url")
+                        || colNorm.contains("roles") || colNorm.contains("image") || colNorm.contains("source")) {
+                    sqlColType = isOracle ? "CLOB" : "TEXT";
+                }
+
+                String safeCol = col.replaceAll("[^a-zA-Z0-9_]", "_");
+                String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(colNorm)
+                        ? "\"" + safeCol + "\"" : safeCol;
+                colDefs.append(", ").append(quotedCol).append(" ").append(sqlColType);
+            }
+
+            desiredCols.add("extra_attributes");
+            colDefs.append(", extra_attributes ").append(isOracle ? "CLOB" : "TEXT");
+
+            String createSql;
+            if (isOracle) {
+                createSql = "CREATE TABLE " + tableName + " (" + colDefs + ")";
+            } else {
+                createSql = "CREATE TABLE IF NOT EXISTS " + tableName + " (" + colDefs + ")";
+            }
+
+            executeTableSqlSafe(stmt, tableName, createSql, tables, desiredCols, isOracle);
+        }
+
+        // Add foreign key constraints defined in mappings
+        for (FieldMapping m : mappings) {
+            if ("FK".equalsIgnoreCase(m.getConstraintType())
+                    && m.getTargetTable() != null
+                    && m.getTargetColumn() != null
+                    && m.getForeignKeyTable() != null
+                    && m.getForeignKeyColumn() != null) {
+                String targetTable = m.getTargetTable().trim();
+                String targetCol = m.getTargetColumn().trim();
+                String refTable = m.getForeignKeyTable().trim();
+                String refCol = m.getForeignKeyColumn().trim();
+                String fkName = "fk_" + targetTable.toLowerCase() + "_" + targetCol.toLowerCase() + "_" + refTable.toLowerCase();
+                if (fkName.length() > 30) {
+                    fkName = fkName.substring(0, 30);
+                }
+                try {
+                    String fkSql = "ALTER TABLE " + targetTable + " ADD CONSTRAINT " + fkName
+                            + " FOREIGN KEY (" + targetCol + ") REFERENCES " + refTable + "(" + refCol + ")";
+                    stmt.execute(fkSql);
+                    log.info("Provisioned FK constraint '{}' linking {}.{} to {}.{}", fkName, targetTable, targetCol, refTable, refCol);
+                } catch (Exception ex) {
+                    log.debug("FK constraint notice for {}.{}: {}", targetTable, targetCol, ex.getMessage());
+                }
+            }
         }
 
         return tables;
     }
 
-    private List<String> provisionGenericXmlTables(Statement stmt,
-                                                  String recordRootElement,
-                                                  List<DiscoveredElement> discoveredXmlElements,
-                                                  boolean isOracle) {
+    /**
+     * Provisions normalized canonical tables dynamically from discovered XML hierarchy:
+     * - Master Entity Table (<rootTag>) with ID PK and <rootTag>_id.
+     * - 1-to-N Child Tables (<rootTag>_<childGroup> and <rootTag><childGroup>) with FK linking.
+     */
+    public List<String> provisionDynamicRelationalTables(Statement stmt,
+                                                         String recordRootElement,
+                                                         List<DiscoveredElement> discoveredXmlElements,
+                                                         boolean isOracle) {
         List<String> tables = new ArrayList<>();
-        String rootTable = (recordRootElement != null && !recordRootElement.trim().isEmpty())
-                ? recordRootElement.trim()
-                : "records";
+        if (stmt == null || recordRootElement == null || recordRootElement.trim().isEmpty()) {
+            return tables;
+        }
 
-        // Filter out non-alphanumeric chars for valid SQL table name
-        String safeRootTable = rootTable.replaceAll("[^a-zA-Z0-9_]", "_");
+        String safeRootTable = recordRootElement.replaceAll("[^a-zA-Z0-9_]", "_");
+        String rootNorm = safeRootTable.toLowerCase();
+        String masterIdCol = rootNorm + "_id";
 
-        StringBuilder cols = new StringBuilder();
-        Set<String> addedCols = new LinkedHashSet<>();
-        addedCols.add("id");
+        Set<String> masterCols = new LinkedHashSet<>();
+        masterCols.add("id");
+        masterCols.add(masterIdCol);
 
+        StringBuilder masterColDefs = new StringBuilder();
+        if (isOracle) {
+            masterColDefs.append("id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, ").append(masterIdCol).append(" NUMBER(19)");
+        } else {
+            masterColDefs.append("id BIGSERIAL PRIMARY KEY, ").append(masterIdCol).append(" BIGINT");
+        }
+
+        // Direct child leaf elements belonging to root
         if (discoveredXmlElements != null) {
             for (DiscoveredElement el : discoveredXmlElements) {
                 String rawName = el.getName();
-                String col = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
-                col = col.replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
-                if (col.isEmpty() || addedCols.contains(col)) continue;
+                String enclosing = el.getEnclosingTag() != null ? el.getEnclosingTag().toLowerCase() : "";
+                boolean directChild = enclosing.equalsIgnoreCase(rootNorm)
+                        || rawName.toLowerCase().startsWith(rootNorm + "/@")
+                        || (!rawName.contains("/") && !rawName.startsWith("@") && enclosing.isEmpty());
 
-                addedCols.add(col);
-                String colType = el.getDetectedType() != null ? el.getDetectedType() : "VARCHAR(255)";
-                if (colType.equalsIgnoreCase("VARCHAR")) colType = "VARCHAR(255)";
-                if (isOracle && colType.equalsIgnoreCase("TEXT")) colType = "CLOB";
-
-                cols.append(", ").append(col).append(" ").append(colType);
+                if (directChild) {
+                    String col = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
+                    col = col.replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                    if (!col.isEmpty() && !masterCols.contains(col) && !col.equals("id") && !col.equals(masterIdCol)) {
+                        masterCols.add(col);
+                        String colType = el.getDetectedType() != null ? el.getDetectedType() : "VARCHAR(255)";
+                        if (colType.equalsIgnoreCase("VARCHAR")) colType = "VARCHAR(255)";
+                        if (isOracle && colType.equalsIgnoreCase("TEXT")) colType = "CLOB";
+                        String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col)
+                                ? "\"" + col + "\"" : col;
+                        masterColDefs.append(", ").append(quotedCol).append(" ").append(colType);
+                    }
+                }
             }
         }
 
-        // Create Generic Master Table
-        String createSql;
-        if (isOracle) {
-            createSql = "CREATE TABLE " + safeRootTable + " (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" + cols + ", extra_attributes CLOB)";
-        } else {
-            createSql = "CREATE TABLE IF NOT EXISTS " + safeRootTable + " (id SERIAL PRIMARY KEY" + cols + ", extra_attributes TEXT)";
-        }
+        masterCols.add("extra_attributes");
+        masterColDefs.append(", extra_attributes ").append(isOracle ? "CLOB" : "TEXT");
 
-        executeTableSqlSafe(stmt, safeRootTable, createSql, tables, addedCols, isOracle);
-
-        // Also create a flattened table for generic XML
-        String flatTable = safeRootTable + "_flat";
-        String createFlatSql;
+        String masterSql;
         if (isOracle) {
-            createFlatSql = "CREATE TABLE " + flatTable + " (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" + cols + ", raw_payload CLOB, extra_attributes CLOB)";
+            masterSql = "CREATE TABLE " + safeRootTable + " (" + masterColDefs + ")";
         } else {
-            createFlatSql = "CREATE TABLE IF NOT EXISTS " + flatTable + " (id SERIAL PRIMARY KEY" + cols + ", raw_payload TEXT, extra_attributes TEXT)";
+            masterSql = "CREATE TABLE IF NOT EXISTS " + safeRootTable + " (" + masterColDefs + ")";
         }
-        executeTableSqlSafe(stmt, flatTable, createFlatSql, tables, addedCols, isOracle);
+        executeTableSqlSafe(stmt, safeRootTable, masterSql, tables, masterCols, isOracle);
 
         // Identify nested tag groups for canonical 1-to-N child tables
         Map<String, Set<String>> childGroups = new LinkedHashMap<>();
@@ -290,36 +411,383 @@ public class SchemaProvisioningService {
             for (DiscoveredElement el : discoveredXmlElements) {
                 String rawName = el.getName();
                 String[] parts = rawName.split("/");
-                if (parts.length >= 3) {
-                    // e.g. record/items/item or product/pricing/tier
-                    String childEntity = parts[parts.length - 2].replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                if (parts.length >= 3 && parts[0].equalsIgnoreCase(safeRootTable)) {
+                    // e.g. Person/NameDetails/Name/NameValue/FirstName or Order/Items/Item/Sku
+                    String childEntity = parts[1].replaceAll("[^a-zA-Z0-9_]", "_");
+                    String containerBase = childEntity.replaceAll("(?i)(types|type|details|detail|description|descriptions|lists|list)$", "");
+                    if (parts.length >= 4 && (childEntity.toLowerCase().endsWith("details")
+                            || childEntity.toLowerCase().endsWith("detail")
+                            || childEntity.toLowerCase().endsWith("description")
+                            || childEntity.toLowerCase().endsWith("descriptions")
+                            || childEntity.toLowerCase().endsWith("types")
+                            || childEntity.toLowerCase().endsWith("type")
+                            || childEntity.toLowerCase().endsWith("s")
+                            || childEntity.toLowerCase().endsWith("list")
+                            || childEntity.toLowerCase().endsWith("lists"))) {
+                        childEntity = parts[2].replaceAll("[^a-zA-Z0-9_]", "_");
+                    }
                     String col = parts[parts.length - 1].replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
                     if (!childEntity.equalsIgnoreCase(safeRootTable) && !col.isEmpty()) {
                         childGroups.computeIfAbsent(childEntity, k -> new LinkedHashSet<>()).add(col);
+                        if (!containerBase.isEmpty() && !containerBase.equalsIgnoreCase(childEntity) && !containerBase.equalsIgnoreCase(safeRootTable)) {
+                            childGroups.computeIfAbsent(containerBase, k -> new LinkedHashSet<>()).add(col);
+                        }
                     }
                 }
             }
         }
 
-        // Provision canonical 1-to-N child tables for detected repeating child groups
+        // Provision canonical 1-to-N child tables with Foreign Key linking
         for (Map.Entry<String, Set<String>> group : childGroups.entrySet()) {
-            String childTable = safeRootTable + "_" + group.getKey();
-            StringBuilder childCols = new StringBuilder();
-            Set<String> childDesiredCols = new LinkedHashSet<>(List.of("id", safeRootTable + "_id"));
-            for (String col : group.getValue()) {
-                if (!col.equalsIgnoreCase("id") && !col.equalsIgnoreCase(safeRootTable + "_id")) {
-                    childCols.append(", ").append(col).append(" VARCHAR(255)");
-                    childDesiredCols.add(col);
+            String entityName = group.getKey();
+            // Provision direct entity name (e.g. address), snake_case (e.g. person_address), and PascalCase variants
+            String singular = DynamicXmlUnmarshaller.singularize(entityName);
+            List<String> childTableVariants = new ArrayList<>();
+            childTableVariants.add(entityName.toLowerCase());
+            childTableVariants.add(safeRootTable + "_" + entityName);
+            childTableVariants.add(safeRootTable + entityName);
+            if (!singular.equalsIgnoreCase(entityName)) {
+                childTableVariants.add(singular.toLowerCase());
+                childTableVariants.add(safeRootTable + "_" + singular);
+                childTableVariants.add(safeRootTable + singular);
+            }
+
+            for (String childTable : childTableVariants) {
+                StringBuilder childCols = new StringBuilder();
+                Set<String> childDesiredCols = new LinkedHashSet<>(List.of("id", masterIdCol));
+                for (String col : group.getValue()) {
+                    if (!col.equalsIgnoreCase("id") && !col.equalsIgnoreCase(masterIdCol)) {
+                        String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col.toLowerCase())
+                                ? "\"" + col + "\"" : col;
+                        childCols.append(", ").append(quotedCol).append(" VARCHAR(255)");
+                        childDesiredCols.add(col);
+                    }
+                }
+                childDesiredCols.add("extra_attributes");
+                childCols.append(", extra_attributes ").append(isOracle ? "CLOB" : "TEXT");
+
+                String childSql;
+                if (isOracle) {
+                    childSql = "CREATE TABLE " + childTable + " (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " + masterIdCol + " NUMBER(19)" + childCols + ")";
+                } else {
+                    childSql = "CREATE TABLE IF NOT EXISTS " + childTable + " (id BIGSERIAL PRIMARY KEY, " + masterIdCol + " BIGINT" + childCols + ")";
+                }
+                executeTableSqlSafe(stmt, childTable, childSql, tables, childDesiredCols, isOracle);
+
+                // Add Foreign Key constraint linking child table to master table
+                try {
+                    String fkSql = "ALTER TABLE " + childTable + " ADD CONSTRAINT fk_" + childTable + "_" + rootNorm
+                            + " FOREIGN KEY (" + masterIdCol + ") REFERENCES " + safeRootTable + "(id)";
+                    stmt.execute(fkSql);
+                } catch (Exception ignored) {}
+
+                // Add cross-reference foreign keys for columns ending in _id
+                for (String col : group.getValue()) {
+                    if (col.toLowerCase().endsWith("_id") && !col.equalsIgnoreCase(masterIdCol)) {
+                        String refTable = col.substring(0, col.length() - 3).toLowerCase();
+                        try {
+                            String fkSql = "ALTER TABLE " + childTable + " ADD CONSTRAINT fk_" + childTable + "_" + refTable
+                                    + " FOREIGN KEY (" + col + ") REFERENCES " + refTable + "(id)";
+                            stmt.execute(fkSql);
+                        } catch (Exception ignored) {}
+                    }
                 }
             }
-            String childSql;
-            if (isOracle) {
-                childSql = "CREATE TABLE " + childTable + " (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " + safeRootTable + "_id NUMBER(10)" + childCols + ")";
-            } else {
-                childSql = "CREATE TABLE IF NOT EXISTS " + childTable + " (id SERIAL PRIMARY KEY, " + safeRootTable + "_id INT" + childCols + ")";
-            }
-            executeTableSqlSafe(stmt, childTable, childSql, tables, childDesiredCols, isOracle);
         }
+
+        // Master table cross-reference FKs (e.g. country_id, countrylist_id)
+        for (String col : masterCols) {
+            if (col.toLowerCase().endsWith("_id") && !col.equalsIgnoreCase(masterIdCol) && !col.equalsIgnoreCase("id")) {
+                String refTable = col.substring(0, col.length() - 3).toLowerCase();
+                try {
+                    String fkSql = "ALTER TABLE " + safeRootTable + " ADD CONSTRAINT fk_" + rootNorm + "_" + refTable
+                            + " FOREIGN KEY (" + col + ") REFERENCES " + refTable + "(id)";
+                    stmt.execute(fkSql);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        return tables;
+    }
+
+    /**
+     * Provisions lookup / reference tables dynamically discovered from XML elements.
+     */
+    public List<String> provisionLookupTables(Statement stmt, List<DiscoveredElement> discoveredXmlElements, boolean isOracle) {
+        List<String> tables = new ArrayList<>();
+        if (stmt == null || discoveredXmlElements == null) return tables;
+
+        Map<String, Set<String>> lookupLists = new LinkedHashMap<>();
+        for (DiscoveredElement el : discoveredXmlElements) {
+            String rawName = el.getName();
+            String enclosing = el.getEnclosingTag() != null ? el.getEnclosingTag() : "";
+            String listTable = null;
+            if (enclosing.toLowerCase().endsWith("list") || enclosing.toLowerCase().endsWith("lists")) {
+                listTable = enclosing;
+            } else if (rawName.contains("/")) {
+                String[] parts = rawName.split("/");
+                for (String part : parts) {
+                    if (part.toLowerCase().endsWith("list") || part.toLowerCase().endsWith("lists")) {
+                        listTable = part;
+                        break;
+                    }
+                }
+            }
+            if (listTable != null) {
+                String col = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
+                col = col.replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                if (!col.isEmpty()) {
+                    lookupLists.computeIfAbsent(listTable, k -> new LinkedHashSet<>()).add(col);
+                }
+            }
+        }
+
+        for (Map.Entry<String, Set<String>> entry : lookupLists.entrySet()) {
+            String tableName = entry.getKey();
+            Set<String> cols = entry.getValue();
+
+            StringBuilder colDefs = new StringBuilder();
+            Set<String> desiredCols = new LinkedHashSet<>();
+
+            desiredCols.add("id");
+            colDefs.append(isOracle ? "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY" : "id BIGSERIAL PRIMARY KEY");
+
+            for (String col : cols) {
+                if (!col.equalsIgnoreCase("id") && !desiredCols.contains(col)) {
+                    desiredCols.add(col);
+                    String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col)
+                            ? "\"" + col + "\"" : col;
+                    colDefs.append(", ").append(quotedCol).append(" VARCHAR(255)");
+                }
+            }
+
+            String sql;
+            if (isOracle) {
+                sql = "CREATE TABLE " + tableName + " (" + colDefs + ")";
+            } else {
+                sql = "CREATE TABLE IF NOT EXISTS " + tableName + " (" + colDefs + ")";
+            }
+            executeTableSqlSafe(stmt, tableName, sql, tables, desiredCols, isOracle);
+        }
+
+        return tables;
+    }
+
+    /**
+     * Provisions a dedicated golden-source staging table for a specific XML root tag:
+     * e.g., person_stage, country_stage, entity_stage, etc.
+     * Contains audit, versioning, delta hash, direct leaf tag/attribute columns,
+     * and sub-tag JSON columns (e.g. addresses TEXT) to store nested XML structures in JSON format.
+     */
+    public List<String> provisionSpecificStagingTable(Statement stmt,
+                                                      String stageTable,
+                                                      String rootTag,
+                                                      List<DiscoveredElement> discoveredXmlElements,
+                                                      boolean isOracle) {
+        List<String> tables = new ArrayList<>();
+        if (stmt == null || stageTable == null || stageTable.trim().isEmpty()) {
+            return tables;
+        }
+
+        Set<String> desiredCols = new LinkedHashSet<>(List.of(
+                "job_execution_id", "record_identifier", "record_action", "record_date",
+                "xml_version", "schema_version", "payload_hash", "status",
+                "raw_payload", "extra_attributes"
+        ));
+
+        StringBuilder colDefs = new StringBuilder();
+        String tagNorm = rootTag != null ? rootTag.toLowerCase() : "";
+
+        // Detect complex sub-tags under rootTag (tags that contain nested elements)
+        Set<String> subTags = new LinkedHashSet<>();
+        if (discoveredXmlElements != null) {
+            for (DiscoveredElement el : discoveredXmlElements) {
+                String rawName = el.getName();
+                String[] parts = rawName.split("/");
+                if (parts.length >= 3 && parts[0].equalsIgnoreCase(tagNorm)) {
+                    // e.g. person/addresses/address or Person/NameDetails/Name/...
+                    String subTag = parts[1].toLowerCase().replace("@", "");
+                    subTags.add(subTag);
+                }
+            }
+        }
+
+        // Direct leaf elements and attributes belonging to root
+        if (discoveredXmlElements != null) {
+            for (DiscoveredElement el : discoveredXmlElements) {
+                String rawName = el.getName();
+                String enclosing = el.getEnclosingTag() != null ? el.getEnclosingTag().toLowerCase() : "";
+                boolean directChild = enclosing.equalsIgnoreCase(tagNorm)
+                        || rawName.toLowerCase().startsWith(tagNorm + "/@")
+                        || (rawName.toLowerCase().startsWith(tagNorm + "/") && rawName.split("/").length == 2)
+                        || (!rawName.contains("/") && !rawName.startsWith("@") && enclosing.isEmpty());
+
+                if (directChild) {
+                    String col = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
+                    col = col.replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                    if (!col.isEmpty() && !desiredCols.contains(col) && !col.equalsIgnoreCase("id") && !subTags.contains(col)) {
+                        desiredCols.add(col);
+                        String colType = isOracle ? "CLOB" : "TEXT";
+                        String safeCol = col;
+                        String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col)
+                                ? "\"" + safeCol + "\"" : safeCol;
+                        colDefs.append(", ").append(quotedCol).append(" ").append(colType);
+                    }
+                }
+            }
+        }
+
+        // Sub-tags: store nested details in JSON format (TEXT/CLOB column)
+        for (String subTag : subTags) {
+            String safeSubTag = subTag.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+            if (!desiredCols.contains(safeSubTag) && !safeSubTag.equalsIgnoreCase("id")) {
+                desiredCols.add(safeSubTag);
+                String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(safeSubTag)
+                        ? "\"" + safeSubTag + "\"" : safeSubTag;
+                colDefs.append(", ").append(quotedCol).append(" ").append(isOracle ? "CLOB" : "TEXT");
+            }
+        }
+
+        String createSql;
+        if (isOracle) {
+            createSql = "CREATE TABLE " + stageTable + " (" +
+                    "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                    "job_execution_id NUMBER(19), " +
+                    "record_identifier VARCHAR2(100), " +
+                    "record_action VARCHAR2(50), " +
+                    "record_date VARCHAR2(50), " +
+                    "xml_version VARCHAR2(50), " +
+                    "schema_version VARCHAR2(50), " +
+                    "payload_hash VARCHAR2(64), " +
+                    "status VARCHAR2(30) DEFAULT 'STAGED', " +
+                    "raw_payload CLOB, " +
+                    "extra_attributes CLOB" +
+                    colDefs + ", " +
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                    ")";
+        } else {
+            createSql = "CREATE TABLE IF NOT EXISTS " + stageTable + " (" +
+                    "id BIGSERIAL PRIMARY KEY, " +
+                    "job_execution_id BIGINT, " +
+                    "record_identifier VARCHAR(100), " +
+                    "record_action VARCHAR(50), " +
+                    "record_date VARCHAR(50), " +
+                    "xml_version VARCHAR(50), " +
+                    "schema_version VARCHAR(50), " +
+                    "payload_hash VARCHAR(64), " +
+                    "status VARCHAR(30) DEFAULT 'STAGED', " +
+                    "raw_payload TEXT, " +
+                    "extra_attributes TEXT" +
+                    colDefs + ", " +
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                    ")";
+        }
+
+        executeTableSqlSafe(stmt, stageTable, createSql, tables, desiredCols, isOracle);
+        return tables;
+    }
+
+    /**
+     * Provisions a dedicated flattened staging table for a specific XML root tag:
+     * e.g., person_flat, countryname_flat, order_flat, etc.
+     * Contains audit, versioning, delta hash, and leaf tag columns.
+     */
+    public List<String> provisionSpecificFlattenedTable(Statement stmt,
+                                                        String flatTable,
+                                                        String rootTag,
+                                                        List<DiscoveredElement> discoveredXmlElements,
+                                                        boolean isOracle) {
+        List<String> tables = new ArrayList<>();
+        if (stmt == null || flatTable == null || flatTable.trim().isEmpty()) {
+            return tables;
+        }
+
+        Set<String> desiredCols = new LinkedHashSet<>(List.of(
+                "job_execution_id", "record_identifier", "record_action", "record_date",
+                "xml_version", "schema_version", "payload_hash", "status",
+                "raw_payload", "extra_attributes"
+        ));
+
+        StringBuilder colDefs = new StringBuilder();
+        if (discoveredXmlElements != null) {
+            String tagNorm = rootTag != null ? rootTag.toLowerCase() : "";
+            for (DiscoveredElement el : discoveredXmlElements) {
+                String rawName = el.getName();
+                String enclosing = el.getEnclosingTag() != null ? el.getEnclosingTag().toLowerCase() : "";
+                boolean matchesTag = false;
+                if (!enclosing.isEmpty() && enclosing.equalsIgnoreCase(tagNorm)) {
+                    matchesTag = true;
+                } else if (rawName.toLowerCase().startsWith(tagNorm + "/") || rawName.toLowerCase().startsWith(tagNorm + "/@")) {
+                    matchesTag = true;
+                } else if (enclosing.isEmpty() || !rawName.contains("/")) {
+                    matchesTag = true;
+                }
+
+                if (matchesTag) {
+                    String col = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
+                    col = col.replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                    if (!col.isEmpty() && !desiredCols.contains(col) && !col.equalsIgnoreCase("id")) {
+                        desiredCols.add(col);
+                        String colType = el.getDetectedType() != null ? el.getDetectedType() : "VARCHAR(255)";
+                        if (colType.equalsIgnoreCase("VARCHAR")) colType = "VARCHAR(255)";
+                        if (isOracle && colType.equalsIgnoreCase("TEXT")) colType = "CLOB";
+                        String safeCol = col;
+                        String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col)
+                                ? "\"" + safeCol + "\"" : safeCol;
+                        colDefs.append(", ").append(quotedCol).append(" ").append(colType);
+                    }
+                }
+            }
+        }
+
+        String createSql;
+        if (isOracle) {
+            createSql = "CREATE TABLE " + flatTable + " (" +
+                    "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                    "job_execution_id NUMBER(19), " +
+                    "record_identifier VARCHAR2(100), " +
+                    "record_action VARCHAR2(50), " +
+                    "record_date VARCHAR2(50), " +
+                    "xml_version VARCHAR2(50), " +
+                    "schema_version VARCHAR2(50), " +
+                    "payload_hash VARCHAR2(64), " +
+                    "status VARCHAR2(30) DEFAULT 'STAGED', " +
+                    "raw_payload CLOB, " +
+                    "extra_attributes CLOB" +
+                    colDefs + ", " +
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                    ")";
+        } else {
+            createSql = "CREATE TABLE IF NOT EXISTS " + flatTable + " (" +
+                    "id BIGSERIAL PRIMARY KEY, " +
+                    "job_execution_id BIGINT, " +
+                    "record_identifier VARCHAR(100), " +
+                    "record_action VARCHAR(50), " +
+                    "record_date VARCHAR(50), " +
+                    "xml_version VARCHAR(50), " +
+                    "schema_version VARCHAR(50), " +
+                    "payload_hash VARCHAR(64), " +
+                    "status VARCHAR(30) DEFAULT 'STAGED', " +
+                    "raw_payload TEXT, " +
+                    "extra_attributes TEXT" +
+                    colDefs + ", " +
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                    ")";
+        }
+
+        executeTableSqlSafe(stmt, flatTable, createSql, tables, desiredCols, isOracle);
+
+        try {
+            if (!isOracle) {
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_hash ON " + flatTable + "(record_identifier, payload_hash)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_status ON " + flatTable + "(status)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_version ON " + flatTable + "(xml_version, schema_version)");
+            }
+        } catch (Exception ignored) {}
 
         return tables;
     }
@@ -364,7 +832,7 @@ public class SchemaProvisioningService {
 
                 String norm = safeCol.toLowerCase();
                 String colType = "VARCHAR(255)";
-                if (norm.contains("note") || norm.contains("desc") || norm.contains("payload")
+                if (tableName.toLowerCase().endsWith("_stage") || norm.contains("note") || norm.contains("desc") || norm.contains("payload")
                         || norm.contains("extra") || norm.contains("attribute") || norm.contains("json")
                         || norm.contains("roles") || norm.contains("source") || norm.contains("image")) {
                     colType = isOracle ? "CLOB" : "TEXT";
@@ -404,6 +872,9 @@ public class SchemaProvisioningService {
             stmt.execute(sql);
             createdTables.add(tableName);
             log.info("Successfully provisioned table '{}' in target database.", tableName);
+            if (desiredColumns != null && !desiredColumns.isEmpty()) {
+                evolveExistingTableSchema(stmt, tableName, desiredColumns, isOracle);
+            }
         } catch (Exception ex) {
             // Table already exists or minor notice
             if (ex.getMessage() != null && (ex.getMessage().contains("already exists") || ex.getMessage().contains("ORA-00955"))) {
@@ -421,5 +892,102 @@ public class SchemaProvisioningService {
             }
         }
     }
-}
 
+    private List<DiscoveredElement> discoverXmlElementsInternal(String sourcePath, int maxLines) {
+        if (sourcePath == null || sourcePath.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        Map<String, DiscoveredElement> map = new LinkedHashMap<>();
+        try {
+            StringBuilder sample = new StringBuilder();
+            try (BufferedReader reader = openReaderForSource(sourcePath)) {
+                String line;
+                int count = 0;
+                while ((line = reader.readLine()) != null && count < maxLines) {
+                    sample.append(line).append("\n");
+                    count++;
+                }
+            }
+            XMLInputFactory factory = XMLInputFactory.newInstance();
+            factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+            factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+
+            XMLStreamReader stream = factory.createXMLStreamReader(new StringReader(sample.toString()));
+            Deque<String> stack = new ArrayDeque<>();
+            StringBuilder textBuffer = new StringBuilder();
+
+            while (stream.hasNext()) {
+                int event = stream.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    textBuffer.setLength(0);
+                    String local = stream.getLocalName();
+                    String parent = stack.peek();
+                    stack.push(local);
+
+                    List<String> pathList = new ArrayList<>(stack);
+                    Collections.reverse(pathList);
+                    String fullPath = String.join("/", pathList);
+                    // Record element tag
+                    map.putIfAbsent(fullPath, new DiscoveredElement(fullPath, parent, false, null, "VARCHAR(255)"));
+
+                    int attrCount = stream.getAttributeCount();
+                    for (int i = 0; i < attrCount; i++) {
+                        String attrName = stream.getAttributeLocalName(i);
+                        String attrVal = stream.getAttributeValue(i);
+                        String attrPath = fullPath + "/@" + attrName;
+                        map.putIfAbsent(attrPath, new DiscoveredElement(attrPath, local, true, attrVal, "VARCHAR(255)"));
+                    }
+                } else if (event == XMLStreamConstants.CHARACTERS || event == XMLStreamConstants.CDATA) {
+                    if (!stream.isWhiteSpace()) {
+                        textBuffer.append(stream.getText());
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    if (!stack.isEmpty()) {
+                        String popped = stack.pop();
+                        String text = textBuffer.toString().trim();
+                        if (!text.isEmpty()) {
+                            map.computeIfPresent(popped, (k, v) -> new DiscoveredElement(v.getName(), v.getParentTag(), v.isAttribute(), text, "VARCHAR(255)"));
+                        }
+                    }
+                    textBuffer.setLength(0);
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Notice parsing sample XML in SchemaProvisioningService: {}", ex.getMessage());
+        }
+        return new ArrayList<>(map.values());
+    }
+
+    private List<String> detectRootsFromElements(List<DiscoveredElement> elements) {
+        if (elements == null || elements.isEmpty()) return List.of("record");
+        Set<String> roots = new LinkedHashSet<>();
+        for (DiscoveredElement el : elements) {
+            String name = el.getName();
+            if (name != null && name.contains("/")) {
+                String[] parts = name.split("/");
+                if (parts.length >= 2 && !parts[0].toLowerCase().endsWith("list") && !parts[0].toLowerCase().endsWith("lists")) {
+                    roots.add(parts[0]);
+                } else if (parts.length >= 3) {
+                    roots.add(parts[1]);
+                }
+            }
+        }
+        return roots.isEmpty() ? List.of("record") : new ArrayList<>(roots);
+    }
+
+    private BufferedReader openReaderForSource(String sourcePath) throws Exception {
+        Path direct = Paths.get(sourcePath);
+        if (Files.exists(direct)) {
+            return Files.newBufferedReader(direct, StandardCharsets.UTF_8);
+        }
+        Resource res = resourceLoader.getResource(sourcePath);
+        if (res.exists()) {
+            return new BufferedReader(new InputStreamReader(res.getInputStream(), StandardCharsets.UTF_8));
+        }
+        Path relative = Paths.get("/home/sv/Projects/xmldbtool", sourcePath);
+        if (Files.exists(relative)) {
+            return Files.newBufferedReader(relative, StandardCharsets.UTF_8);
+        }
+        throw new IllegalArgumentException("Unable to locate source XML: " + sourcePath);
+    }
+}

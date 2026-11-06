@@ -20,7 +20,7 @@ import java.util.*;
 /**
  * Dynamic Schema Resolution and Normalization Service.
  * Projects flat staging data into normalized canonical relational tables
- * (Master Person entity + 1-to-N child relationships for attributes and roles)
+ * (Master entity + 1-to-N child relationships for attributes and nested structures)
  * governed by user-defined UI mapping configurations.
  * Supports delta processing using cross-database upsert logic and dynamically
  * handles schema evolution, unmapped attributes, and column mismatches.
@@ -60,7 +60,7 @@ public class DynamicSchemaResolutionService {
         List<String> resolvedTableOrder = DynamicJdbcBatchWriter.determineTableOrder(
                 tableOrder,
                 mappings,
-                targetMasterTable != null ? targetMasterTable : "Person"
+                targetMasterTable != null ? targetMasterTable : "record"
         );
 
         DatabaseErrorSkipListener skipListener = new DatabaseErrorSkipListener(targetDataSource, System.currentTimeMillis(), "stagingNormalizationStep");
@@ -78,7 +78,7 @@ public class DynamicSchemaResolutionService {
             }
         }
         DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor(
-                targetMasterTable != null ? targetMasterTable : "Person",
+                targetMasterTable != null ? targetMasterTable : "record",
                 mappings,
                 Collections.emptyMap(),
                 resolvedTableOrder
@@ -96,8 +96,8 @@ public class DynamicSchemaResolutionService {
 
         while (!stagedBatch.isEmpty()) {
             List<DatabaseRowPayload> payloads = new ArrayList<>(stagedBatch.size());
-            List<Long> successfulStagingIds = new ArrayList<>(stagedBatch.size());
-            Map<Long, String> failedStagingIds = new LinkedHashMap<>();
+            List<StagingXmlRecord> successfulRecords = new ArrayList<>(stagedBatch.size());
+            Map<StagingXmlRecord, String> failedRecords = new LinkedHashMap<>();
 
             for (StagingXmlRecord record : stagedBatch) {
                 totalProcessed++;
@@ -110,13 +110,11 @@ public class DynamicSchemaResolutionService {
                     DatabaseRowPayload payload = processor.process(rawMap);
                     if (payload != null) {
                         payloads.add(payload);
-                        successfulStagingIds.add(record.getId());
-                    } else {
-                        successfulStagingIds.add(record.getId());
                     }
+                    successfulRecords.add(record);
                 } catch (Exception ex) {
                     failedCount++;
-                    failedStagingIds.put(record.getId(), ex.getMessage());
+                    failedRecords.put(record, ex.getMessage());
                     log.error("Failed to project staging record #{} (id: {}): {}", record.getId(), record.getRecordIdentifier(), ex.getMessage());
                 }
             }
@@ -132,10 +130,10 @@ public class DynamicSchemaResolutionService {
             }
 
             // Update staging records status to NORMALIZED or FAILED
-            if (!successfulStagingIds.isEmpty()) {
-                updateStagingStatus(jdbcTemplate, successfulStagingIds, "NORMALIZED", null);
+            if (!successfulRecords.isEmpty()) {
+                updateStagingStatus(jdbcTemplate, successfulRecords, "NORMALIZED", null);
             }
-            for (Map.Entry<Long, String> entry : failedStagingIds.entrySet()) {
+            for (Map.Entry<StagingXmlRecord, String> entry : failedRecords.entrySet()) {
                 updateStagingStatus(jdbcTemplate, List.of(entry.getKey()), "FAILED", entry.getValue());
             }
 
@@ -207,14 +205,36 @@ public class DynamicSchemaResolutionService {
         });
     }
 
-    private void updateStagingStatus(JdbcTemplate jdbcTemplate, List<Long> ids, String status, String errorMessage) {
-        if (ids.isEmpty()) return;
-        String updateSql = "UPDATE staging_xml_records SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
-        jdbcTemplate.batchUpdate(updateSql, ids, ids.size(), (ps, id) -> {
-            ps.setString(1, status);
-            ps.setString(2, errorMessage);
-            ps.setLong(3, id);
-        });
+    private void updateStagingStatus(JdbcTemplate jdbcTemplate, List<StagingXmlRecord> records, String status, String errorMessage) {
+        if (records == null || records.isEmpty()) return;
+        List<Long> ids = records.stream().map(StagingXmlRecord::getId).filter(Objects::nonNull).toList();
+        if (!ids.isEmpty()) {
+            String updateSql = "UPDATE staging_xml_records SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
+            jdbcTemplate.batchUpdate(updateSql, ids, ids.size(), (ps, id) -> {
+                ps.setString(1, status);
+                ps.setString(2, errorMessage);
+                ps.setLong(3, id);
+            });
+        }
+
+        // Also update status in specific root flattened tables by identifier and payload hash
+        Map<String, List<StagingXmlRecord>> byEntity = new HashMap<>();
+        for (StagingXmlRecord r : records) {
+            if (r.getEntityType() != null) {
+                byEntity.computeIfAbsent(r.getEntityType(), k -> new ArrayList<>()).add(r);
+            }
+        }
+        for (Map.Entry<String, List<StagingXmlRecord>> entry : byEntity.entrySet()) {
+            String flatTable = entry.getKey().replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase() + "_flat";
+            try {
+                String flatUpdate = "UPDATE " + flatTable + " SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE record_identifier = ? AND payload_hash = ?";
+                jdbcTemplate.batchUpdate(flatUpdate, entry.getValue(), entry.getValue().size(), (ps, rec) -> {
+                    ps.setString(1, status);
+                    ps.setString(2, rec.getRecordIdentifier());
+                    ps.setString(3, rec.getPayloadHash());
+                });
+            } catch (Exception ignored) {}
+        }
     }
 }
 

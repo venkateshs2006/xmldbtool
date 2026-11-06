@@ -39,6 +39,7 @@
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/SystemMetrics.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/TableMetadata.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/TablePreviewData.java
+/home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/TableRelationship.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/User.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/service/DynamicBatchJobService.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/service/DynamicDataSourceService.java

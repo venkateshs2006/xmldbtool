@@ -17,6 +17,8 @@ public class StagingXmlRecord {
     private String recordDate;
     private String rawPayload;
     private String payloadHash;
+    private String xmlVersion;
+    private String schemaVersion;
     private String status; // STAGED, NORMALIZED, SKIPPED_UNCHANGED, FAILED
     private String errorMessage;
     private LocalDateTime createdAt;
@@ -61,6 +63,12 @@ public class StagingXmlRecord {
 
     public String getPayloadHash() { return payloadHash; }
     public void setPayloadHash(String payloadHash) { this.payloadHash = payloadHash; }
+
+    public String getXmlVersion() { return xmlVersion; }
+    public void setXmlVersion(String xmlVersion) { this.xmlVersion = xmlVersion; }
+
+    public String getSchemaVersion() { return schemaVersion; }
+    public void setSchemaVersion(String schemaVersion) { this.schemaVersion = schemaVersion; }
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }

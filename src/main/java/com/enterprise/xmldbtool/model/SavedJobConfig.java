@@ -9,6 +9,9 @@ public class SavedJobConfig {
     private String description;
     private String sourceXmlPath;
     private String recordRootElement = "record";
+    private List<String> recordRootElements = new ArrayList<>();
+    private String xmlVersion;
+    private String schemaVersion;
     private String targetTable;
     private List<String> tableOrder = new ArrayList<>();
     private int chunkSize = 1000;
@@ -40,6 +43,29 @@ public class SavedJobConfig {
 
     public String getRecordRootElement() { return recordRootElement; }
     public void setRecordRootElement(String recordRootElement) { this.recordRootElement = recordRootElement; }
+
+    public List<String> getRecordRootElements() {
+        if (recordRootElements != null && !recordRootElements.isEmpty()) {
+            return recordRootElements;
+        }
+        if (recordRootElement != null && !recordRootElement.trim().isEmpty()) {
+            return java.util.Arrays.stream(recordRootElement.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .toList();
+        }
+        return List.of("record");
+    }
+
+    public void setRecordRootElements(List<String> recordRootElements) {
+        this.recordRootElements = recordRootElements;
+    }
+
+    public String getXmlVersion() { return xmlVersion; }
+    public void setXmlVersion(String xmlVersion) { this.xmlVersion = xmlVersion; }
+
+    public String getSchemaVersion() { return schemaVersion; }
+    public void setSchemaVersion(String schemaVersion) { this.schemaVersion = schemaVersion; }
 
     public String getTargetTable() { return targetTable; }
     public void setTargetTable(String targetTable) { this.targetTable = targetTable; }

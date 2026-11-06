@@ -51,7 +51,7 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
                                           List<FieldMapping> mappings,
                                           DataSource dataSource) {
         this.sourceXmlPath = sourceXmlPath;
-        this.recordRootElement = recordRootElement != null ? recordRootElement : "Person";
+        this.recordRootElement = recordRootElement != null ? recordRootElement : "record";
         this.mappings = mappings != null ? mappings : Collections.emptyList();
         this.dataSource = dataSource;
     }
@@ -80,9 +80,10 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
             String tbl = m.getTargetTable();
             if (tbl == null || tbl.trim().isEmpty()) continue;
             String norm = tbl.trim().toLowerCase();
+            String rootNorm = recordRootElement != null ? recordRootElement.toLowerCase() : "record";
             boolean isLookup = norm.endsWith("list") || norm.endsWith("lists")
-                    || (!norm.equals("person") && !norm.startsWith("person")
-                        && !norm.equals(recordRootElement.toLowerCase()));
+                    || (!norm.equals(rootNorm) && !norm.startsWith(rootNorm)
+                        && !norm.equals("record"));
             if (isLookup) {
                 lookupTables.add(tbl);
                 lookupMappings.computeIfAbsent(tbl, k -> new ArrayList<>()).add(m);

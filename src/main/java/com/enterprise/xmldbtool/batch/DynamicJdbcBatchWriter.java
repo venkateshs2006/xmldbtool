@@ -46,6 +46,12 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
     private final Map<String, Long> tableWriteCounts = new ConcurrentHashMap<>();
     private volatile org.springframework.batch.core.StepExecution stepExecution;
 
+    public void clearCaches() {
+        sqlCache.clear();
+        pkCache.clear();
+        tableColumnCaseMapCache.clear();
+    }
+
     @Override
     public void beforeStep(org.springframework.batch.core.StepExecution stepExecution) {
         this.stepExecution = stepExecution;

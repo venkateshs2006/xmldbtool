@@ -234,6 +234,14 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                             recordEntity(recordMap, p, finishedFrame.data);
                         }
                     }
+
+                    if (depth == 1 && finishedFrame.childElementCount > 0) {
+                        recordMap.put("_subtag_" + closedTag.toLowerCase(), new LinkedHashMap<>(finishedFrame.data));
+                        String s = singularize(closedTag.toLowerCase());
+                        if (!s.equals(closedTag.toLowerCase())) {
+                            recordMap.put("_subtag_" + s, new LinkedHashMap<>(finishedFrame.data));
+                        }
+                    }
                 }
 
                 // Reached the closing tag of the record fragment
@@ -373,6 +381,14 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         String p = pluralize(tagLower);
                         if (!p.equals(tagLower) && !p.equals(s)) {
                             recordEntity(recordMap, p, finishedFrame.data);
+                        }
+                    }
+
+                    if (depth == 1 && finishedFrame.childElementCount > 0) {
+                        recordMap.put("_subtag_" + closedTag.toLowerCase(), new LinkedHashMap<>(finishedFrame.data));
+                        String s = singularize(closedTag.toLowerCase());
+                        if (!s.equals(closedTag.toLowerCase())) {
+                            recordMap.put("_subtag_" + s, new LinkedHashMap<>(finishedFrame.data));
                         }
                     }
                 }

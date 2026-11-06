@@ -242,9 +242,14 @@ public class DynamicDataSourceService {
 
     /**
      * Gets or creates a pooled HikariDataSource for the target database.
+     * Caches pools by URL + Username + Schema to guarantee that schema modifications
+     * point strictly to the newly configured schema instead of stale previous pools.
      */
     public DataSource getOrCreateDataSource(DbConnectionConfig config) {
-        String cacheKey = config.getUrl() + ":" + config.getUsername();
+        String schema = (config.getSchema() != null && !config.getSchema().trim().isEmpty())
+                ? config.getSchema().trim().toLowerCase() : "default";
+        String cacheKey = config.getUrl() + ":" + config.getUsername() + ":" + schema;
+
         return poolCache.computeIfAbsent(cacheKey, k -> {
             HikariConfig hikariConfig = buildHikariConfig(config);
             hikariConfig.setMaximumPoolSize(10);
@@ -253,8 +258,41 @@ public class DynamicDataSourceService {
             hikariConfig.setIdleTimeout(30000);
             hikariConfig.setPoolName("TargetDB-Pool-" + System.currentTimeMillis());
 
-            log.info("Initialized dynamic Hikari connection pool for target URL: {}", config.getUrl());
+            log.info("Initialized dynamic Hikari connection pool for target URL: {} (Schema: {})", config.getUrl(), schema);
             return new HikariDataSource(hikariConfig);
         });
+    }
+
+    /**
+     * Closes and evicts any cached connection pool for the given connection and schema.
+     */
+    public void closeDataSource(DbConnectionConfig config) {
+        if (config == null || config.getUrl() == null) return;
+        String schema = (config.getSchema() != null && !config.getSchema().trim().isEmpty())
+                ? config.getSchema().trim().toLowerCase() : "default";
+        String cacheKey = config.getUrl() + ":" + config.getUsername() + ":" + schema;
+        HikariDataSource ds = poolCache.remove(cacheKey);
+        if (ds != null && !ds.isClosed()) {
+            try {
+                ds.close();
+                log.info("Closed cached connection pool for {}", cacheKey);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * Resets and terminates all active dynamic connection pools.
+     */
+    public void resetAllPools() {
+        for (Map.Entry<String, HikariDataSource> entry : poolCache.entrySet()) {
+            HikariDataSource ds = entry.getValue();
+            if (ds != null && !ds.isClosed()) {
+                try {
+                    ds.close();
+                } catch (Exception ignored) {}
+            }
+        }
+        poolCache.clear();
+        log.info("Reset all cached dynamic connection pools.");
     }
 }

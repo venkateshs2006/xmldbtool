@@ -338,6 +338,23 @@ function initStepHandlers() {
         btnCreateSchemaQuick.addEventListener('click', createTargetDatabaseSchema);
     }
 
+    // Step 1: Input/Change listeners on DB connection fields to prevent stale schema pointing
+    ['db-engine', 'db-host', 'db-port', 'db-name', 'db-schema', 'db-username', 'db-password'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('input', handleDbConfigChange);
+            el.addEventListener('change', handleDbConfigChange);
+        }
+    });
+
+    // Reset Workflow Header Button
+    const btnResetWorkflow = document.getElementById('btn-reset-workflow');
+    if (btnResetWorkflow) {
+        btnResetWorkflow.addEventListener('click', () => {
+            resetWorkflow(false);
+        });
+    }
+
     // Close Connection Modal
     document.getElementById('btn-close-conn-modal').addEventListener('click', () => {
         document.getElementById('connValidationModal').classList.add('hidden');
@@ -551,6 +568,7 @@ function initPresets() {
             document.getElementById('db-schema').value = 'public';
             document.getElementById('db-username').value = 'postgres';
             document.getElementById('db-password').value = 'postgres';
+            handleDbConfigChange();
             showToast('Loaded preset: PostgreSQL on localhost:5432', 'info', 'Preset Applied');
         });
     }
@@ -564,6 +582,7 @@ function initPresets() {
             document.getElementById('db-schema').value = 'SYSTEM';
             document.getElementById('db-username').value = 'system';
             document.getElementById('db-password').value = 'oracle';
+            handleDbConfigChange();
             showToast('Loaded preset: Oracle Database 19c on localhost:1521', 'info', 'Preset Applied');
         });
     }
@@ -577,6 +596,7 @@ function initPresets() {
             document.getElementById('db-schema').value = 'PUBLIC';
             document.getElementById('db-username').value = 'sa';
             document.getElementById('db-password').value = '';
+            handleDbConfigChange();
             showToast('Loaded preset: Embedded Test Database (H2 In-Memory)', 'info', 'Preset Applied');
         });
     }
@@ -607,6 +627,161 @@ function collectSourceForm() {
     AppState.source.filePath = document.getElementById('xml-file-path').value.trim();
     AppState.source.rootElement = document.getElementById('xml-root-element').value.trim() || 'record';
     AppState.source.chunkSize = parseInt(document.getElementById('batch-chunk-size').value, 10) || 1000;
+}
+
+function handleDbConfigChange() {
+    collectDbConnectionForm();
+    AppState.dbConnection.connected = false;
+    updateDbStatusBadge(false, 'Modified (Unverified)');
+
+    // Invalidate downstream discovery and mapping if any tables/mappings were previously discovered
+    if ((AppState.schema && AppState.schema.tables && AppState.schema.tables.length > 0) ||
+        (AppState.mapping && AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0)) {
+
+        AppState.schema.tables = [];
+        AppState.mapping.fieldMappings = [];
+        AppState.mapping.targetTable = '';
+        AppState.mapping.tableOrder = [];
+
+        // Clear Step 3 tables list
+        const tablesList = document.getElementById('discovered-tables-list');
+        if (tablesList) tablesList.innerHTML = '<div class="p-4 text-center text-gray-400 text-xs font-mono">Target database or schema modified. Please re-run Schema Discovery in Step 3.</div>';
+
+        // Clear Step 4 mapping rows
+        const mappingContainer = document.getElementById('mapping-rows-container');
+        if (mappingContainer) mappingContainer.innerHTML = '';
+        const orderBadges = document.getElementById('table-order-badges-container');
+        if (orderBadges) orderBadges.innerHTML = '';
+        const countSummary = document.getElementById('mapping-count-summary');
+        if (countSummary) countSummary.textContent = '0 mappings configured across 0 tables';
+
+        // Clear Step 5 preview
+        const previewTabs = document.getElementById('preview-table-tabs');
+        if (previewTabs) previewTabs.innerHTML = '';
+        const previewHead = document.getElementById('preview-table-head');
+        if (previewHead) previewHead.innerHTML = '';
+        const previewBody = document.getElementById('preview-table-body');
+        if (previewBody) previewBody.innerHTML = '';
+        const previewSql = document.getElementById('preview-sql-template');
+        if (previewSql) previewSql.textContent = '-- Target database or schema changed: please re-run schema discovery in Step 3 --';
+
+        showToast('Target database/schema changed. Downstream schema discovery and mappings have been reset to match the new target.', 'info', 'Target Modified');
+    }
+
+    // Invalidate cached pool on server so it will connect fresh to the new schema
+    try {
+        fetch('/api/connection/reset', { method: 'POST' }).catch(() => {});
+    } catch (ignored) {}
+}
+
+async function resetWorkflow(clearDbConfig = false) {
+    // Navigate back to Step 1
+    navigateToStep(1);
+
+    // Reset AppState
+    AppState.source = {
+        filePath: '',
+        rootElement: '',
+        chunkSize: 1000,
+        fileSizeBytes: 0,
+        fileSizeFormatted: ''
+    };
+    AppState.schema = {
+        xmlTags: [],
+        tables: []
+    };
+    AppState.mapping = {
+        targetTable: '',
+        tableOrder: [],
+        fieldMappings: []
+    };
+    AppState.previewSkipped = false;
+    AppState.isDummyData = false;
+    AppState.previewSkipReason = '';
+
+    // Reset Step 2 Form (Source XML)
+    const xmlPathInput = document.getElementById('xml-file-path');
+    if (xmlPathInput) xmlPathInput.value = '';
+    const rootElInput = document.getElementById('xml-root-element');
+    if (rootElInput) rootElInput.value = '';
+    const chunkInput = document.getElementById('batch-chunk-size');
+    if (chunkInput) chunkInput.value = '1000';
+    const candWrapper = document.getElementById('candidate-root-tags-wrapper');
+    if (candWrapper) candWrapper.classList.add('hidden');
+    const candContainer = document.getElementById('candidate-root-tags-container');
+    if (candContainer) candContainer.innerHTML = '';
+    const sizeBadge = document.getElementById('xml-file-size-badge');
+    if (sizeBadge) sizeBadge.textContent = 'Size: --';
+    const registrySelect = document.getElementById('schema-registry-select');
+    if (registrySelect) registrySelect.value = '';
+
+    // Reset Step 3 Discovery containers
+    const flatBanner = document.getElementById('flattened-tables-banner');
+    if (flatBanner) flatBanner.classList.add('hidden');
+    const flatList = document.getElementById('flattened-tables-list');
+    if (flatList) flatList.innerHTML = '';
+    const tagsList = document.getElementById('discovered-tags-list');
+    if (tagsList) tagsList.innerHTML = '';
+    const tablesList = document.getElementById('discovered-tables-list');
+    if (tablesList) tablesList.innerHTML = '';
+
+    // Reset Step 4 Mapping containers
+    const mappingContainer = document.getElementById('mapping-rows-container');
+    if (mappingContainer) mappingContainer.innerHTML = '';
+    const orderBadges = document.getElementById('table-order-badges-container');
+    if (orderBadges) orderBadges.innerHTML = '';
+    const countSummary = document.getElementById('mapping-count-summary');
+    if (countSummary) countSummary.textContent = '0 mappings configured across 0 tables';
+
+    // Reset Step 5 Preview containers
+    const previewTabs = document.getElementById('preview-table-tabs');
+    if (previewTabs) previewTabs.innerHTML = '';
+    const previewHead = document.getElementById('preview-table-head');
+    if (previewHead) previewHead.innerHTML = '';
+    const previewBody = document.getElementById('preview-table-body');
+    if (previewBody) previewBody.innerHTML = '';
+    const previewSql = document.getElementById('preview-sql-template');
+    if (previewSql) previewSql.textContent = '-- SQL template will be rendered here --';
+    const previewBanner = document.getElementById('preview-skipped-banner');
+    if (previewBanner) previewBanner.classList.add('hidden');
+
+    // Reset Job metadata inputs
+    const jobNameInput = document.getElementById('job-name-input');
+    if (jobNameInput) jobNameInput.value = '';
+    const jobDescInput = document.getElementById('job-desc-input');
+    if (jobDescInput) jobDescInput.value = '';
+    const stagedRadio = document.getElementById('pipeline-mode-staged');
+    if (stagedRadio) stagedRadio.checked = true;
+
+    if (clearDbConfig) {
+        const dbEngine = document.getElementById('db-engine');
+        if (dbEngine) dbEngine.value = 'POSTGRESQL';
+        const dbHost = document.getElementById('db-host');
+        if (dbHost) dbHost.value = 'localhost';
+        const dbPort = document.getElementById('db-port');
+        if (dbPort) dbPort.value = '5432';
+        const dbName = document.getElementById('db-name');
+        if (dbName) dbName.value = 'enterprise_db';
+        const dbSchema = document.getElementById('db-schema');
+        if (dbSchema) dbSchema.value = 'public';
+        const dbUser = document.getElementById('db-username');
+        if (dbUser) dbUser.value = 'postgres';
+        const dbPass = document.getElementById('db-password');
+        if (dbPass) dbPass.value = 'postgres';
+
+        collectDbConnectionForm();
+        AppState.dbConnection.connected = false;
+        updateDbStatusBadge(false);
+    } else {
+        collectDbConnectionForm();
+    }
+
+    // Reset backend connection pools
+    try {
+        await fetch('/api/connection/reset', { method: 'POST' });
+    } catch (ignored) {}
+
+    showToast('Workflow has been completely reset. Ready for a new ingestion.', 'info', 'Workflow Reset');
 }
 
 // =========================================================================
@@ -790,7 +965,38 @@ async function createTargetDatabaseSchema() {
 // =========================================================================
 // API: Schema Discovery (Step 3)
 // =========================================================================
+function isInternalStagingTable(tableName) {
+    if (!tableName) return false;
+    const lower = tableName.toLowerCase();
+    return lower.endsWith('_stage') || lower.endsWith('_flat') || lower.endsWith('flat') || lower === 'staging_xml_records';
+}
+
+function applyAutoGeneratedMappings(mappings) {
+    if (!mappings || mappings.length === 0) return;
+    const container = document.getElementById('mapping-rows-container');
+    if (!container) return;
+    container.innerHTML = '';
+    mappings.forEach(m => {
+        addMappingRow(
+            m.xmlField || '',
+            m.targetTable || '',
+            m.targetColumn || '',
+            m.transform || m.transformation || 'NONE',
+            m.constraintType || 'NONE'
+        );
+    });
+    updateTableSequenceBanner();
+}
+
 async function runSchemaDiscovery() {
+    collectSourceForm();
+    const rootTags = AppState.source.rootElement ? AppState.source.rootElement.split(',').map(s => s.trim()).filter(Boolean) : ['record'];
+
+    // Serialize current field mappings as JSON for backend-driven discovery filtering:
+    // If the user has imported a mapping file, the backend will show only mapped tags (and ignore others).
+    const currentMappings = AppState.mapping.fieldMappings || [];
+    const mappingJsonStr = currentMappings.length > 0 ? JSON.stringify(currentMappings) : null;
+
     const payload = {
         dbConfig: {
             engine: AppState.dbConnection.engine,
@@ -804,8 +1010,14 @@ async function runSchemaDiscovery() {
         },
         sourceXmlPath: AppState.source.filePath,
         recordRootElement: AppState.source.rootElement,
+        recordRootElements: rootTags,
+        xmlVersion: AppState.source.xmlVersion,
+        schemaVersion: AppState.source.schemaVersion,
         sampleLinesLimit: 1000,
-        autoCreateTables: true
+        autoCreateTables: true,
+        mappings: currentMappings,
+        // Also pass as JSON string so backend resolveEffectiveMappings picks it up consistently
+        mappingJson: mappingJsonStr
     };
 
     const btnStep2Next = document.getElementById('btn-step2-next');
@@ -824,9 +1036,34 @@ async function runSchemaDiscovery() {
 
         if (response.ok && result.success) {
             AppState.schema.xmlTags = result.discoveredXmlElements || [];
-            AppState.schema.tables = result.discoveredTables || [];
+            AppState.schema.tables = (result.discoveredTables || []).filter(t => !isInternalStagingTable(t.tableName));
+            AppState.schema.createdFlatTables = result.createdFlatTables || [];
+            AppState.schema.stagingTables = result.stagingTables || [];
             AppState.source.fileSizeBytes = result.fileSizeBytes;
             AppState.source.fileSizeFormatted = result.fileSizeFormatted;
+
+            // Auto-populate generated mappings if user hasn't provided manual mappings
+            if ((!AppState.mapping.fieldMappings || AppState.mapping.fieldMappings.length === 0)
+                && result.generatedMappings && result.generatedMappings.length > 0) {
+                AppState.mapping.fieldMappings = result.generatedMappings;
+                applyAutoGeneratedMappings(result.generatedMappings);
+            }
+            if (result.discoveredRelationships && result.discoveredRelationships.length > 0) {
+                AppState.mapping.relationships = result.discoveredRelationships;
+            }
+
+            // XML Feed Version auto-detection (internal telemetry)
+            if (result.detectedXmlVersion) {
+                AppState.source.xmlVersion = result.detectedXmlVersion;
+            }
+
+            // Candidate Root Elements chips
+            if (result.candidateRootElements && result.candidateRootElements.length > 0) {
+                renderCandidateRootChips(result.candidateRootElements);
+            }
+
+            // Staging tables are internal golden source - banner hidden
+            renderFlattenedTablesBanner(result.createdFlatTables || []);
 
             const sizeBadge = document.getElementById('xml-file-size-badge');
             if (sizeBadge && result.fileSizeFormatted) {
@@ -837,9 +1074,9 @@ async function runSchemaDiscovery() {
             navigateToStep(3);
 
             const createdMsg = result.createdTables && result.createdTables.length > 0
-                ? ` Provisioned ${result.createdTables.length} tables in target DB (including flat staging table).`
+                ? ` Provisioned ${AppState.schema.tables.length} canonical tables in target DB.`
                 : '';
-            showToast(`Discovered ${AppState.schema.xmlTags.length} XML elements and ${AppState.schema.tables.length} database tables.${createdMsg}`, 'success', 'Schema Discovered');
+            showToast(`Discovered ${AppState.schema.xmlTags.length} XML elements and ${AppState.schema.tables.length} canonical database tables.${createdMsg}`, 'success', 'Schema Discovered');
         } else {
             showToast(result.message || 'Failed to complete schema discovery.', 'error', 'Discovery Error');
         }
@@ -897,38 +1134,42 @@ function renderDiscoveredSchema() {
     const tblBadge = document.getElementById('badge-discovered-tables');
     const tblContainer = document.getElementById('db-tables-container');
 
-    tblBadge.textContent = `${AppState.schema.tables.length} Tables`;
+    const canonicalTables = (AppState.schema.tables || []).filter(t => !isInternalStagingTable(t.tableName));
+    tblBadge.textContent = `${canonicalTables.length} Canonical Tables`;
     tblContainer.innerHTML = '';
 
-    if (AppState.schema.tables.length === 0) {
+    if (canonicalTables.length === 0) {
         tblContainer.innerHTML = `
             <div class="text-center py-8 px-4 rounded-xl border border-dashed border-emerald-300 bg-emerald-50/50">
                 <i class="fas fa-layer-group text-bnp-emerald text-2xl mb-2"></i>
-                <div class="font-bold text-gray-800 text-xs">No Tables Found in Target Database</div>
-                <p class="text-gray-500 text-[11px] mt-1 max-w-sm mx-auto">Click below to automatically create the flat staging table ('staging_xml_records') and canonical relational tables in your target database.</p>
+                <div class="font-bold text-gray-800 text-xs">No Canonical Tables Found in Target Database</div>
+                <p class="text-gray-500 text-[11px] mt-1 max-w-sm mx-auto">Click below to automatically create canonical relational tables in your target database.</p>
                 <button type="button" id="btn-provision-tables-empty" class="mt-3 btn btn-primary text-xs py-1.5 px-3">
-                    <i class="fas fa-magic mr-1.5"></i> Create Tables &amp; Flat Table Now
+                    <i class="fas fa-magic mr-1.5"></i> Create Canonical Tables Now
                 </button>
             </div>
         `;
         const btnEmpty = document.getElementById('btn-provision-tables-empty');
         if (btnEmpty) btnEmpty.addEventListener('click', createTargetTablesInDb);
     } else {
-        AppState.schema.tables.forEach(table => {
+        canonicalTables.forEach(table => {
             const card = document.createElement('div');
             card.className = 'p-3 rounded-lg bg-white border border-gray-200 text-xs shadow-sm';
 
             const tName = (table.tableName || '').toLowerCase();
+            const rootTags = (AppState.source.rootElement || '')
+                .split(',')
+                .map(s => s.trim().toLowerCase())
+                .filter(Boolean);
+            const isRootEntity = rootTags.includes(tName) || tName === 'records' || tName === 'items';
+            const isChildOfRoot = rootTags.some(r => tName.startsWith(r + '_') || (tName.startsWith(r) && tName !== r));
+
             let tableBadge = '';
-            if (tName === 'staging_xml_records') {
-                tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-purple-100 text-purple-800 border border-purple-200">FLAT STAGING</span>';
-            } else if (tName === 'personflat' || tName === 'person_flat' || tName.endsWith('_flat')) {
-                tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">FLATTENED</span>';
-            } else if (tName === 'person' || tName === 'products' || tName === 'catalog') {
+            if (isRootEntity) {
                 tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">MASTER ENTITY</span>';
-            } else if (tName.endsWith('list')) {
+            } else if (tName.endsWith('list') || tName.endsWith('lists')) {
                 tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-100 text-amber-800 border border-amber-200">LOOKUP</span>';
-            } else if (tName.startsWith('person')) {
+            } else if (isChildOfRoot || tName === 'address' || tName === 'personname') {
                 tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">1-TO-N CHILD</span>';
             }
 
@@ -954,6 +1195,55 @@ function renderDiscoveredSchema() {
     }
 }
 
+function renderCandidateRootChips(candidates) {
+    const wrapper = document.getElementById('candidate-root-tags-wrapper');
+    const container = document.getElementById('candidate-root-tags-container');
+    if (!wrapper || !container) return;
+
+    if (!candidates || candidates.length === 0) {
+        wrapper.classList.add('hidden');
+        return;
+    }
+
+    container.innerHTML = '';
+    wrapper.classList.remove('hidden');
+
+    candidates.forEach(tag => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-600 hover:text-white transition shadow-2xs flex items-center gap-1';
+        chip.innerHTML = `<i class="fas fa-plus text-[9px]"></i><span>${escapeHtml(tag)}</span>`;
+        chip.title = `Click to add or toggle ${tag} in XML Fragment Record Elements`;
+
+        chip.addEventListener('click', () => {
+            const rootInput = document.getElementById('xml-root-element');
+            if (!rootInput) return;
+            const currentVal = rootInput.value.trim();
+            const currentTags = currentVal ? currentVal.split(',').map(s => s.trim().toLowerCase()) : [];
+            if (!currentTags.includes(tag.toLowerCase())) {
+                if (!currentVal || currentVal.toLowerCase() === 'record') {
+                    rootInput.value = tag;
+                } else {
+                    rootInput.value = currentVal + ', ' + tag;
+                }
+                showToast(`Added root tag '${tag}' to XML Fragment Record Elements.`, 'info');
+            } else {
+                const remaining = currentVal.split(',').map(s => s.trim()).filter(t => t.toLowerCase() !== tag.toLowerCase());
+                rootInput.value = remaining.length > 0 ? remaining.join(', ') : tag;
+                showToast(`Removed root tag '${tag}'.`, 'info');
+            }
+            collectSourceForm();
+        });
+
+        container.appendChild(chip);
+    });
+}
+
+function renderFlattenedTablesBanner(flatTables) {
+    const banner = document.getElementById('flattened-tables-banner');
+    if (banner) banner.classList.add('hidden'); // Internal staging tables - hidden from UI
+}
+
 async function createTargetTablesInDb() {
     const btn = document.getElementById('btn-create-discovered-tables');
     const origHtml = btn ? btn.innerHTML : '';
@@ -975,8 +1265,12 @@ async function createTargetTablesInDb() {
         },
         sourceXmlPath: AppState.source.filePath,
         recordRootElement: AppState.source.rootElement,
+        recordRootElements: AppState.source.rootElement ? AppState.source.rootElement.split(',').map(s => s.trim()).filter(Boolean) : ['record'],
+        xmlVersion: AppState.source.xmlVersion,
+        schemaVersion: AppState.source.schemaVersion,
         sampleLinesLimit: 1000,
-        autoCreateTables: true
+        autoCreateTables: true,
+        mappings: AppState.mapping.fieldMappings || []
     };
 
     try {
@@ -987,10 +1281,13 @@ async function createTargetTablesInDb() {
         });
         const result = await response.json();
         if (response.ok && result.success) {
-            AppState.schema.tables = result.discoveredTables || [];
+            AppState.schema.tables = (result.discoveredTables || []).filter(t => !isInternalStagingTable(t.tableName));
+            AppState.schema.createdFlatTables = result.createdFlatTables || [];
+            AppState.schema.stagingTables = result.stagingTables || [];
+            renderFlattenedTablesBanner(result.createdFlatTables || []);
             renderDiscoveredSchema();
-            const count = result.createdTables ? result.createdTables.length : AppState.schema.tables.length;
-            showToast(`Successfully created ${count} tables in target DB (including flat staging table).`, 'success', 'Tables Provisioned');
+            const count = AppState.schema.tables.length;
+            showToast(`Successfully created ${count} canonical tables in target DB.`, 'success', 'Tables Provisioned');
         } else {
             showToast(result.message || 'Failed to create tables.', 'error', 'Creation Error');
         }
@@ -1124,12 +1421,12 @@ function autoAlignMappings() {
             let constraint = 'NONE';
             const lowerCol = bestColumn.toLowerCase();
             const lowerTbl = bestTable.toLowerCase();
-            const rootElem = (AppState.source.rootElement || 'person').toLowerCase();
+            const rootElem = (AppState.source.rootElement || 'record').toLowerCase();
 
-            if (lowerCol === 'id' || lowerCol === `${lowerTbl}_id` || lowerCol === `${rootElem}_id` || lowerCol === 'person_id') {
-                if (lowerTbl === rootElem || lowerTbl === 'person') {
+            if (lowerCol === 'id' || lowerCol === `${lowerTbl}_id` || lowerCol === `${rootElem}_id`) {
+                if (lowerTbl === rootElem || lowerTbl === 'records') {
                     constraint = 'PK';
-                } else if (lowerCol === `${rootElem}_id` || lowerCol === 'person_id') {
+                } else if (lowerCol === `${rootElem}_id`) {
                     constraint = 'FK';
                 } else if (lowerCol === 'id' || lowerCol === `${lowerTbl}_id`) {
                     constraint = 'PK';
@@ -1665,12 +1962,16 @@ async function saveJobConfiguration(runImmediately = false) {
 
     const stagedRadio = document.getElementById('pipeline-mode-staged');
     const isStagedPipeline = stagedRadio ? stagedRadio.checked : true;
+    const rootTags = AppState.source.rootElement ? AppState.source.rootElement.split(',').map(s => s.trim()).filter(Boolean) : ['record'];
 
     const payload = {
         jobName,
         description,
         sourceXmlPath: AppState.source.filePath,
         recordRootElement: AppState.source.rootElement,
+        recordRootElements: rootTags,
+        xmlVersion: AppState.source.xmlVersion || 'auto',
+        schemaVersion: AppState.source.schemaVersion || 'v1.0.0',
         targetTable: AppState.mapping.targetTable,
         tableOrder: AppState.mapping.tableOrder,
         chunkSize: AppState.source.chunkSize,
@@ -1715,6 +2016,10 @@ async function saveJobConfiguration(runImmediately = false) {
                 // Navigate to Job List tab
                 switchPage('job-list');
             }
+
+            // Immediately reset wizard workflow so next time user schedules or edits,
+            // it starts 100% clean and does not hold onto previous mappings or stale schema state!
+            await resetWorkflow(false);
         } else {
             showToast(result.message || 'Failed to save job configuration.', 'error', 'Save Failed');
         }
@@ -1754,11 +2059,18 @@ async function loadSchemaRegistryVersions(notify = false) {
 
 function onSchemaRegistryVersionSelected() {
     const select = document.getElementById('schema-registry-select');
-    if (!select || !select.value) return;
+    if (!select || !select.value) {
+        AppState.source.schemaVersion = 'v1.0.0';
+        return;
+    }
 
     const vId = parseInt(select.value, 10);
     const selected = (AppState.schemaRegistryVersions || []).find(v => v.id === vId);
     if (!selected) return;
+
+    if (selected.version) {
+        AppState.source.schemaVersion = selected.version;
+    }
 
     if (selected.rootElement) {
         const rootInput = document.getElementById('xml-root-element');
@@ -1798,10 +2110,11 @@ function openJsonMappingModal(mode = 'import') {
     if (mode === 'export') {
         title.textContent = 'Export JSON Mapping Document';
         const mappings = collectFieldMappings();
+        const currentRoot = document.getElementById('xml-root-element')?.value.trim() || 'record';
         const exportData = {
             schemaName: 'Custom-XML-Mapping',
             version: '1.0.0',
-            rootElement: document.getElementById('xml-root-element')?.value.trim() || 'Person',
+            rootElement: currentRoot,
             chunkSize: parseInt(document.getElementById('batch-chunk-size')?.value, 10) || 1000,
             tableOrder: AppState.mapping.tableOrder || [],
             mappings: mappings
@@ -1810,32 +2123,35 @@ function openJsonMappingModal(mode = 'import') {
     } else {
         title.textContent = 'JSON Mapping Document Ingestion';
         if (!textarea.value.trim() || textarea.value.includes('Custom-XML-Mapping')) {
+            const currentRoot = document.getElementById('xml-root-element')?.value.trim().split(',')[0].trim() || 'record';
+            const rootIdCol = currentRoot.toLowerCase() + '_id';
+            const childTable = currentRoot + '_details';
             textarea.value = JSON.stringify([
                 {
-                    xmlField: "Person/@id",
-                    targetTable: "Person",
-                    targetColumn: "person_id",
+                    xmlField: `${currentRoot}/@id`,
+                    targetTable: currentRoot,
+                    targetColumn: "id",
                     constraintType: "PK",
                     transform: "NONE"
                 },
                 {
-                    xmlField: "Person/Gender",
-                    targetTable: "Person",
-                    targetColumn: "gender",
+                    xmlField: `${currentRoot}/name`,
+                    targetTable: currentRoot,
+                    targetColumn: "name",
                     constraintType: "NONE",
                     transform: "NONE"
                 },
                 {
-                    xmlField: "Person/NameDetails/Name/NameValue/FirstName",
-                    targetTable: "PersonName",
-                    targetColumn: "first_name",
+                    xmlField: `${currentRoot}/details/item/name`,
+                    targetTable: childTable,
+                    targetColumn: "item_name",
                     constraintType: "NONE",
                     transform: "NONE"
                 },
                 {
-                    xmlField: "Person/@id",
-                    targetTable: "PersonName",
-                    targetColumn: "person_id",
+                    xmlField: `${currentRoot}/@id`,
+                    targetTable: childTable,
+                    targetColumn: rootIdCol,
                     constraintType: "FK",
                     transform: "NONE"
                 }
@@ -1883,6 +2199,8 @@ function applyJsonMapping() {
 
         if (mappings.length > 0) {
             AppState.mapping.fieldMappings = mappings;
+            // Store raw JSON for backend-driven discovery filtering
+            AppState.mapping.rawMappingJson = JSON.stringify(mappings);
             const container = document.getElementById('mapping-rows-container');
             if (container) {
                 container.innerHTML = '';
@@ -1897,7 +2215,14 @@ function applyJsonMapping() {
                 });
                 updateTableSequenceBanner();
             }
-            showToast(`Successfully ingested JSON mapping with ${mappings.length} field mappings.`, 'success', 'JSON Applied');
+            showToast(`Successfully ingested JSON mapping with ${mappings.length} field mappings. Re-running discovery to filter tags…`, 'success', 'JSON Applied');
+
+            // Auto re-run discovery so Step 3 shows only the mapped tags immediately
+            if (AppState.source.filePath) {
+                document.getElementById('jsonMappingModal').classList.add('hidden');
+                runSchemaDiscovery();
+                return;
+            }
         } else {
             showToast('JSON document parsed, but no field mappings array found.', 'warning');
         }
@@ -1917,10 +2242,11 @@ function openRegisterSchemaModal() {
         return;
     }
     document.getElementById('reg-schema-mapping-count').textContent = mappings.length;
-    document.getElementById('reg-schema-root').value = document.getElementById('xml-root-element')?.value.trim() || 'Person';
+    const detectedOrCurrentRoot = document.getElementById('xml-root-element')?.value.trim() || 'record';
+    document.getElementById('reg-schema-root').value = detectedOrCurrentRoot;
     document.getElementById('reg-schema-name').value = 'Custom-Schema';
     document.getElementById('reg-schema-version').value = '1.0.0';
-    document.getElementById('reg-schema-entity').value = document.getElementById('xml-root-element')?.value.trim() || 'Person';
+    document.getElementById('reg-schema-entity').value = detectedOrCurrentRoot;
     modal.classList.remove('hidden');
 }
 
@@ -1979,7 +2305,8 @@ function initJobListHandlers() {
 
     const btnCreate = document.getElementById('btn-create-new-job');
     if (btnCreate) {
-        btnCreate.addEventListener('click', () => {
+        btnCreate.addEventListener('click', async () => {
+            await resetWorkflow(false);
             switchPage('schedule');
             navigateToStep(1);
         });
@@ -2645,6 +2972,16 @@ function applyExecutionHistoryFilter(selectedId) {
                 message: latestExec.errorMessage || 'Job failed during execution.',
                 endTime: latestExec.endTime
             });
+            // Populate errors table from job history when live telemetry isn't yet available
+            if (latestExec.errorMessage) {
+                updateErrorsTable([{
+                    phase: 'JOB_FATAL',
+                    stepName: latestExec.jobName || 'batchJob',
+                    errorMessage: latestExec.errorMessage,
+                    recordData: JSON.stringify({ jobExecutionId: latestExec.executionId, status: latestExec.status }),
+                    failedAt: latestExec.endTime || ''
+                }]);
+            }
         } else {
             const running = history.find(e => e.status === 'RUNNING' || e.status === 'STARTED');
             if (!running) {
@@ -2674,6 +3011,16 @@ function applyExecutionHistoryFilter(selectedId) {
             message: selectedExec.errorMessage || 'Job failed during execution.',
             endTime: selectedExec.endTime
         });
+        // Populate errors table with the error from job history when live telemetry isn't available
+        if (selectedExec.errorMessage) {
+            updateErrorsTable([{
+                phase: 'JOB_FATAL',
+                stepName: selectedExec.jobName || 'batchJob',
+                errorMessage: selectedExec.errorMessage,
+                recordData: JSON.stringify({ jobExecutionId: selectedExec.executionId, status: selectedExec.status }),
+                failedAt: selectedExec.endTime || ''
+            }]);
+        }
     } else {
         document.getElementById('job-failure-alert-panel')?.classList.add('hidden');
     }
@@ -2926,7 +3273,18 @@ function renderTelemetryData(data) {
     updateCharts(data);
 
     // 6. Recent Error Logs
-    updateErrorsTable(data.recentErrors || []);
+    // If recentErrors is empty but job is failed, synthesize an error entry from the message field
+    let errors = data.recentErrors || [];
+    if (errors.length === 0 && data.status === 'FAILED' && data.message) {
+        errors = [{
+            phase: 'JOB_FATAL',
+            stepName: 'batchJob',
+            errorMessage: data.message,
+            recordData: JSON.stringify({ jobExecutionId: data.jobExecutionId, exitCode: data.exitCode || 'FAILED' }),
+            failedAt: data.endTime || new Date().toLocaleTimeString()
+        }];
+    }
+    updateErrorsTable(errors);
 
     // 7. Failure Diagnostic Alert Panel
     checkAndDisplayFailureAlert(data);
@@ -3062,7 +3420,21 @@ function updateTableBreakdown(data) {
 }
 
 function updateThroughputAndState(data) {
-    const speed = Math.round(data.recordsPerSecond || 0);
+    let speed = Math.round(data.recordsPerSecond || 0);
+    if (speed === 0 && (data.totalWritten || 0) > 0) {
+        if (data.startTime && data.endTime) {
+            try {
+                const s = new Date(data.startTime.replace(/-/g, '/')).getTime();
+                const e = new Date(data.endTime.replace(/-/g, '/')).getTime();
+                const sec = Math.max(1, (e - s) / 1000);
+                speed = Math.round(data.totalWritten / sec);
+            } catch (ignored) {
+                speed = Math.max(1, data.totalWritten);
+            }
+        } else {
+            speed = Math.max(1, Math.min(1000, data.totalWritten));
+        }
+    }
     const speedEl = document.getElementById('metric-live-speed');
     if (speedEl) speedEl.textContent = speed.toLocaleString();
 
@@ -3121,14 +3493,24 @@ function checkAndDisplayFailureAlert(data) {
 
         let failedStep = 'dynamicIngestStep';
         let stackTrace = '';
+        // Prefer the message field which is always populated by backend for failed jobs
         let errorMsg = data.message || 'Fatal batch execution failure.';
 
         if (data.recentErrors && data.recentErrors.length > 0) {
-            const fatalErr = data.recentErrors.find(e => e.phase === 'JOB_FATAL') || data.recentErrors[data.recentErrors.length - 1];
+            // Look for JOB_FATAL phase first (fatal exception), then any other error
+            const fatalErr = data.recentErrors.find(e => e.phase === 'JOB_FATAL')
+                || data.recentErrors[0];
             if (fatalErr) {
                 if (fatalErr.stepName) failedStep = fatalErr.stepName;
                 if (fatalErr.errorMessage) errorMsg = fatalErr.errorMessage;
                 if (fatalErr.recordData) stackTrace = fatalErr.recordData;
+            }
+        }
+
+        // Fall back to exitCode / message if no detailed error record present
+        if (!errorMsg || errorMsg === 'Fatal batch execution failure.') {
+            if (data.exitCode && data.exitCode !== 'FAILED' && data.exitCode !== '') {
+                errorMsg = data.exitCode;
             }
         }
 
@@ -3168,11 +3550,26 @@ function updateErrorsTable(errors) {
         tr.className = 'hover:bg-gray-50 transition';
         const phaseStr = err.phase || 'STEP';
         const isFatal = phaseStr === 'JOB_FATAL';
+        const isWrite = phaseStr.startsWith('WRITE');
+        const badgeClass = isFatal
+            ? 'bg-red-600 text-white shadow-2xs'
+            : isWrite
+                ? 'bg-red-50 text-red-600 border border-red-200'
+                : 'bg-amber-50 text-amber-700 border border-amber-200';
+
+        // For fatal errors, show step name as the context
+        const context = err.stepName || err.failedAt || '';
+        const errorText = err.errorMessage || 'Unknown Error';
+        const dataText = err.recordData || '{}';
+
         tr.innerHTML = `
-            <td class="px-4 py-2.5 text-gray-500 whitespace-nowrap">${escapeHtml(err.failedAt || '')}</td>
-            <td class="px-4 py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${isFatal ? 'bg-red-600 text-white shadow-2xs' : phaseStr.startsWith('WRITE') ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}">${escapeHtml(phaseStr)}</span></td>
-            <td class="px-4 py-2.5 text-red-600 max-w-xs truncate" title="${escapeHtml(err.errorMessage || '')}">${escapeHtml(err.errorMessage || 'Unknown Error')}</td>
-            <td class="px-4 py-2.5 font-mono text-[11px] text-gray-800 max-w-md truncate" title="${escapeHtml(err.recordData || '')}">${escapeHtml(err.recordData || '{}')}</td>
+            <td class="px-4 py-2.5 text-gray-500 whitespace-nowrap text-[11px]">${escapeHtml(context)}</td>
+            <td class="px-4 py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${badgeClass}">${escapeHtml(phaseStr)}</span></td>
+            <td class="px-4 py-2.5 text-red-600 max-w-xs" title="${escapeHtml(errorText)}">
+                <div class="truncate font-medium">${escapeHtml(errorText)}</div>
+                ${err.failedAt ? `<div class="text-[10px] text-gray-400 mt-0.5">${escapeHtml(err.failedAt)}</div>` : ''}
+            </td>
+            <td class="px-4 py-2.5 font-mono text-[11px] text-gray-800 max-w-md truncate" title="${escapeHtml(dataText)}">${escapeHtml(dataText)}</td>
         `;
         tbody.appendChild(tr);
     });

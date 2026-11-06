@@ -9,6 +9,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Map;
+
 @RestController
 @RequestMapping({"/api/db", "/api/connection"})
 public class ConnectionController {
@@ -37,5 +39,11 @@ public class ConnectionController {
         } else {
             return ResponseEntity.badRequest().body(response);
         }
+    }
+
+    @PostMapping("/reset")
+    public ResponseEntity<Map<String, Object>> resetConnectionPools() {
+        dataSourceService.resetAllPools();
+        return ResponseEntity.ok(Map.of("success", true, "message", "Database connection pools reset successfully."));
     }
 }

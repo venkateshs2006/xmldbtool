@@ -30,6 +30,9 @@ public class DiscoveredElement {
     public String getParentTag() { return parentTag; }
     public void setParentTag(String parentTag) { this.parentTag = parentTag; }
 
+    public String getEnclosingTag() { return parentTag; }
+    public void setEnclosingTag(String enclosingTag) { this.parentTag = enclosingTag; }
+
     public boolean isAttribute() { return isAttribute; }
     public void setAttribute(boolean attribute) { isAttribute = attribute; }
 

@@ -23,6 +23,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import javax.xml.stream.XMLEventReader;
 import javax.xml.stream.XMLInputFactory;
 import java.io.StringReader;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1877,6 +1878,597 @@ class DynamicXmlIngestionTest {
         assertEquals("V1", row.get("delta_col_1"));
         assertEquals("V2", row.get("delta_col_2"));
         assertEquals("Notes", row.get("profile_notes"));
+    }
+
+    @Test
+    @DisplayName("Verify candidate root elements discovery and XML feed version detection from root attributes")
+    void testCandidateRootElementsDiscoveryAndFeedVersionDetection() {
+        // 1. Detect candidate root elements from sample PFA feed
+        List<String> candidates = discoveryService.detectCandidateRootElements("sample-data/pfa-sample.xml");
+        assertNotNull(candidates);
+        assertTrue(candidates.size() >= 3, "Should discover candidate repeating root elements from PFA");
+        assertTrue(candidates.stream().anyMatch(c -> c.equalsIgnoreCase("Person")), "Candidates must include Person");
+        assertTrue(candidates.stream().anyMatch(c -> c.equalsIgnoreCase("CountryName")), "Candidates must include CountryName");
+        assertTrue(candidates.stream().anyMatch(c -> c.equalsIgnoreCase("Occupation")), "Candidates must include Occupation");
+
+        // 2. Detect XML feed version from document root attribute date="202206192200"
+        String detectedVersion = discoveryService.detectXmlFeedVersion("sample-data/pfa-sample.xml");
+        assertNotNull(detectedVersion, "Detected XML version should not be null");
+        assertEquals("202206192200", detectedVersion, "XML feed version must match date attribute in PFA root");
+    }
+
+    @Test
+    @DisplayName("Verify SchemaProvisioningService creates multiple flattened tables for multiple root tags")
+    void testMultiRootFlattenedTablesProvisioning() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        List<String> rootTags = List.of("Person", "CountryName", "Occupation", "Relationship");
+        List<String> createdTables = provisioningService.provisionDiscoveredTables(config, "sample-data/pfa-sample.xml", rootTags, Collections.emptyList());
+
+        assertNotNull(createdTables);
+        assertTrue(createdTables.contains("staging_xml_records"), "Must ensure central staging table exists");
+        assertTrue(createdTables.stream().anyMatch(t -> t.equalsIgnoreCase("person_flat") || t.equalsIgnoreCase("PersonFlat")),
+                "Must create flattened table for Person");
+        assertTrue(createdTables.stream().anyMatch(t -> t.equalsIgnoreCase("countryname_flat")),
+                "Must create flattened table for CountryName");
+        assertTrue(createdTables.stream().anyMatch(t -> t.equalsIgnoreCase("occupation_flat")),
+                "Must create flattened table for Occupation");
+        assertTrue(createdTables.stream().anyMatch(t -> t.equalsIgnoreCase("relationship_flat")),
+                "Must create flattened table for Relationship");
+
+        // Verify tables exist in target DB
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM countryname_flat", Integer.class);
+        assertNotNull(count, "countryname_flat table must exist and be queryable");
+    }
+
+    @Test
+    @DisplayName("Verify StAX streaming ingestion stages multi-root tags with XML & schema versioning into dedicated flat tables")
+    void testMultiRootStAXStreamingWithVersioningAndFlatTablePopulating() throws Exception {
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        List<String> roots = List.of("Person", "CountryName", "Occupation");
+        provisioningService.provisionDiscoveredTables(config, "sample-data/pfa-sample.xml", roots, Collections.emptyList());
+
+        // Clean staging and flat tables for isolated test verification
+        jdbc.execute("DELETE FROM staging_xml_records");
+        try { jdbc.execute("DELETE FROM person_flat"); } catch (Exception ignored) {}
+        try { jdbc.execute("DELETE FROM countryname_flat"); } catch (Exception ignored) {}
+        try { jdbc.execute("DELETE FROM occupation_flat"); } catch (Exception ignored) {}
+
+        // Stream XML with XML version and Schema version
+        String xmlVersion = "202206192200";
+        String schemaVersion = "v1.2.0";
+
+        com.enterprise.xmldbtool.service.StagingXmlStreamingService.StagingSummary summary = stagingStreamingService.streamXmlToStaging(
+                "sample-data/pfa-sample.xml",
+                roots,
+                xmlVersion,
+                schemaVersion,
+                99901L,
+                dataSource,
+                500
+        );
+
+        assertNotNull(summary);
+        assertTrue(summary.totalRead() > 0, "Should have streamed fragments for specified roots");
+        assertTrue(summary.stagedCount() > 0, "Should have staged records");
+
+        // Verify staging_xml_records has versioning columns populated
+        List<Map<String, Object>> stagedRows = jdbc.queryForList(
+                "SELECT entity_type, xml_version, schema_version, status FROM staging_xml_records WHERE job_execution_id = 99901"
+        );
+        assertFalse(stagedRows.isEmpty());
+        for (Map<String, Object> r : stagedRows) {
+            assertEquals(xmlVersion, r.get("xml_version"), "xml_version must be populated in staging");
+            assertEquals(schemaVersion, r.get("schema_version"), "schema_version must be populated in staging");
+        }
+
+        // Verify that countryname_flat received staged records
+        List<Map<String, Object>> countryFlatRows = jdbc.queryForList("SELECT * FROM countryname_flat WHERE job_execution_id = 99901");
+        assertFalse(countryFlatRows.isEmpty(), "countryname_flat must receive rows streamed for CountryName");
+        Map<String, Object> firstCountry = countryFlatRows.get(0);
+        assertEquals(xmlVersion, firstCountry.get("xml_version"));
+        assertEquals(schemaVersion, firstCountry.get("schema_version"));
+
+        // Verify that person_flat received staged records
+        List<Map<String, Object>> personFlatRows = jdbc.queryForList("SELECT * FROM person_flat WHERE job_execution_id = 99901");
+        assertFalse(personFlatRows.isEmpty(), "person_flat must receive rows streamed for Person");
+        Map<String, Object> firstPerson = personFlatRows.get(0);
+        assertEquals(xmlVersion, firstPerson.get("xml_version"));
+        assertEquals(schemaVersion, firstPerson.get("schema_version"));
+    }
+
+    @Test
+    @DisplayName("Verify Stage 2 Canonical Resolution projects staged data into canonical tables via mapping JSON and delta upsert")
+    void testDeltaProcessingWithMappingJsonAndStage2CanonicalNormalization() throws Exception {
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+
+        // Provision canonical and flat tables
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        provisioningService.provisionDiscoveredTables(config, "sample-data/pfa-sample.xml", List.of("Person"), Collections.emptyList());
+
+        // Clean tables for isolated delta test
+        jdbc.execute("DELETE FROM staging_xml_records");
+        try { jdbc.execute("DELETE FROM person_flat"); } catch (Exception ignored) {}
+        try { jdbc.execute("DELETE FROM Person"); } catch (Exception ignored) {}
+        try { jdbc.execute("DELETE FROM PersonName"); } catch (Exception ignored) {}
+
+        // Stream initial feed
+        stagingStreamingService.streamXmlToStaging(
+                "sample-data/pfa-sample.xml",
+                List.of("Person"),
+                "v1.0",
+                "v1.0.0",
+                99902L,
+                dataSource,
+                500
+        );
+
+        // Mappings representing the mapping JSON
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("Person/@id", "Person", "person_id", "PK", "NONE"),
+                new FieldMapping("Person/@action", "Person", "action", "NONE", "NONE"),
+                new FieldMapping("Person/@date", "Person", "record_date", "NONE", "NONE"),
+                new FieldMapping("Person/Gender", "Person", "gender", "NONE", "NONE"),
+                new FieldMapping("Person/ActiveStatus", "Person", "active_status", "NONE", "NONE"),
+                new FieldMapping("Person/NameDetails/Name/NamePart", "PersonName", "first_name", "NONE", "NONE")
+        );
+
+        // Run Stage 2 Canonical Normalization
+        com.enterprise.xmldbtool.service.DynamicSchemaResolutionService.NormalizationSummary normSummary = schemaResolutionService.normalizeStagingToCanonical(
+                99902L,
+                dataSource,
+                mappings,
+                List.of("Person", "PersonName"),
+                "Person",
+                500
+        );
+
+        assertNotNull(normSummary);
+        assertTrue(normSummary.normalizedCount() > 0, "Should have normalized staged records into canonical tables");
+
+        // Verify Person canonical table has records populated
+        Integer personCount = jdbc.queryForObject("SELECT COUNT(*) FROM Person", Integer.class);
+        assertNotNull(personCount);
+        assertTrue(personCount > 0, "Person table must contain normalized canonical records");
+
+        // Verify records in staging_xml_records and person_flat are marked NORMALIZED
+        Integer normalizedCount = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM staging_xml_records WHERE job_execution_id = 99902 AND status = 'NORMALIZED'",
+                Integer.class
+        );
+        assertEquals(personCount, normalizedCount, "All staged records must be marked NORMALIZED");
+
+        // Now test Delta feed with unchanged records: re-running identical payload should SKIP
+        com.enterprise.xmldbtool.service.StagingXmlStreamingService.StagingSummary deltaSummary = stagingStreamingService.streamXmlToStaging(
+                "sample-data/pfa-sample.xml",
+                List.of("Person"),
+                "v1.1",
+                "v1.0.0",
+                99903L,
+                dataSource,
+                500
+        );
+        assertTrue(deltaSummary.skippedUnchangedCount() > 0, "Unchanged records should be skipped via delta hash fingerprint");
+    }
+
+    @Test
+    @DisplayName("Verify _stage table creation, root tags/attributes in columns, sub-tags in JSON format, and UI exclusion")
+    void testStagingTableSuffixAndSubTagsInJsonFormat() throws Exception {
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/test.xml");
+        request.setRecordRootElement("person");
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess());
+
+        // 1. Verify _stage table is created
+        assertTrue(response.getCreatedTables().stream().anyMatch(t -> t.equalsIgnoreCase("person_stage")),
+                "Must create dedicated staging table 'person_stage' with _stage suffix");
+
+        // 2. Verify _stage tables are NOT shown in discoveredTables (hidden from UI)
+        assertFalse(response.getDiscoveredTables().stream().anyMatch(t -> t.getTableName().toLowerCase().endsWith("_stage")),
+                "_stage tables must NOT be shown in discoveredTables (golden source hidden from UI)");
+
+        // 3. Verify _stage table columns exist in DB
+        List<Map<String, Object>> cols = jdbc.queryForList(
+                "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'PERSON_STAGE'"
+        );
+        assertFalse(cols.isEmpty(), "person_stage columns must exist in database");
+        Set<String> colNames = cols.stream().map(c -> String.valueOf(c.get("COLUMN_NAME")).toLowerCase()).collect(java.util.stream.Collectors.toSet());
+
+        // Root attributes and leaf tags stored into columns
+        assertTrue(colNames.contains("id"), "person_stage must contain 'id' column");
+        assertTrue(colNames.contains("status"), "person_stage must contain 'status' column");
+        assertTrue(colNames.contains("name"), "person_stage must contain 'name' column");
+        assertTrue(colNames.contains("age"), "person_stage must contain 'age' column");
+
+        // Sub-tag 'addresses' column exists to hold nested structures in JSON format
+        assertTrue(colNames.contains("addresses"), "person_stage must contain sub-tag 'addresses' column");
+
+        // 4. Stream XML fragments and verify sub-tag is populated in JSON format
+        stagingStreamingService.streamXmlToStaging(
+                "sample-data/test.xml",
+                List.of("person"),
+                "v1.0",
+                "v1.0.0",
+                88801L,
+                dataSource,
+                500
+        );
+
+        List<Map<String, Object>> stageRows = jdbc.queryForList("SELECT * FROM person_stage WHERE job_execution_id = 88801");
+        assertFalse(stageRows.isEmpty(), "person_stage must have records streamed into it");
+        Map<String, Object> firstRow = stageRows.get(0);
+
+        assertEquals("James Smith", firstRow.get("name"), "Leaf tag 'name' stored into column");
+        assertEquals("active", firstRow.get("status"), "Attribute 'status' stored into column");
+        assertEquals("37", firstRow.get("age"), "Leaf tag 'age' stored into column");
+
+        // Verify sub-tag 'addresses' contains valid JSON format
+        Object addressesVal = firstRow.get("addresses");
+        assertNotNull(addressesVal, "Sub-tag 'addresses' column must not be null");
+        String addressesJson = String.valueOf(addressesVal);
+        assertTrue(addressesJson.startsWith("[") || addressesJson.startsWith("{"), "Sub-tag details must be stored in JSON format");
+        assertTrue(addressesJson.contains("123 Main St") || addressesJson.contains("street"), "Sub-tag JSON must contain address details");
+        assertTrue(addressesJson.contains("New York") || addressesJson.contains("city"), "Sub-tag JSON must contain city details");
+    }
+
+    @Test
+    @DisplayName("Verify table config and mapping details generated from XML file with PK/FK relationships when no ingest JSON is provided")
+    void testCanonicalTablesAndRelationshipsGenerationFromXmlFile() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/test.xml");
+        request.setRecordRootElement("person, country, countrylist, entity");
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess());
+
+        // 1. Verify canonical tables exist in discoveredTables
+        List<String> discoveredTableNames = response.getDiscoveredTables().stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .toList();
+        assertTrue(discoveredTableNames.contains("person"), "Discovered tables must include canonical 'person'");
+        assertTrue(discoveredTableNames.contains("address") || discoveredTableNames.contains("person_address"), "Discovered tables must include child 'address'");
+        assertTrue(discoveredTableNames.contains("country"), "Discovered tables must include canonical 'country'");
+
+        // 2. Verify mapping details are generated with PK and FK constraints
+        List<com.enterprise.xmldbtool.model.FieldMapping> mappings = response.getGeneratedMappings();
+        assertNotNull(mappings);
+        assertFalse(mappings.isEmpty(), "Generated mappings must not be empty");
+
+        assertTrue(mappings.stream().anyMatch(m -> "PK".equalsIgnoreCase(m.getConstraintType())),
+                "Generated mappings must contain Primary Key (PK) constraints");
+        assertTrue(mappings.stream().anyMatch(m -> "FK".equalsIgnoreCase(m.getConstraintType())),
+                "Generated mappings must contain Foreign Key (FK) constraints");
+
+        // 3. Verify relationships are discovered
+        List<com.enterprise.xmldbtool.model.TableRelationship> relationships = response.getDiscoveredRelationships();
+        assertNotNull(relationships);
+        assertFalse(relationships.isEmpty(), "Relationships must be discovered from XML hierarchy");
+        assertTrue(relationships.stream().anyMatch(r -> r.getChildColumn().toLowerCase().endsWith("_id")),
+                "Discovered relationships must link foreign key columns ending in _id");
+    }
+
+    @Test
+    @DisplayName("Verify table config and mapping details created based on User Ingest JSON file")
+    void testCanonicalTablesAndMappingsFromUserIngestJson() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        List<com.enterprise.xmldbtool.model.FieldMapping> userMappings = List.of(
+                new com.enterprise.xmldbtool.model.FieldMapping("Person/@id", "PersonCustom", "person_id", "NONE", "PK"),
+                new com.enterprise.xmldbtool.model.FieldMapping("Person/Gender", "PersonCustom", "gender", "NONE", "NONE"),
+                new com.enterprise.xmldbtool.model.FieldMapping("Person/NameDetails/Name/NameValue/FirstName", "PersonNameCustom", "first_name", "NONE", "NONE"),
+                new com.enterprise.xmldbtool.model.FieldMapping("Person/@id", "PersonNameCustom", "person_id", "NONE", "FK")
+        );
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/pfa-sample.xml");
+        request.setRecordRootElement("Person");
+        request.setMappings(userMappings);
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess());
+
+        // 1. Verify tables provisioned directly from Ingest JSON
+        List<String> discoveredTableNames = response.getDiscoveredTables().stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .toList();
+        assertTrue(discoveredTableNames.contains("personcustom"), "Must create PersonCustom table from user Ingest JSON");
+        assertTrue(discoveredTableNames.contains("personnamecustom"), "Must create PersonNameCustom table from user Ingest JSON");
+
+        // 2. Verify returned mappings match user Ingest JSON
+        assertEquals(userMappings.size(), response.getGeneratedMappings().size());
+        assertEquals("PersonCustom", response.getGeneratedMappings().get(0).getTargetTable());
+        assertEquals("PK", response.getGeneratedMappings().get(0).getConstraintType());
+
+        // 3. Verify relationships reflect User Ingest JSON PK-FK linking
+        List<com.enterprise.xmldbtool.model.TableRelationship> rels = response.getDiscoveredRelationships();
+        assertNotNull(rels);
+        assertTrue(rels.stream().anyMatch(r -> r.getChildTable().equalsIgnoreCase("PersonNameCustom") && r.getChildColumn().equalsIgnoreCase("person_id")),
+                "Must derive relationship from user Ingest JSON FK constraint");
+    }
+
+    @Test
+    @DisplayName("Verify mapping creation using ingestion.json file with multi-table PK/FK constraints")
+    void testMappingUsingIngestionJsonFile() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/test.xml");
+        request.setIngestionJsonPath("sample-data/ingestion.json");
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess());
+
+        List<com.enterprise.xmldbtool.model.FieldMapping> mappings = response.getGeneratedMappings();
+        assertNotNull(mappings);
+        assertEquals(16, mappings.size(), "Must load all 16 mappings defined in sample-data/ingestion.json");
+
+        // Verify target tables are identified and provisioned
+        List<String> discoveredTableNames = response.getDiscoveredTables().stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .toList();
+        assertTrue(discoveredTableNames.contains("person"), "Must provision Person table from ingestion.json");
+        assertTrue(discoveredTableNames.contains("address"), "Must provision Address child table from ingestion.json");
+        assertTrue(discoveredTableNames.contains("country"), "Must provision Country table from ingestion.json");
+        assertTrue(discoveredTableNames.contains("countrylist"), "Must provision CountryList table from ingestion.json");
+
+        // Verify PK and FK constraints from ingestion.json
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetTable().equalsIgnoreCase("Person") && m.getTargetColumn().equalsIgnoreCase("person_id") && "PK".equalsIgnoreCase(m.getConstraintType())));
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetTable().equalsIgnoreCase("Address") && m.getTargetColumn().equalsIgnoreCase("id") && "PK".equalsIgnoreCase(m.getConstraintType())));
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetTable().equalsIgnoreCase("Address") && m.getTargetColumn().equalsIgnoreCase("person_id") && "FK".equalsIgnoreCase(m.getConstraintType())));
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetTable().equalsIgnoreCase("Address") && m.getTargetColumn().equalsIgnoreCase("country_id") && "FK".equalsIgnoreCase(m.getConstraintType())));
+
+        // Verify child-parent relationships derived from ingestion.json
+        List<com.enterprise.xmldbtool.model.TableRelationship> relationships = response.getDiscoveredRelationships();
+        assertNotNull(relationships);
+        assertTrue(relationships.stream().anyMatch(r -> r.getChildTable().equalsIgnoreCase("Address") && r.getParentTable().equalsIgnoreCase("Person")),
+                "Must derive Address -> Person relationship");
+        assertTrue(relationships.stream().anyMatch(r -> r.getChildTable().equalsIgnoreCase("Address") && r.getParentTable().equalsIgnoreCase("Country")),
+                "Must derive Address -> Country cross-reference relationship");
+    }
+
+    @Test
+    @DisplayName("Verify dynamic mapping generation from XML tags & attributes with table identification and child-parent relationships")
+    void testDynamicMappingGenerationFromXmlTagsAndAttributesWithRelationships() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/test.xml");
+        request.setRecordRootElements(List.of("person", "country", "entity", "countrylist"));
+        request.setAutoCreateTables(true);
+        // Explicitly leave mappings and ingestionJsonPath empty to test dynamic XML tag scanning
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess());
+
+        List<com.enterprise.xmldbtool.model.FieldMapping> mappings = response.getGeneratedMappings();
+        assertNotNull(mappings);
+        assertFalse(mappings.isEmpty(), "Dynamically generated mappings must not be empty");
+
+        // 1. Table names identified from XML tags
+        Set<String> mappedTables = mappings.stream().map(m -> m.getTargetTable().toLowerCase()).collect(java.util.stream.Collectors.toSet());
+        assertTrue(mappedTables.contains("person"), "Table 'person' must be identified from XML");
+        assertTrue(mappedTables.contains("address") || mappedTables.contains("person_address"), "Child table 'address' must be identified from XML");
+        assertTrue(mappedTables.contains("country"), "Table 'country' must be identified from XML");
+        assertTrue(mappedTables.contains("entity"), "Table 'entity' must be identified from XML");
+
+        // 2. All XML attributes included in mappings
+        assertTrue(mappings.stream().anyMatch(m -> m.getXmlField().toLowerCase().contains("@id")),
+                "Must include @id attributes across entities");
+        assertTrue(mappings.stream().anyMatch(m -> m.getXmlField().toLowerCase().contains("@status")),
+                "Must include @status attributes (e.g. person/@status, entity/@status)");
+        assertTrue(mappings.stream().anyMatch(m -> m.getXmlField().toLowerCase().contains("@action")),
+                "Must include @action attributes (e.g. country/@action)");
+
+        // 3. All XML leaf tags included in mappings
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetColumn().equalsIgnoreCase("name")), "Must map 'name' tag");
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetColumn().equalsIgnoreCase("age")), "Must map 'age' tag");
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetColumn().equalsIgnoreCase("street")), "Must map 'street' tag");
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetColumn().equalsIgnoreCase("city")), "Must map 'city' tag");
+        assertTrue(mappings.stream().anyMatch(m -> m.getTargetColumn().equalsIgnoreCase("cost")), "Must map 'cost' tag");
+
+        // 4. PK and FK constraints and relationships
+        assertTrue(mappings.stream().anyMatch(m -> "PK".equalsIgnoreCase(m.getConstraintType())), "Must generate PK constraints");
+        assertTrue(mappings.stream().anyMatch(m -> "FK".equalsIgnoreCase(m.getConstraintType())), "Must generate FK constraints");
+
+        List<com.enterprise.xmldbtool.model.TableRelationship> rels = response.getDiscoveredRelationships();
+        assertNotNull(rels);
+        assertFalse(rels.isEmpty(), "Must discover child-parent relationships from XML hierarchy");
+
+        // Address child links to Person parent
+        assertTrue(rels.stream().anyMatch(r -> (r.getChildTable().equalsIgnoreCase("address") || r.getChildTable().equalsIgnoreCase("person_address"))
+                        && r.getParentTable().equalsIgnoreCase("person")),
+                "Must discover Address -> Person child-to-parent relationship");
+
+        // Address cross-reference links to Country
+        assertTrue(rels.stream().anyMatch(r -> (r.getChildTable().equalsIgnoreCase("address") || r.getChildTable().equalsIgnoreCase("person_address"))
+                        && r.getParentTable().equalsIgnoreCase("country")),
+                "Must discover Address -> Country cross-reference relationship");
+    }
+
+    @Test
+    @DisplayName("Verify Discovery Flow 1: Filter unrelated tags outside root tag hierarchy (UI & Discovery)")
+    void testDiscoveryFiltersUnrelatedTagsAndPreservesRootHierarchy() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:test_flow1;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/test.xml");
+        request.setRecordRootElements(List.of("person"));
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess());
+
+        List<com.enterprise.xmldbtool.model.DiscoveredElement> discovered = response.getDiscoveredXmlElements();
+        assertNotNull(discovered);
+        assertFalse(discovered.isEmpty(), "Must discover elements under root tag hierarchy");
+
+        Set<String> discoveredElementNames = discovered.stream()
+                .map(e -> e.getName().toLowerCase())
+                .collect(java.util.stream.Collectors.toSet());
+
+        // 1. Root tag and related attributes, child tags, child-of-child, grandchild tags MUST be present
+        assertTrue(discoveredElementNames.contains("person/@id") || discoveredElementNames.contains("person/id") || discoveredElementNames.contains("@id"),
+                "Must discover person/@id attribute");
+        assertTrue(discoveredElementNames.contains("person/@status") || discoveredElementNames.contains("person/status") || discoveredElementNames.contains("@status"),
+                "Must discover person/@status attribute");
+        assertTrue(discoveredElementNames.contains("person/name") || discoveredElementNames.contains("name"),
+                "Must discover person/name tag");
+        assertTrue(discoveredElementNames.contains("person/age") || discoveredElementNames.contains("age"),
+                "Must discover person/age tag");
+        assertTrue(discoveredElementNames.stream().anyMatch(n -> n.contains("addresses") || n.contains("address")),
+                "Must discover address hierarchy under person");
+
+        // 2. Unrelated tags outside 'person' hierarchy MUST be filtered out / ignored
+        assertFalse(discoveredElementNames.contains("canopyapp"), "Must ignore top-level container canopyapp");
+        assertFalse(discoveredElementNames.contains("countrylists"), "Must ignore unrelated countrylists container");
+        assertFalse(discoveredElementNames.contains("countrylist"), "Must ignore unrelated countrylist elements");
+        assertFalse(discoveredElementNames.contains("countries"), "Must ignore unrelated countries container");
+        assertFalse(discoveredElementNames.contains("country"), "Must ignore unrelated country elements");
+        assertFalse(discoveredElementNames.contains("entities"), "Must ignore unrelated entities container");
+        assertFalse(discoveredElementNames.contains("entity"), "Must ignore unrelated entity elements");
+        assertFalse(discoveredElementNames.contains("descriptionlist1s"), "Must ignore unrelated descriptionlist1s");
+        assertFalse(discoveredElementNames.contains("descriptionlist1"), "Must ignore unrelated descriptionlist1");
+
+        // 3. _stage tables must be hidden from UI canonical tables
+        List<String> canonicalTables = response.getDiscoveredTables().stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .toList();
+        assertFalse(canonicalTables.contains("person_stage"), "person_stage must be hidden from canonical UI tables");
+        assertFalse(canonicalTables.stream().anyMatch(t -> t.endsWith("_stage")), "No _stage table should be visible in UI canonical tables");
+    }
+
+    @Test
+    @DisplayName("Verify Discovery Flow 2: Mapping JSON strict inclusion in UI and DB with unmapped tags ignored")
+    void testDiscoveryIncludesMappedTagsAndIgnoresOthersInDbAndUi() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:test_flow2;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest request = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/test.xml");
+        request.setIngestionJsonPath("sample-data/ingestion.json");
+        request.setAutoCreateTables(true);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        assertTrue(response.isSuccess());
+
+        // 1. In UI: discovered XML elements should only include mapped tags, other tags ignored
+        List<com.enterprise.xmldbtool.model.DiscoveredElement> discovered = response.getDiscoveredXmlElements();
+        assertNotNull(discovered);
+        Set<String> discoveredNames = discovered.stream()
+                .map(e -> e.getName().toLowerCase())
+                .collect(java.util.stream.Collectors.toSet());
+
+        // Mapped elements present
+        assertTrue(discoveredNames.stream().anyMatch(n -> n.contains("person")), "Mapped 'person' tags must be discovered");
+        assertTrue(discoveredNames.stream().anyMatch(n -> n.contains("address")), "Mapped 'address' tags must be discovered");
+        assertTrue(discoveredNames.stream().anyMatch(n -> n.contains("country")), "Mapped 'country' tags must be discovered");
+        assertTrue(discoveredNames.stream().anyMatch(n -> n.contains("countrylist")), "Mapped 'countrylist' tags must be discovered");
+
+        // Unmapped elements strictly ignored
+        assertFalse(discoveredNames.contains("entities"), "Unmapped 'entities' container must be ignored");
+        assertFalse(discoveredNames.contains("entity"), "Unmapped 'entity' elements must be ignored");
+        assertFalse(discoveredNames.contains("descriptionlist1s"), "Unmapped 'descriptionlist1s' container must be ignored");
+        assertFalse(discoveredNames.contains("descriptionlist1"), "Unmapped 'descriptionlist1' elements must be ignored");
+        assertFalse(discoveredNames.contains("canopyapp"), "Unmapped document root 'canopyapp' must be ignored");
+
+        // 2. In UI: canonical tables should only include mapped tables
+        List<String> canonicalTables = response.getDiscoveredTables().stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .toList();
+        assertTrue(canonicalTables.contains("person"), "Discovered canonical tables must contain mapped Person table");
+        assertTrue(canonicalTables.contains("address"), "Discovered canonical tables must contain mapped Address table");
+        assertTrue(canonicalTables.contains("country"), "Discovered canonical tables must contain mapped Country table");
+        assertTrue(canonicalTables.contains("countrylist"), "Discovered canonical tables must contain mapped CountryList table");
+        assertFalse(canonicalTables.contains("entities"), "Unmapped 'entities' table must NOT be in canonical UI tables");
+        assertFalse(canonicalTables.contains("descriptionlist1"), "Unmapped 'descriptionlist1' table must NOT be in canonical UI tables");
+
+        // 3. In Target DB: unmapped tables must NOT be provisioned in the database schema
+        List<com.enterprise.xmldbtool.model.TableMetadata> actualDbTables = dataSourceService.retrieveDatabaseSchema(config);
+        Set<String> actualDbTableNames = actualDbTables.stream()
+                .map(t -> t.getTableName().toLowerCase())
+                .collect(java.util.stream.Collectors.toSet());
+
+        assertTrue(actualDbTableNames.contains("person"), "DB must have provisioned mapped table Person");
+        assertTrue(actualDbTableNames.contains("address"), "DB must have provisioned mapped table Address");
+        assertTrue(actualDbTableNames.contains("country"), "DB must have provisioned mapped table Country");
+        assertTrue(actualDbTableNames.contains("countrylist"), "DB must have provisioned mapped table CountryList");
+        assertFalse(actualDbTableNames.contains("entities"), "DB must NOT have provisioned unmapped table entities");
+        assertFalse(actualDbTableNames.contains("entity"), "DB must NOT have provisioned unmapped table entity");
+        assertFalse(actualDbTableNames.contains("descriptionlist1s"), "DB must NOT have provisioned unmapped table descriptionlist1s");
+        assertFalse(actualDbTableNames.contains("descriptionlist1"), "DB must NOT have provisioned unmapped table descriptionlist1");
     }
 }
 
