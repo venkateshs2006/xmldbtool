@@ -412,7 +412,30 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             } catch (Exception ex) {
                 // If write failed because of a missing column from delta schema evolution, attempt self-healing ALTER TABLE and retry once
                 String exMsg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
-                if (exMsg.contains("not found") || exMsg.contains("does not exist") || exMsg.contains("ora-00904") || exMsg.contains("column")) {
+                if (exMsg.contains("value too long")) {
+                    try {
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile("column \"([^\"]+)\"").matcher(ex.getMessage());
+                        if (m.find()) {
+                            String colName = m.group(1).split(" ")[0];
+                            boolean isOracleDb = databaseProductName != null && databaseProductName.toLowerCase().contains("oracle");
+                            String alterSql = isOracleDb ? "ALTER TABLE " + tableName + " MODIFY (" + colName + " CLOB)"
+                                    : "ALTER TABLE " + tableName + " ALTER COLUMN " + colName + " SET DATA TYPE TEXT";
+                            jdbcTemplate.getJdbcOperations().execute(alterSql);
+                            log.info("Expanded column '{}' in table '{}' to CLOB/TEXT due to value too long error", colName, tableName);
+                            MapSqlParameterSource[] retryArray = batchParams.toArray(new MapSqlParameterSource[0]);
+                            int[] updateCounts = jdbcTemplate.batchUpdate(insertOrUpsertSql, retryArray);
+                            long writtenCount = updateCounts.length;
+                            totalRowsWritten.addAndGet(writtenCount);
+                            tableWriteCounts.compute(tableName, (k, v) -> (v == null ? 0L : v) + writtenCount);
+                            if (savepoint != null && conn != null) {
+                                try { conn.releaseSavepoint(savepoint); } catch (Exception ignored) {}
+                            }
+                            continue;
+                        }
+                    } catch (Exception retryEx) {
+                        log.warn("Value too long self-healing retry failed for '{}': {}", tableName, retryEx.getMessage());
+                    }
+                } else if (exMsg.contains("not found") || exMsg.contains("does not exist") || exMsg.contains("ora-00904") || exMsg.contains("column")) {
                     try {
                         log.info("Attempting self-healing ALTER TABLE for table '{}' due to missing column error: {}", tableName, ex.getMessage());
                         ensureColumnsExist(tableName, columnNames);
@@ -731,8 +754,18 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                 }
             }
 
-            // 3. Fallback: infer from mapped column naming conventions
-            if (pks.isEmpty() && mappedColumns != null) {
+            // 3. Fallback: infer from mapped column naming conventions if pks is empty OR if pks has no match in mappedColumns
+            boolean hasOverlap = false;
+            if (mappedColumns != null && !pks.isEmpty()) {
+                for (String pk : pks) {
+                    if (mappedColumns.stream().anyMatch(c -> c.equalsIgnoreCase(pk))) {
+                        hasOverlap = true;
+                        break;
+                    }
+                }
+            }
+            if (!hasOverlap && mappedColumns != null) {
+                pks.clear();
                 pks.addAll(inferPrimaryKeys(tableName, mappedColumns));
             }
 
@@ -749,14 +782,24 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
 
         String normTable = tableName != null ? tableName.toLowerCase() : "";
 
-        // Check common identifier column names
+        // Check common identifier column names FIRST
         for (String col : columns) {
             String norm = col.toLowerCase();
-            if (norm.equals("id") || norm.equals(normTable + "_id") || norm.equals(normTable + "id")
-                    || norm.equals("sku") || norm.equals("location_code") || norm.equals("order_id")
-                    || norm.equals("code") || norm.endsWith("_id") || norm.endsWith("_pk") || norm.endsWith("_code")) {
+            if (norm.equals(normTable + "_id") || norm.equals(normTable + "id")
+                    || norm.equals("id") || norm.equals("sku") || norm.equals("location_code")
+                    || norm.equals("order_id") || norm.equals("code")
+                    || (norm.endsWith("_id") && !norm.equalsIgnoreCase("source_bnpp_id") && !norm.equalsIgnoreCase("staging_bnpp_id"))
+                    || norm.endsWith("_pk") || norm.endsWith("_code")) {
                 inferred.add(norm);
-                break;
+                return inferred;
+            }
+        }
+
+        // If no business key column is present, fallback to bnpp_id
+        for (String col : columns) {
+            if ("bnpp_id".equalsIgnoreCase(col)) {
+                inferred.add(col);
+                return inferred;
             }
         }
 
@@ -810,7 +853,18 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         }
         insertSql.append(")").append(placeholders).append(")");
 
-        // If no primary key could be identified, fallback to standard INSERT
+        // If no primary key could be matched from metadata, fallback to bnpp_id if present
+        if (matchedPks.isEmpty() && columns != null) {
+            for (String col : columns) {
+                if ("bnpp_id".equalsIgnoreCase(col)) {
+                    matchedPks.add(col);
+                    nonPkCols.remove(col);
+                    break;
+                }
+            }
+        }
+
+        // If still no primary key could be identified, fallback to standard INSERT
         if (matchedPks.isEmpty()) {
             return insertSql.toString();
         }
@@ -825,6 +879,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             StringBuilder onDup = new StringBuilder(" ON DUPLICATE KEY UPDATE ");
             int uIdx = 0;
             for (String col : nonPkCols) {
+                if (col.equalsIgnoreCase("created_at")) continue;
                 if (uIdx > 0) onDup.append(", ");
                 String quoted = quoteIdentifier(col, dbProduct, actualCols);
                 onDup.append(quoted).append(" = VALUES(").append(quoted).append(")");
@@ -859,27 +914,28 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         }
 
         // 3. PostgreSQL / SQLite / ANSI: ON CONFLICT (pk...) DO UPDATE SET col = EXCLUDED.col
-        StringBuilder onConflict = new StringBuilder(" ON CONFLICT (");
-        int pkIdx = 0;
-        for (String pk : matchedPks) {
-            if (pkIdx > 0) onConflict.append(", ");
-            onConflict.append(quoteIdentifier(pk, dbProduct, actualCols));
-            pkIdx++;
-        }
-        onConflict.append(")");
-
-        if (nonPkCols.isEmpty()) {
-            onConflict.append(" DO NOTHING");
-        } else {
-            onConflict.append(" DO UPDATE SET ");
-            int uIdx = 0;
-            for (String col : nonPkCols) {
-                if (uIdx > 0) onConflict.append(", ");
-                String quoted = quoteIdentifier(col, dbProduct, actualCols);
-                onConflict.append(quoted).append(" = EXCLUDED.").append(quoted);
-                uIdx++;
+            StringBuilder onConflict = new StringBuilder(" ON CONFLICT (");
+            int pkIdx = 0;
+            for (String pk : matchedPks) {
+                if (pkIdx > 0) onConflict.append(", ");
+                onConflict.append(quoteIdentifier(pk, dbProduct, actualCols));
+                pkIdx++;
             }
-        }
+            onConflict.append(")");
+
+            List<String> updateCols = nonPkCols.stream().filter(c -> !c.equalsIgnoreCase("created_at")).toList();
+            if (updateCols.isEmpty()) {
+                onConflict.append(" DO NOTHING");
+            } else {
+                onConflict.append(" DO UPDATE SET ");
+                int uIdx = 0;
+                for (String col : updateCols) {
+                    if (uIdx > 0) onConflict.append(", ");
+                    String quoted = quoteIdentifier(col, dbProduct, actualCols);
+                    onConflict.append(quoted).append(" = EXCLUDED.").append(quoted);
+                    uIdx++;
+                }
+            }
 
         return insertSql.append(onConflict).toString();
     }

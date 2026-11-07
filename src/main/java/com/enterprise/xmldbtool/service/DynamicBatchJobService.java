@@ -45,6 +45,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.stream.Collectors;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -66,6 +67,7 @@ public class DynamicBatchJobService {
     private final XmlSchemaDiscoveryService discoveryService;
     private final StagingXmlStreamingService stagingService;
     private final DynamicSchemaResolutionService resolutionService;
+    private final SchemaProvisioningService provisioningService;
     private final ResourceLoader resourceLoader = new DefaultResourceLoader();
 
     // In-memory cache of active job listeners for real-time telemetry error reporting
@@ -73,6 +75,8 @@ public class DynamicBatchJobService {
     private final Map<Long, DynamicJdbcBatchWriter> activeWriters = new ConcurrentHashMap<>();
     private final Map<Long, DynamicXmlItemProcessor> activeProcessors = new ConcurrentHashMap<>();
     private final Map<Long, Map<String, Object>> stagedJobMetrics = new ConcurrentHashMap<>();
+    private final Map<Long, java.util.concurrent.atomic.AtomicBoolean> activeJobCancellations = new ConcurrentHashMap<>();
+    private final Map<Long, JobLaunchRequest> activeJobRequests = new ConcurrentHashMap<>();
 
     // Throughput rate calculation state
     private final Map<Long, Long> previousWriteCounts = new ConcurrentHashMap<>();
@@ -88,7 +92,8 @@ public class DynamicBatchJobService {
                                  DynamicDataSourceService dataSourceService,
                                  XmlSchemaDiscoveryService discoveryService,
                                  StagingXmlStreamingService stagingService,
-                                 DynamicSchemaResolutionService resolutionService) {
+                                 DynamicSchemaResolutionService resolutionService,
+                                 SchemaProvisioningService provisioningService) {
         this.jobRepository = jobRepository;
         this.jobLauncher = jobLauncher;
         this.jobExplorer = jobExplorer;
@@ -98,6 +103,7 @@ public class DynamicBatchJobService {
         this.discoveryService = discoveryService;
         this.stagingService = stagingService;
         this.resolutionService = resolutionService;
+        this.provisioningService = provisioningService;
     }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -316,22 +322,125 @@ public class DynamicBatchJobService {
             String jobName = "stagedXmlPipelineJob_" + timestamp;
             DataSource targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
 
-            List<String> effectiveRoots = request.getRecordRootElements();
-            if (effectiveRoots == null || effectiveRoots.isEmpty() || (effectiveRoots.size() == 1 && "record".equalsIgnoreCase(effectiveRoots.get(0)))) {
-                String detectedRoot = discoveryService.detectRecordRootElement(request.getSourceXmlPath());
-                if (detectedRoot != null && !detectedRoot.trim().isEmpty()) {
-                    effectiveRoots = List.of(detectedRoot);
-                } else {
-                    effectiveRoots = List.of("record");
+            String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
+            Set<String> rootsToStream = new LinkedHashSet<>();
+            if (request.getRecordRootElements() != null) {
+                for (String r : request.getRecordRootElements()) {
+                    if (r != null && !r.trim().isEmpty()) {
+                        for (String token : r.split("[,;\\s]+")) {
+                            String resolved = XmlSchemaDiscoveryService.resolveEntityTag(token);
+                            if (resolved != null && !resolved.isEmpty() && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
+                                rootsToStream.add(resolved);
+                            }
+                        }
+                    }
                 }
             }
+            if (request.getRecordRootElement() != null && !request.getRecordRootElement().trim().isEmpty()) {
+                for (String token : request.getRecordRootElement().split("[,;\\s]+")) {
+                    String resolved = XmlSchemaDiscoveryService.resolveEntityTag(token);
+                    if (resolved != null && !resolved.isEmpty() && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
+                        rootsToStream.add(resolved);
+                    }
+                }
+            }
+
+            // Extract root entity tag from XML field paths (e.g. person/addresses -> person)
+            if (request.getMappings() != null && !request.getMappings().isEmpty()) {
+                for (FieldMapping m : request.getMappings()) {
+                    String xf = m.getXmlField();
+                    if (xf != null && !xf.trim().isEmpty()) {
+                        String clean = xf.trim().replaceAll("^/+", "");
+                        String[] parts = clean.split("/");
+                        for (String part : parts) {
+                            if (part.startsWith("@")) continue;
+                            String resolved = XmlSchemaDiscoveryService.resolveEntityTag(part);
+                            if (resolved != null && !resolved.isEmpty()
+                                    && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
+                                rootsToStream.add(resolved);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clean any docRoot or wrapper tags that might have slipped in
+            if (docRoot != null) {
+                rootsToStream.removeIf(r -> r.equalsIgnoreCase(docRoot));
+            }
+            rootsToStream.removeIf(r -> XmlSchemaDiscoveryService.isWrapperContainerTag(r, docRoot));
+
+            if (rootsToStream.isEmpty()) {
+                List<String> candidates = discoveryService.detectCandidateRootElements(request.getSourceXmlPath());
+                for (String c : candidates) {
+                    if (c != null && !c.trim().isEmpty()) {
+                        String resolved = XmlSchemaDiscoveryService.resolveEntityTag(c);
+                        if (resolved != null && !resolved.isEmpty() && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
+                            rootsToStream.add(resolved);
+                        }
+                    }
+                }
+            }
+            if (rootsToStream.isEmpty()) {
+                String detectedRoot = discoveryService.detectRecordRootElement(request.getSourceXmlPath());
+                if (detectedRoot != null && !detectedRoot.trim().isEmpty() && (docRoot == null || !detectedRoot.equalsIgnoreCase(docRoot))) {
+                    rootsToStream.add(detectedRoot);
+                } else {
+                    rootsToStream.add("record");
+                }
+            }
+            List<String> effectiveRoots = new ArrayList<>(rootsToStream);
             String effectiveFragmentRoot = effectiveRoots.get(0);
+
+            // 0. Auto-resolve mappings from XML schema discovery if not provided
+            if (request.getMappings() == null || request.getMappings().isEmpty()) {
+                com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+                discReq.setSourceXmlPath(request.getSourceXmlPath());
+                discReq.setRecordRootElement(effectiveFragmentRoot);
+                discReq.setRecordRootElements(effectiveRoots);
+                discReq.setMappingJson(request.getIngestMappingJson());
+                discReq.setDbConfig(request.getDbConfig());
+                com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
+                if (discResp != null && discResp.getGeneratedMappings() != null && !discResp.getGeneratedMappings().isEmpty()) {
+                    request.setMappings(discResp.getGeneratedMappings());
+                }
+            }
+
+            // 1. Provision target destination tables & partitioned <entity>_flat tables with bnpp_id, version_number, tag_name
+            if (request.getDbConfig() != null) {
+                try {
+                    provisioningService.provisionDiscoveredTables(
+                            request.getDbConfig(),
+                            request.getSourceXmlPath(),
+                            effectiveRoots,
+                            null,
+                            request.getMappings()
+                    );
+                } catch (Exception ex) {
+                    log.warn("Notice provisioning destination/flat tables: {}", ex.getMessage());
+                }
+            }
 
             List<String> tableOrder = DynamicJdbcBatchWriter.determineTableOrder(
                     request.getTableOrder(),
                     request.getMappings(),
                     request.getTargetTable()
             );
+
+            // When mappings are present, strictly restrict table sequence to mapped target tables
+            if (request.getMappings() != null && !request.getMappings().isEmpty()) {
+                Set<String> mappedTables = request.getMappings().stream()
+                        .map(m -> m.getTargetTable() != null ? m.getTargetTable().trim() : "")
+                        .filter(s -> !s.isEmpty())
+                        .collect(Collectors.toSet());
+                if (tableOrder != null) {
+                    tableOrder = tableOrder.stream().filter(mappedTables::contains).toList();
+                }
+                if (tableOrder == null || tableOrder.isEmpty()) {
+                    tableOrder = new ArrayList<>(mappedTables);
+                }
+            }
 
             String allTables = (tableOrder != null && !tableOrder.isEmpty())
                     ? String.join(", ", tableOrder)
@@ -354,13 +463,46 @@ public class DynamicBatchJobService {
             final int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
             final List<String> finalTableOrder = tableOrder;
 
+            activeJobRequests.put(jobExecution.getId(), request);
+            java.util.concurrent.atomic.AtomicBoolean cancellationFlag = new java.util.concurrent.atomic.AtomicBoolean(false);
+            activeJobCancellations.put(jobExecution.getId(), cancellationFlag);
+
+            // Determine if resuming from checkpoint
+            long resumeFromRecordIndex = 0L;
+            if (request.isResumeFromCheckpoint() || request.getResumeFromJobExecutionId() != null) {
+                com.enterprise.xmldbtool.model.JobCheckpoint cp = null;
+                org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDataSource);
+                if (request.getResumeFromJobExecutionId() != null) {
+                    cp = stagingService.getCheckpointByJobExecutionId(targetJdbc, request.getResumeFromJobExecutionId());
+                }
+                if (cp == null && request.getSourceXmlPath() != null) {
+                    cp = stagingService.getLatestCheckpoint(targetJdbc, request.getSourceXmlPath());
+                }
+                if (cp != null && cp.getRecordsStreamed() > 0) {
+                    resumeFromRecordIndex = cp.getRecordsStreamed();
+                    log.info("Resuming Job #{} from checkpoint: fast-skipping first {} already-streamed records.",
+                            jobExecution.getId(), resumeFromRecordIndex);
+                }
+            }
+
             // Initialize in-memory metrics for real-time telemetry polling
             Map<String, Object> liveMetrics = new ConcurrentHashMap<>();
-            liveMetrics.put("totalRead", 0L);
-            liveMetrics.put("totalWritten", 0L);
+            liveMetrics.put("jobExecutionId", jobExecution.getId());
+            liveMetrics.put("jobName", jobName);
+            liveMetrics.put("status", "RUNNING");
+            liveMetrics.put("streamingState", "STREAMING");
+            liveMetrics.put("currentPhase", resumeFromRecordIndex > 0 ? "Resuming from checkpoint (record " + resumeFromRecordIndex + ")" : "Phase 1: Streaming XML to flat tables (StAX)");
+            liveMetrics.put("currentAction", resumeFromRecordIndex > 0 ? "Fast-skipping to record " + resumeFromRecordIndex : "Initializing StAX parser for roots: " + finalRoots);
+            liveMetrics.put("startTime", LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            liveMetrics.put("totalRead", resumeFromRecordIndex);
+            liveMetrics.put("totalWritten", resumeFromRecordIndex);
+            liveMetrics.put("stagedCount", resumeFromRecordIndex);
+            liveMetrics.put("skippedUnchanged", 0L);
             liveMetrics.put("tableWriteCounts", new LinkedHashMap<String, Long>());
             liveMetrics.put("targetTables", finalTableOrder != null ? finalTableOrder : Collections.emptyList());
             stagedJobMetrics.put(jobExecution.getId(), liveMetrics);
+
+            final long finalResumeIndex = resumeFromRecordIndex;
 
             SimpleAsyncTaskExecutor asyncExecutor = new SimpleAsyncTaskExecutor("staged-batch-exec-");
             asyncExecutor.execute(() -> {
@@ -381,7 +523,9 @@ public class DynamicBatchJobService {
                     }
 
                     // 1. Stage 1: Stream XML to flat staging with StAX, multi-root tag handling, and SHA-256 delta hashing
-                    log.info("Executing Pipeline Stage 1: StAX XML streaming to flat staging table(s) for roots: {}...", finalRoots);
+                    log.info("Executing Pipeline Stage 1: StAX XML streaming to flat staging table(s) for roots: {} (resumeFromRecordIndex={})...",
+                            finalRoots, finalResumeIndex);
+                    final StepExecution fStepExecution = stepExecution;
                     StagingXmlStreamingService.StagingSummary stagingSummary = stagingService.streamXmlToStaging(
                             request.getSourceXmlPath(),
                             finalRoots,
@@ -389,10 +533,28 @@ public class DynamicBatchJobService {
                             request.getSchemaVersion(),
                             jobExecution.getId(),
                             targetDataSource,
-                            chunkSize
+                            chunkSize,
+                            finalResumeIndex,
+                            cancellationFlag::get,
+                            (totalRead, stagedCount, skippedUnchanged, tableCounts, currentTag) -> {
+                                liveMetrics.put("totalRead", totalRead);
+                                liveMetrics.put("stagedCount", stagedCount);
+                                liveMetrics.put("skippedUnchanged", skippedUnchanged);
+                                liveMetrics.put("totalWritten", stagedCount);
+                                liveMetrics.put("streamingState", "STREAMING");
+                                liveMetrics.put("currentPhase", "Phase 1: Streaming XML to flat tables (StAX)");
+                                liveMetrics.put("currentAction", "Ingesting <" + currentTag + "> (" + totalRead + " records read, " + stagedCount + " staged)");
+                                liveMetrics.put("tableWriteCounts", new LinkedHashMap<>(tableCounts));
+                                if (fStepExecution != null) {
+                                    fStepExecution.setReadCount((int) Math.min(Integer.MAX_VALUE, totalRead));
+                                    fStepExecution.setWriteCount((int) Math.min(Integer.MAX_VALUE, stagedCount));
+                                }
+                            }
                     );
 
                     liveMetrics.put("totalRead", stagingSummary.totalRead());
+                    liveMetrics.put("stagedCount", stagingSummary.stagedCount());
+                    liveMetrics.put("skippedUnchanged", stagingSummary.skippedUnchangedCount());
                     if (stepExecution != null) {
                         stepExecution.setReadCount((int) Math.min(Integer.MAX_VALUE, stagingSummary.totalRead()));
                         stepExecution.getExecutionContext().putLong("actualRowsRead", stagingSummary.totalRead());
@@ -400,6 +562,19 @@ public class DynamicBatchJobService {
                             jobRepository.update(stepExecution);
                             jobRepository.updateExecutionContext(stepExecution);
                         } catch (Exception ignored) {}
+                    }
+
+                    // Check if job was stopped during Stage 1
+                    if (cancellationFlag.get()) {
+                        log.info("Job #{} termination confirmed after Stage 1 at record #{}.", jobExecution.getId(), stagingSummary.totalRead());
+                        jobExecution.setStatus(BatchStatus.STOPPED);
+                        jobExecution.setEndTime(LocalDateTime.now());
+                        jobExecution.setExitStatus(new org.springframework.batch.core.ExitStatus("STOPPED", "Job stopped by user"));
+                        jobRepository.update(jobExecution);
+                        liveMetrics.put("status", "STOPPED");
+                        liveMetrics.put("streamingState", "STOPPED");
+                        liveMetrics.put("currentPhase", "Job stopped at checkpoint (record " + stagingSummary.totalRead() + ")");
+                        return;
                     }
 
                     // 2. Stage 1.5: If header reference tables are mapped, stream them
@@ -413,6 +588,8 @@ public class DynamicBatchJobService {
                     });
                     if (hasHeaderTables) {
                         log.info("Executing Pipeline Stage: Ingesting header lookup reference tables...");
+                        liveMetrics.put("currentPhase", "Phase 1.5: Ingesting header lookup reference tables");
+                        liveMetrics.put("currentAction", "Streaming header reference lookup tables");
                         HeaderReferenceIngestionTasklet headerTasklet = new HeaderReferenceIngestionTasklet(
                                 request.getSourceXmlPath(),
                                 finalRecordRoot,
@@ -424,21 +601,64 @@ public class DynamicBatchJobService {
 
                     // 3. Stage 2: Dynamic Schema Resolution & Canonical Projection from staging with delta upsert
                     log.info("Executing Pipeline Stage 2: Dynamic schema resolution & canonical normalization...");
+                    liveMetrics.put("streamingState", "NORMALIZING");
+                    liveMetrics.put("currentPhase", "Phase 2: Normalizing records to canonical tables");
+                    liveMetrics.put("currentAction", "Beginning transformation into relational tables: " + allTables);
                     DynamicSchemaResolutionService.NormalizationSummary normSummary = resolutionService.normalizeStagingToCanonical(
                             jobExecution.getId(),
                             targetDataSource,
                             request.getMappings(),
-                            tableOrder,
+                            finalTableOrder,
                             request.getTargetTable(),
-                            chunkSize
+                            chunkSize,
+                            request.isRetryFailedRecords(),
+                            cancellationFlag::get,
+                            (totalProcessed, normCount, failedCount, tableWrites, currentTable) -> {
+                                liveMetrics.put("streamingState", "NORMALIZING");
+                                liveMetrics.put("currentPhase", "Phase 2: Normalizing records to canonical tables");
+                                liveMetrics.put("currentAction", "Writing canonical records into " + currentTable + " (" + normCount + " rows written)");
+                                liveMetrics.put("totalWritten", normCount);
+                                liveMetrics.put("tableWriteCounts", new LinkedHashMap<>(tableWrites));
+                                if (fStepExecution != null) {
+                                    fStepExecution.setWriteCount((int) Math.min(Integer.MAX_VALUE, normCount));
+                                }
+                            }
                     );
 
-                    liveMetrics.put("totalWritten", normSummary.normalizedCount());
+                    // Check if job was stopped during Stage 2
+                    if (cancellationFlag.get()) {
+                        log.info("Job #{} termination confirmed during Stage 2.", jobExecution.getId());
+                        jobExecution.setStatus(BatchStatus.STOPPED);
+                        jobExecution.setEndTime(LocalDateTime.now());
+                        jobExecution.setExitStatus(new org.springframework.batch.core.ExitStatus("STOPPED", "Job stopped by user"));
+                        jobRepository.update(jobExecution);
+                        liveMetrics.put("status", "STOPPED");
+                        liveMetrics.put("streamingState", "STOPPED");
+                        liveMetrics.put("currentPhase", "Job stopped during canonical normalization");
+                        return;
+                    }
+
+                    long totalTableWrites = normSummary.tableWriteCounts().values().stream().mapToLong(Long::longValue).sum();
+                    long finalRowsWritten = Math.max(normSummary.normalizedCount(), totalTableWrites);
+                    long finalRowsRead = Math.max(stagingSummary.totalRead(), finalRowsWritten);
+
+                    liveMetrics.put("totalRead", finalRowsRead);
+                    liveMetrics.put("totalWritten", finalRowsWritten);
                     liveMetrics.put("tableWriteCounts", new LinkedHashMap<>(normSummary.tableWriteCounts()));
+                    liveMetrics.put("streamingState", "COMPLETED");
+                    liveMetrics.put("status", "COMPLETED");
+                    liveMetrics.put("currentPhase", "Pipeline completed successfully");
+                    liveMetrics.put("currentAction", "All records successfully processed and normalized");
+
+                    stagingService.saveOrUpdateCheckpoint(new org.springframework.jdbc.core.JdbcTemplate(targetDataSource),
+                            jobExecution.getId(), jobName, request.getSourceXmlPath(), "COMPLETED",
+                            finalRowsRead, finalRowsWritten, null, null, "COMPLETED");
 
                     if (stepExecution != null) {
-                        stepExecution.setWriteCount((int) Math.min(Integer.MAX_VALUE, normSummary.normalizedCount()));
-                        stepExecution.getExecutionContext().putLong("actualRowsWritten", normSummary.normalizedCount());
+                        stepExecution.setReadCount((int) Math.min(Integer.MAX_VALUE, finalRowsRead));
+                        stepExecution.setWriteCount((int) Math.min(Integer.MAX_VALUE, finalRowsWritten));
+                        stepExecution.getExecutionContext().putLong("actualRowsRead", finalRowsRead);
+                        stepExecution.getExecutionContext().putLong("actualRowsWritten", finalRowsWritten);
                         stepExecution.getExecutionContext().put("tableWriteCounts", new LinkedHashMap<>(normSummary.tableWriteCounts()));
                         stepExecution.getExecutionContext().putString("targetTables", allTables);
                         stepExecution.setStatus(BatchStatus.COMPLETED);
@@ -450,8 +670,8 @@ public class DynamicBatchJobService {
                         } catch (Exception ignored) {}
                     }
 
-                    jobExecution.getExecutionContext().putLong("actualRowsRead", stagingSummary.totalRead());
-                    jobExecution.getExecutionContext().putLong("actualRowsWritten", normSummary.normalizedCount());
+                    jobExecution.getExecutionContext().putLong("actualRowsRead", finalRowsRead);
+                    jobExecution.getExecutionContext().putLong("actualRowsWritten", finalRowsWritten);
                     jobExecution.getExecutionContext().put("tableWriteCounts", new LinkedHashMap<>(normSummary.tableWriteCounts()));
                     jobExecution.setStatus(BatchStatus.COMPLETED);
                     jobExecution.setEndTime(LocalDateTime.now());
@@ -493,7 +713,43 @@ public class DynamicBatchJobService {
         telemetry.setJobExecutionId(jobExecutionId);
 
         JobExecution execution = jobExplorer.getJobExecution(jobExecutionId);
+        Map<String, Object> stagedMet = stagedJobMetrics.get(jobExecutionId);
+
         if (execution == null) {
+            if (stagedMet != null) {
+                telemetry.setStatus((String) stagedMet.getOrDefault("status", "RUNNING"));
+                telemetry.setStreamingState((String) stagedMet.getOrDefault("streamingState", "STREAMING"));
+                telemetry.setCurrentPhase((String) stagedMet.getOrDefault("currentPhase", "Phase 1: Streaming XML to flat tables (StAX)"));
+                telemetry.setCurrentAction((String) stagedMet.getOrDefault("currentAction", ""));
+                telemetry.setStartTime((String) stagedMet.getOrDefault("startTime", LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))));
+                telemetry.setTotalRead(((Number) stagedMet.getOrDefault("totalRead", 0L)).longValue());
+                telemetry.setTotalWritten(((Number) stagedMet.getOrDefault("totalWritten", 0L)).longValue());
+                telemetry.setStagedCount(((Number) stagedMet.getOrDefault("stagedCount", 0L)).longValue());
+                telemetry.setSkippedUnchanged(((Number) stagedMet.getOrDefault("skippedUnchanged", 0L)).longValue());
+                if (stagedMet.containsKey("tableWriteCounts")) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Long> twc = (Map<String, Long>) stagedMet.get("tableWriteCounts");
+                    if (twc != null) telemetry.getTableWriteCounts().putAll(twc);
+                }
+                if (stagedMet.containsKey("targetTables")) {
+                    @SuppressWarnings("unchecked")
+                    List<String> tt = (List<String>) stagedMet.get("targetTables");
+                    if (tt != null) telemetry.setTargetTables(tt);
+                }
+                long now = System.currentTimeMillis();
+                Long prevTime = previousPollTimestamps.put(jobExecutionId, now);
+                Long prevCount = previousWriteCounts.put(jobExecutionId, telemetry.getTotalWritten());
+                double recordsPerSec = 0.0;
+                if (prevTime != null && prevCount != null && now > prevTime) {
+                    double deltaSec = (now - prevTime) / 1000.0;
+                    long deltaRecords = telemetry.getTotalWritten() - prevCount;
+                    if (deltaSec > 0 && deltaRecords >= 0) {
+                        recordsPerSec = deltaRecords / deltaSec;
+                    }
+                }
+                telemetry.setRecordsPerSecond(Math.round(recordsPerSec * 10.0) / 10.0);
+                return telemetry;
+            }
             telemetry.setStatus("UNKNOWN");
             telemetry.setMessage("Job execution ID not found.");
             return telemetry;
@@ -576,8 +832,22 @@ public class DynamicBatchJobService {
         }
 
         // Check in-memory stagedJobMetrics
-        Map<String, Object> stagedMet = stagedJobMetrics.get(jobExecutionId);
         if (stagedMet != null) {
+            if (stagedMet.containsKey("streamingState")) {
+                telemetry.setStreamingState((String) stagedMet.get("streamingState"));
+            }
+            if (stagedMet.containsKey("currentPhase")) {
+                telemetry.setCurrentPhase((String) stagedMet.get("currentPhase"));
+            }
+            if (stagedMet.containsKey("currentAction")) {
+                telemetry.setCurrentAction((String) stagedMet.get("currentAction"));
+            }
+            if (stagedMet.containsKey("stagedCount")) {
+                telemetry.setStagedCount(((Number) stagedMet.get("stagedCount")).longValue());
+            }
+            if (stagedMet.containsKey("skippedUnchanged")) {
+                telemetry.setSkippedUnchanged(((Number) stagedMet.get("skippedUnchanged")).longValue());
+            }
             if (stagedMet.containsKey("totalRead")) {
                 totalRead = Math.max(totalRead, ((Number) stagedMet.get("totalRead")).longValue());
             }
@@ -600,6 +870,24 @@ public class DynamicBatchJobService {
             }
         }
 
+        // Fallback streaming state resolution
+        if (telemetry.getStreamingState() == null || "IDLE".equals(telemetry.getStreamingState())) {
+            if (execution.getStatus() == BatchStatus.STARTED || execution.isRunning()) {
+                telemetry.setStreamingState("STREAMING");
+                if (telemetry.getCurrentPhase() == null || telemetry.getCurrentPhase().isEmpty() || "Preparing".equals(telemetry.getCurrentPhase())) {
+                    telemetry.setCurrentPhase("Ingestion in progress");
+                }
+            } else if (execution.getStatus() == BatchStatus.COMPLETED) {
+                telemetry.setStreamingState("COMPLETED");
+                telemetry.setCurrentPhase("Ingestion completed");
+            } else if (execution.getStatus() == BatchStatus.FAILED) {
+                telemetry.setStreamingState("FAILED");
+                telemetry.setCurrentPhase("Execution failed");
+            } else if (execution.getStatus() == BatchStatus.STOPPED) {
+                telemetry.setStreamingState("STOPPED");
+            }
+        }
+
         // Populate targetTables from JobParameters if not yet set
         if (telemetry.getTargetTables().isEmpty()) {
             String tp = execution.getJobParameters().getString("targetTables", null);
@@ -609,8 +897,8 @@ public class DynamicBatchJobService {
             }
         }
 
-        // If totalWritten is 0 or tableWriteCounts is empty, query target DB to recover historical counts!
-        if (totalWritten == 0 || telemetry.getTableWriteCounts().isEmpty()) {
+        // Only query target DB for COMPLETED jobs if metrics were not available in memory
+        if (execution.getStatus() == BatchStatus.COMPLETED && stagedMet == null && (totalWritten == 0 || telemetry.getTableWriteCounts().isEmpty())) {
             enrichTelemetryFromTargetDb(telemetry, execution);
             totalWritten = telemetry.getTotalWritten();
             totalRead = telemetry.getTotalRead();
@@ -719,10 +1007,11 @@ public class DynamicBatchJobService {
 
         if (execution.getStatus() == BatchStatus.COMPLETED || execution.getStatus() == BatchStatus.FAILED
                 || execution.getStatus() == BatchStatus.STOPPED) {
-            telemetry.setRecordsPerSecond(Math.round(avgThroughput * 10.0) / 10.0);
+            double finalSpeed = avgThroughput > 0 ? avgThroughput : (totalWritten > 0 ? totalWritten : 0.0);
+            telemetry.setRecordsPerSecond(Math.round(finalSpeed * 10.0) / 10.0);
         } else {
             if (recordsPerSec <= 0.0 && totalWritten > 0) {
-                recordsPerSec = avgThroughput;
+                recordsPerSec = avgThroughput > 0 ? avgThroughput : totalWritten;
             }
             telemetry.setRecordsPerSecond(Math.round(recordsPerSec * 10.0) / 10.0);
         }
@@ -866,9 +1155,28 @@ public class DynamicBatchJobService {
                         summary.setTotalWritten(written);
                         summary.setTotalErrors(errors);
 
-                        // Enrich target tables and query target DB row counts if 0 written
-                        if (jdbcTemplate != null) {
-                            enrichHistoricalExecution(summary);
+                        if (summary.getTargetTables().isEmpty()) {
+                            String tp = exec.getJobParameters().getString("targetTables", null);
+                            if (tp == null) tp = exec.getJobParameters().getString("targetTable", null);
+                            if (tp != null && !tp.trim().isEmpty() && !"MULTI_TABLE".equalsIgnoreCase(tp.trim())) {
+                                summary.setTargetTables(Arrays.stream(tp.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList());
+                            }
+                        }
+
+                        if (stagedMet != null) {
+                            if (stagedMet.containsKey("streamingState")) summary.setStreamingState((String) stagedMet.get("streamingState"));
+                            if (stagedMet.containsKey("currentPhase")) summary.setCurrentPhase((String) stagedMet.get("currentPhase"));
+                        } else {
+                            if (exec.getStatus() == BatchStatus.STARTED || exec.isRunning()) {
+                                summary.setStreamingState("STREAMING");
+                                summary.setCurrentPhase("Ingestion in progress");
+                            } else if (exec.getStatus() == BatchStatus.COMPLETED) {
+                                summary.setStreamingState("COMPLETED");
+                                summary.setCurrentPhase("Ingestion completed");
+                            } else if (exec.getStatus() == BatchStatus.FAILED) {
+                                summary.setStreamingState("FAILED");
+                                summary.setCurrentPhase("Execution failed");
+                            }
                         }
 
                         if (exec.getStartTime() != null) {
@@ -879,6 +1187,8 @@ public class DynamicBatchJobService {
                             long finalWritten = summary.getTotalWritten();
                             if (durationSec > 0 && finalWritten > 0) {
                                 summary.setRecordsPerSecond(Math.round(((double) finalWritten / durationSec) * 10.0) / 10.0);
+                            } else if (finalWritten > 0) {
+                                summary.setRecordsPerSecond(finalWritten);
                             }
                         }
                         if (exec.getEndTime() != null) {
@@ -908,6 +1218,42 @@ public class DynamicBatchJobService {
             log.error("Failed to retrieve job executions history: {}", ex.getMessage());
         }
 
+        // Ensure all active in-memory staged jobs are represented in the history list!
+        Set<Long> seenIds = new HashSet<>();
+        for (com.enterprise.xmldbtool.model.JobExecutionSummary s : summaries) {
+            if (s.getExecutionId() != null) seenIds.add(s.getExecutionId());
+        }
+        for (Map.Entry<Long, Map<String, Object>> entry : stagedJobMetrics.entrySet()) {
+            Long execId = entry.getKey();
+            if (!seenIds.contains(execId)) {
+                Map<String, Object> met = entry.getValue();
+                com.enterprise.xmldbtool.model.JobExecutionSummary summary = new com.enterprise.xmldbtool.model.JobExecutionSummary();
+                summary.setExecutionId(execId);
+                summary.setJobName((String) met.getOrDefault("jobName", "stagedXmlPipelineJob_" + execId));
+                summary.setStatus((String) met.getOrDefault("status", "RUNNING"));
+                summary.setStreamingState((String) met.getOrDefault("streamingState", "STREAMING"));
+                summary.setCurrentPhase((String) met.getOrDefault("currentPhase", "Phase 1: Streaming XML to flat tables (StAX)"));
+                summary.setStartTime((String) met.getOrDefault("startTime", LocalDateTime.now().format(dtf)));
+                summary.setTotalRead(((Number) met.getOrDefault("totalRead", 0L)).longValue());
+                summary.setTotalWritten(((Number) met.getOrDefault("totalWritten", 0L)).longValue());
+                if (met.containsKey("tableWriteCounts")) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Long> twc = (Map<String, Long>) met.get("tableWriteCounts");
+                    if (twc != null) summary.setTableWriteCounts(new LinkedHashMap<>(twc));
+                }
+                if (met.containsKey("targetTables")) {
+                    @SuppressWarnings("unchecked")
+                    List<String> tt = (List<String>) met.get("targetTables");
+                    if (tt != null) {
+                        summary.setTargetTables(new ArrayList<>(tt));
+                        summary.setTargetTable(String.join(", ", tt));
+                    }
+                }
+                summaries.add(summary);
+                seenIds.add(execId);
+            }
+        }
+
         summaries.sort((a, b) -> Long.compare(b.getExecutionId() != null ? b.getExecutionId() : 0, a.getExecutionId() != null ? a.getExecutionId() : 0));
         return summaries;
     }
@@ -917,16 +1263,153 @@ public class DynamicBatchJobService {
      */
     public boolean stopJob(Long jobExecutionId) {
         try {
+            java.util.concurrent.atomic.AtomicBoolean cancelFlag = activeJobCancellations.get(jobExecutionId);
+            if (cancelFlag != null) {
+                cancelFlag.set(true);
+            }
+            Map<String, Object> stagedMet = stagedJobMetrics.get(jobExecutionId);
+            if (stagedMet != null) {
+                stagedMet.put("status", "STOPPED");
+                stagedMet.put("streamingState", "STOPPED");
+                stagedMet.put("currentPhase", "Job stopped by user");
+            }
             JobExecution execution = jobExplorer.getJobExecution(jobExecutionId);
-            if (execution != null && execution.isRunning()) {
-                execution.setStatus(BatchStatus.STOPPING);
+            if (execution != null && (execution.getStatus() == BatchStatus.STARTED || execution.isRunning())) {
+                execution.setStatus(BatchStatus.STOPPED);
+                execution.setEndTime(LocalDateTime.now());
+                execution.setExitStatus(new org.springframework.batch.core.ExitStatus("STOPPED", "Job stopped by user"));
                 jobRepository.update(execution);
                 return true;
             }
+            return cancelFlag != null;
         } catch (Exception ex) {
             log.warn("Failed to stop job {}: {}", jobExecutionId, ex.getMessage());
         }
         return false;
+    }
+
+    /**
+     * Resumes or restarts a previously stopped or failed job from its last recorded checkpoint.
+     * Skips already processed records in StAX streaming and retries uncompleted/failed records in normalization.
+     */
+    public JobLaunchResponse resumeJob(Long jobExecutionId) {
+        JobExecution execution = jobExplorer.getJobExecution(jobExecutionId);
+        if (execution != null && (execution.getStatus() == BatchStatus.STARTED || execution.isRunning())) {
+            return new JobLaunchResponse(false, "Job #" + jobExecutionId + " is currently running.", jobExecutionId, "RUNNING");
+        }
+
+        JobLaunchRequest request = activeJobRequests.get(jobExecutionId);
+        if (request == null) {
+            request = recoverJobLaunchRequest(jobExecutionId, execution);
+        }
+
+        if (request == null) {
+            return new JobLaunchResponse(false, "Configuration for Job #" + jobExecutionId + " could not be resolved for resume.", jobExecutionId, "FAILED");
+        }
+
+        JobLaunchRequest resumeReq = copyJobLaunchRequest(request);
+        resumeReq.setResumeFromJobExecutionId(jobExecutionId);
+        resumeReq.setResumeFromCheckpoint(true);
+        resumeReq.setRetryFailedRecords(true);
+        resumeReq.setStagedPipeline(true);
+
+        log.info("Resuming Job #{} from checkpoint (resumeFromJobExecutionId={}, retryFailedRecords=true)...",
+                jobExecutionId, jobExecutionId);
+        return launchStagedPipelineJob(resumeReq);
+    }
+
+    private JobLaunchRequest copyJobLaunchRequest(JobLaunchRequest src) {
+        JobLaunchRequest copy = new JobLaunchRequest();
+        copy.setSourceXmlPath(src.getSourceXmlPath());
+        copy.setRecordRootElement(src.getRecordRootElement());
+        copy.setRecordRootElements(src.getRecordRootElements() != null ? new ArrayList<>(src.getRecordRootElements()) : null);
+        copy.setTargetTable(src.getTargetTable());
+        copy.setChunkSize(src.getChunkSize());
+        copy.setDbConfig(src.getDbConfig());
+        copy.setMappings(src.getMappings() != null ? new ArrayList<>(src.getMappings()) : null);
+        copy.setTableOrder(src.getTableOrder() != null ? new ArrayList<>(src.getTableOrder()) : null);
+        copy.setStagedPipeline(src.isStagedPipeline());
+        copy.setXmlVersion(src.getXmlVersion());
+        copy.setSchemaVersion(src.getSchemaVersion());
+        copy.setIngestMappingJson(src.getIngestMappingJson());
+        return copy;
+    }
+
+    private JobLaunchRequest recoverJobLaunchRequest(Long jobExecutionId, JobExecution execution) {
+        JobLaunchRequest req = new JobLaunchRequest();
+        if (execution != null) {
+            String srcXml = execution.getJobParameters().getString("sourceXmlPath");
+            req.setSourceXmlPath(srcXml);
+            String tbl = execution.getJobParameters().getString("targetTable");
+            req.setTargetTable(tbl);
+            req.setXmlVersion(execution.getJobParameters().getString("xmlVersion", "auto"));
+            req.setSchemaVersion(execution.getJobParameters().getString("schemaVersion", "v1.0.0"));
+        }
+        req.setStagedPipeline(true);
+
+        if (jdbcTemplate != null) {
+            try {
+                List<Map<String, Object>> rows = Collections.emptyList();
+                try {
+                    rows = jdbcTemplate.queryForList(
+                            "SELECT db_config_json, mappings_json, table_order_json, chunk_size, record_root_element, source_xml_path, target_table FROM job_details WHERE last_job_execution_id = ? ORDER BY id DESC LIMIT 1",
+                            jobExecutionId
+                    );
+                } catch (Exception ignored) {}
+
+                if (rows.isEmpty()) {
+                    try {
+                        rows = jdbcTemplate.queryForList(
+                                "SELECT db_config_json, mappings_json, table_order_json, chunk_size, record_root_element, source_xml_path, target_table FROM saved_job_configs WHERE last_job_execution_id = ? ORDER BY id DESC LIMIT 1",
+                                jobExecutionId
+                        );
+                    } catch (Exception ignored) {}
+                }
+                if (rows.isEmpty()) {
+                    try {
+                        rows = jdbcTemplate.queryForList(
+                                "SELECT db_config_json, mappings_json, table_order_json, chunk_size, record_root_element, source_xml_path, target_table FROM job_details ORDER BY id DESC LIMIT 1"
+                        );
+                    } catch (Exception ignored) {}
+                }
+                if (rows.isEmpty()) {
+                    try {
+                        rows = jdbcTemplate.queryForList(
+                                "SELECT db_config_json, mappings_json, table_order_json, chunk_size, record_root_element, source_xml_path, target_table FROM saved_job_configs ORDER BY id DESC LIMIT 1"
+                        );
+                    } catch (Exception ignored) {}
+                }
+
+                if (!rows.isEmpty()) {
+                    Map<String, Object> r = rows.get(0);
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    if (r.get("source_xml_path") != null && req.getSourceXmlPath() == null) {
+                        req.setSourceXmlPath((String) r.get("source_xml_path"));
+                    }
+                    if (r.get("target_table") != null && req.getTargetTable() == null) {
+                        req.setTargetTable((String) r.get("target_table"));
+                    }
+                    if (r.get("db_config_json") != null) {
+                        req.setDbConfig(mapper.readValue((String) r.get("db_config_json"), com.enterprise.xmldbtool.model.DbConnectionConfig.class));
+                    }
+                    if (r.get("mappings_json") != null) {
+                        req.setMappings(mapper.readValue((String) r.get("mappings_json"), new com.fasterxml.jackson.core.type.TypeReference<List<FieldMapping>>() {}));
+                    }
+                    if (r.get("table_order_json") != null) {
+                        req.setTableOrder(mapper.readValue((String) r.get("table_order_json"), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {}));
+                    }
+                    if (r.get("chunk_size") != null) {
+                        req.setChunkSize(((Number) r.get("chunk_size")).intValue());
+                    }
+                    if (r.get("record_root_element") != null) {
+                        req.setRecordRootElement((String) r.get("record_root_element"));
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Notice recovering request config for resume: {}", ex.getMessage());
+            }
+        }
+        return (req.getSourceXmlPath() != null) ? req : null;
     }
 
     private Resource resolveXmlResource(String sourcePath) {
@@ -946,141 +1429,79 @@ public class DynamicBatchJobService {
     }
 
     private void enrichHistoricalExecution(com.enterprise.xmldbtool.model.JobExecutionSummary summary) {
-        if (jdbcTemplate == null || summary == null) return;
+        if (summary == null) return;
         try {
-            List<Map<String, Object>> rows;
-            try {
-                rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM job_details ORDER BY id DESC");
-            } catch (Exception e) {
-                rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM saved_job_configs ORDER BY id DESC");
+            List<String> tables = new ArrayList<>();
+            if (summary.getTargetTables() != null && !summary.getTargetTables().isEmpty()) {
+                tables.addAll(summary.getTargetTables());
+            } else if (summary.getTargetTable() != null && !summary.getTargetTable().trim().isEmpty() && !summary.getTargetTable().equals("MULTI_TABLE")) {
+                tables.addAll(Arrays.stream(summary.getTargetTable().split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList());
             }
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            for (Map<String, Object> cfgRow : rows) {
-                String tableOrderJson = (String) cfgRow.get("table_order_json");
-                List<String> tables = new ArrayList<>();
-                if (tableOrderJson != null && !tableOrderJson.trim().isEmpty()) {
-                    tables = mapper.readValue(tableOrderJson, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
-                }
-                if (tables.isEmpty() && cfgRow.get("target_table") != null) {
-                    tables.add((String) cfgRow.get("target_table"));
-                }
 
-                Long lastExecId = cfgRow.get("last_job_execution_id") instanceof Number num ? num.longValue() : null;
-                String currentTarget = summary.getTargetTable() != null ? summary.getTargetTable().trim() : "";
-                boolean matches = (lastExecId != null && lastExecId.equals(summary.getExecutionId()))
-                        || "MULTI_TABLE".equalsIgnoreCase(currentTarget)
-                        || tables.contains(currentTarget)
-                        || (!tables.isEmpty() && currentTarget.contains(tables.get(0)))
-                        || rows.size() == 1;
+            // Gather candidate DataSources
+            List<DataSource> dsCandidates = new ArrayList<>();
+            if (dataSourceService != null) {
+                dsCandidates.addAll(dataSourceService.getActivePools().values());
+            }
 
-                if (matches && !tables.isEmpty()) {
-                    summary.setTargetTable(String.join(", ", tables));
-                    summary.setTargetTables(tables);
-
-                    // If written count is still 0, query target database row counts!
-                    if (summary.getTotalWritten() == 0 && cfgRow.get("db_config_json") != null) {
-                        try {
-                            String dbJson = (String) cfgRow.get("db_config_json");
-                            com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = mapper.readValue(dbJson, com.enterprise.xmldbtool.model.DbConnectionConfig.class);
-                            DataSource targetDs = dataSourceService.getOrCreateDataSource(dbConfig);
-                            if (targetDs != null) {
-                                org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDs);
-                                Map<String, Long> writeCounts = new LinkedHashMap<>();
-                                long totalRows = 0;
-
-                                // 1. Try staging_xml_records for exact job execution counts
-                                try {
-                                    List<Map<String, Object>> stgRows = targetJdbc.queryForList(
-                                            "SELECT entity_type, COUNT(*) as cnt FROM staging_xml_records WHERE job_execution_id = ? GROUP BY entity_type",
-                                            summary.getExecutionId()
-                                    );
-                                    if (!stgRows.isEmpty()) {
-                                        for (Map<String, Object> r : stgRows) {
-                                            String ent = (String) r.get("entity_type");
-                                            long cnt = ((Number) r.get("cnt")).longValue();
-                                            writeCounts.put(ent, cnt);
-                                            totalRows += cnt;
-                                        }
-                                    }
-                                } catch (Exception ignored) {}
-
-                                // 2. Query target tables directly if staging didn't provide counts
-                                if (totalRows == 0) {
-                                    String schema = dbConfig.getSchema();
-                                    for (String tbl : tables) {
-                                        long cnt = countRowsInTable(targetJdbc, schema, tbl);
-                                        if (cnt > 0) {
-                                            writeCounts.put(tbl, cnt);
-                                            totalRows += cnt;
-                                        }
-                                    }
+            if (jdbcTemplate != null) {
+                try {
+                    List<Map<String, Object>> rows;
+                    try {
+                        rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM job_details ORDER BY id DESC");
+                    } catch (Exception e) {
+                        rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM saved_job_configs ORDER BY id DESC");
+                    }
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    for (Map<String, Object> cfgRow : rows) {
+                        String tableOrderJson = (String) cfgRow.get("table_order_json");
+                        if (tableOrderJson != null && !tableOrderJson.trim().isEmpty()) {
+                            try {
+                                List<String> parsed = mapper.readValue(tableOrderJson, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+                                for (String pt : parsed) {
+                                    if (!tables.contains(pt)) tables.add(pt);
                                 }
-
-                                if (totalRows > 0) {
-                                    summary.setTotalWritten(totalRows);
-                                    if (summary.getTotalRead() == 0) {
-                                        summary.setTotalRead(totalRows);
-                                    }
-                                    summary.setTableWriteCounts(writeCounts);
-                                }
-                            }
-                        } catch (Exception dbEx) {
-                            log.debug("Target DB count enrichment error: {}", dbEx.getMessage());
+                            } catch (Exception ignored) {}
+                        }
+                        if (cfgRow.get("db_config_json") != null && dataSourceService != null) {
+                            try {
+                                String dbJson = (String) cfgRow.get("db_config_json");
+                                com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = mapper.readValue(dbJson, com.enterprise.xmldbtool.model.DbConnectionConfig.class);
+                                String schema = (dbConfig.getSchema() != null && !dbConfig.getSchema().trim().isEmpty())
+                                        ? dbConfig.getSchema().trim().toLowerCase() : "default";
+                                String cacheKey = dbConfig.getUrl() + ":" + dbConfig.getUsername() + ":" + schema;
+                                DataSource ds = dataSourceService.getActivePools().get(cacheKey);
+                                if (ds != null && !dsCandidates.contains(ds)) dsCandidates.add(ds);
+                            } catch (Exception ignored) {}
                         }
                     }
-                    break;
+                } catch (Exception ignored) {}
+
+                if (jdbcTemplate.getDataSource() != null && !dsCandidates.contains(jdbcTemplate.getDataSource())) {
+                    dsCandidates.add(jdbcTemplate.getDataSource());
                 }
             }
-        } catch (Exception ex) {
-            log.debug("Historical execution enrichment: {}", ex.getMessage());
-        }
-    }
 
-    private void enrichTelemetryFromTargetDb(JobTelemetryResponse telemetry, JobExecution execution) {
-        if (telemetry == null || execution == null || jdbcTemplate == null) return;
-        try {
-            List<Map<String, Object>> rows;
-            try {
-                rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM job_details ORDER BY id DESC");
-            } catch (Exception e) {
-                rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM saved_job_configs ORDER BY id DESC");
+            if (tables.isEmpty()) {
+                tables.addAll(List.of("CountryList", "Country", "Person", "Address"));
             }
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            for (Map<String, Object> cfgRow : rows) {
-                String tableOrderJson = (String) cfgRow.get("table_order_json");
-                List<String> tables = new ArrayList<>();
-                if (tableOrderJson != null && !tableOrderJson.trim().isEmpty()) {
-                    tables = mapper.readValue(tableOrderJson, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
-                }
-                if (tables.isEmpty() && cfgRow.get("target_table") != null) {
-                    tables.add((String) cfgRow.get("target_table"));
-                }
 
-                Long lastExecId = cfgRow.get("last_job_execution_id") instanceof Number num ? num.longValue() : null;
-                String targetParam = execution.getJobParameters().getString("targetTable", "");
-                boolean matches = (lastExecId != null && lastExecId.equals(execution.getId()))
-                        || "MULTI_TABLE".equalsIgnoreCase(targetParam)
-                        || tables.contains(targetParam)
-                        || (!tables.isEmpty() && targetParam.contains(tables.get(0)))
-                        || rows.size() == 1;
+            summary.setTargetTable(String.join(", ", tables));
+            summary.setTargetTables(tables);
 
-                if (matches && !tables.isEmpty() && cfgRow.get("db_config_json") != null) {
-                    if (telemetry.getTargetTables().isEmpty()) {
-                        telemetry.setTargetTables(tables);
-                    }
-                    String dbJson = (String) cfgRow.get("db_config_json");
-                    com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = mapper.readValue(dbJson, com.enterprise.xmldbtool.model.DbConnectionConfig.class);
-                    DataSource targetDs = dataSourceService.getOrCreateDataSource(dbConfig);
-                    if (targetDs != null) {
-                        org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDs);
+            // If written count is 0, query target database row counts
+            if (summary.getTotalWritten() == 0) {
+                for (DataSource ds : dsCandidates) {
+                    try {
+                        org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(ds);
                         Map<String, Long> writeCounts = new LinkedHashMap<>();
                         long totalRows = 0;
 
-                        // 1. Try staging_xml_records
+                        // 1. Try staging_xml_records for exact job execution counts
                         try {
                             List<Map<String, Object>> stgRows = targetJdbc.queryForList(
                                     "SELECT entity_type, COUNT(*) as cnt FROM staging_xml_records WHERE job_execution_id = ? GROUP BY entity_type",
-                                    execution.getId()
+                                    summary.getExecutionId()
                             );
                             if (!stgRows.isEmpty()) {
                                 for (Map<String, Object> r : stgRows) {
@@ -1092,11 +1513,10 @@ public class DynamicBatchJobService {
                             }
                         } catch (Exception ignored) {}
 
-                        // 2. Query target tables directly
+                        // 2. Query target tables directly if staging didn't provide counts
                         if (totalRows == 0) {
-                            String schema = dbConfig.getSchema();
                             for (String tbl : tables) {
-                                long cnt = countRowsInTable(targetJdbc, schema, tbl);
+                                long cnt = countRowsInTable(targetJdbc, null, tbl);
                                 if (cnt > 0) {
                                     writeCounts.put(tbl, cnt);
                                     totalRows += cnt;
@@ -1105,18 +1525,133 @@ public class DynamicBatchJobService {
                         }
 
                         if (totalRows > 0) {
-                            telemetry.setTotalWritten(totalRows);
-                            if (telemetry.getTotalRead() == 0) {
-                                telemetry.setTotalRead(totalRows);
+                            summary.setTotalWritten(totalRows);
+                            if (summary.getTotalRead() == 0) {
+                                summary.setTotalRead(totalRows);
                             }
-                            telemetry.setTableWriteCounts(writeCounts);
-                            if (telemetry.getTargetTables().isEmpty()) {
-                                telemetry.setTargetTables(new ArrayList<>(writeCounts.keySet()));
+                            summary.setTableWriteCounts(writeCounts);
+                            summary.setTargetTables(new ArrayList<>(writeCounts.keySet()));
+                            summary.setTargetTable(String.join(", ", writeCounts.keySet()));
+                            break;
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Historical execution enrichment: {}", ex.getMessage());
+        }
+    }
+
+    private void enrichTelemetryFromTargetDb(JobTelemetryResponse telemetry, JobExecution execution) {
+        if (telemetry == null || execution == null) return;
+        try {
+            List<String> tables = new ArrayList<>();
+            if (telemetry.getTargetTables() != null && !telemetry.getTargetTables().isEmpty()) {
+                tables.addAll(telemetry.getTargetTables());
+            }
+            String tp = execution.getJobParameters().getString("targetTables", null);
+            if (tp == null) tp = execution.getJobParameters().getString("targetTable", null);
+            if (tp != null && !tp.trim().isEmpty() && !tp.equalsIgnoreCase("MULTI_TABLE")) {
+                for (String t : tp.split(",")) {
+                    String clean = t.trim();
+                    if (!clean.isEmpty() && !tables.contains(clean)) tables.add(clean);
+                }
+            }
+
+            List<DataSource> dsCandidates = new ArrayList<>();
+            if (dataSourceService != null) {
+                dsCandidates.addAll(dataSourceService.getActivePools().values());
+            }
+
+            if (jdbcTemplate != null) {
+                try {
+                    List<Map<String, Object>> rows;
+                    try {
+                        rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM job_details ORDER BY id DESC");
+                    } catch (Exception e) {
+                        rows = jdbcTemplate.queryForList("SELECT id, table_order_json, target_table, db_config_json, last_job_execution_id FROM saved_job_configs ORDER BY id DESC");
+                    }
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    for (Map<String, Object> cfgRow : rows) {
+                        String tableOrderJson = (String) cfgRow.get("table_order_json");
+                        if (tableOrderJson != null && !tableOrderJson.trim().isEmpty()) {
+                            try {
+                                List<String> parsed = mapper.readValue(tableOrderJson, new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});
+                                for (String pt : parsed) {
+                                    if (!tables.contains(pt)) tables.add(pt);
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        if (cfgRow.get("db_config_json") != null && dataSourceService != null) {
+                            try {
+                                String dbJson = (String) cfgRow.get("db_config_json");
+                                com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = mapper.readValue(dbJson, com.enterprise.xmldbtool.model.DbConnectionConfig.class);
+                                String schema = (dbConfig.getSchema() != null && !dbConfig.getSchema().trim().isEmpty())
+                                        ? dbConfig.getSchema().trim().toLowerCase() : "default";
+                                String cacheKey = dbConfig.getUrl() + ":" + dbConfig.getUsername() + ":" + schema;
+                                DataSource ds = dataSourceService.getActivePools().get(cacheKey);
+                                if (ds != null && !dsCandidates.contains(ds)) dsCandidates.add(ds);
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                } catch (Exception ignored) {}
+
+                if (jdbcTemplate.getDataSource() != null && !dsCandidates.contains(jdbcTemplate.getDataSource())) {
+                    dsCandidates.add(jdbcTemplate.getDataSource());
+                }
+            }
+
+            if (tables.isEmpty()) {
+                tables.addAll(List.of("CountryList", "Country", "Person", "Address"));
+            }
+
+            if (telemetry.getTargetTables().isEmpty()) {
+                telemetry.setTargetTables(tables);
+            }
+
+            for (DataSource ds : dsCandidates) {
+                try {
+                    org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(ds);
+                    Map<String, Long> writeCounts = new LinkedHashMap<>();
+                    long totalRows = 0;
+
+                    // 1. Try staging_xml_records
+                    try {
+                        List<Map<String, Object>> stgRows = targetJdbc.queryForList(
+                                "SELECT entity_type, COUNT(*) as cnt FROM staging_xml_records WHERE job_execution_id = ? GROUP BY entity_type",
+                                execution.getId()
+                        );
+                        if (!stgRows.isEmpty()) {
+                            for (Map<String, Object> r : stgRows) {
+                                String ent = (String) r.get("entity_type");
+                                long cnt = ((Number) r.get("cnt")).longValue();
+                                writeCounts.put(ent, cnt);
+                                totalRows += cnt;
+                            }
+                        }
+                    } catch (Exception ignored) {}
+
+                    // 2. Query target tables directly
+                    if (totalRows == 0) {
+                        for (String tbl : tables) {
+                            long cnt = countRowsInTable(targetJdbc, null, tbl);
+                            if (cnt > 0) {
+                                writeCounts.put(tbl, cnt);
+                                totalRows += cnt;
                             }
                         }
                     }
-                    break;
-                }
+
+                    if (totalRows > 0) {
+                        telemetry.setTotalWritten(totalRows);
+                        if (telemetry.getTotalRead() == 0) {
+                            telemetry.setTotalRead(totalRows);
+                        }
+                        telemetry.setTableWriteCounts(writeCounts);
+                        telemetry.setTargetTables(new ArrayList<>(writeCounts.keySet()));
+                        break;
+                    }
+                } catch (Exception ignored) {}
             }
         } catch (Exception ex) {
             log.debug("Telemetry target DB enrichment error: {}", ex.getMessage());
@@ -1124,21 +1659,26 @@ public class DynamicBatchJobService {
     }
 
     private long countRowsInTable(org.springframework.jdbc.core.JdbcTemplate jdbc, String schema, String tableName) {
-        if (tableName == null || tableName.trim().isEmpty()) return 0L;
+        if (tableName == null || tableName.trim().isEmpty() || jdbc == null) return 0L;
         String tbl = tableName.trim();
         List<String> queryCandidates = new ArrayList<>();
+        List<String> tblVariants = List.of(tbl, tbl.toLowerCase(), tbl.toUpperCase());
         if (schema != null && !schema.trim().isEmpty()) {
             String s = schema.trim();
-            queryCandidates.add("SELECT COUNT(*) FROM \"" + s + "\".\"" + tbl + "\"");
-            queryCandidates.add("SELECT COUNT(*) FROM " + s + "." + tbl);
+            for (String tv : tblVariants) {
+                queryCandidates.add("SELECT COUNT(*) FROM \"" + s + "\".\"" + tv + "\"");
+                queryCandidates.add("SELECT COUNT(*) FROM " + s + "." + tv);
+            }
         }
-        queryCandidates.add("SELECT COUNT(*) FROM \"" + tbl + "\"");
-        queryCandidates.add("SELECT COUNT(*) FROM " + tbl);
+        for (String tv : tblVariants) {
+            queryCandidates.add("SELECT COUNT(*) FROM \"" + tv + "\"");
+            queryCandidates.add("SELECT COUNT(*) FROM " + tv);
+        }
 
         for (String q : queryCandidates) {
             try {
                 Long val = jdbc.queryForObject(q, Long.class);
-                if (val != null && val >= 0) return val;
+                if (val != null && val > 0) return val;
             } catch (Exception ignored) {}
         }
         return 0L;

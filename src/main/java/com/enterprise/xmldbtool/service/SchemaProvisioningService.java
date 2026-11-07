@@ -112,8 +112,12 @@ public class SchemaProvisioningService {
                 created.add("staging_xml_records");
 
                 try {
+                    stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS bnpp_id VARCHAR(128)");
+                    stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS tag_name VARCHAR(100)");
+                    stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS version_number INT DEFAULT 1");
                     stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS xml_version VARCHAR(50)");
                     stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS schema_version VARCHAR(50)");
+                    stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_staging_status ON staging_xml_records(status)");
                 } catch (Exception ignored) {}
@@ -161,10 +165,33 @@ public class SchemaProvisioningService {
                 ? discoveredXmlElements
                 : discoverXmlElementsInternal(sourceXmlPath, 1000);
 
+        String docRoot = detectDocumentRoot(sourceXmlPath);
+        Set<String> WRAPPER_NAMES = new HashSet<>(Set.of(
+                "records", "items", "dataset", "data", "entries", "countrylists", "descriptionlists", "feed", "catalog"
+        ));
+        if (docRoot != null) {
+            WRAPPER_NAMES.add(docRoot.toLowerCase());
+        }
+
         // 3. Determine effective root tags dynamically
-        List<String> effectiveRoots = (recordRootElements != null && !recordRootElements.isEmpty())
-                ? recordRootElements
-                : detectRootsFromElements(effectiveElements);
+        List<String> effectiveRoots = new ArrayList<>();
+        if (recordRootElements != null && !recordRootElements.isEmpty()) {
+            for (String r : recordRootElements) {
+                if (r != null && !r.trim().isEmpty()) {
+                    for (String token : r.split("[,;\\s]+")) {
+                        String resolved = XmlSchemaDiscoveryService.resolveEntityTag(token);
+                        if (resolved != null && !resolved.isEmpty() && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
+                            if (!effectiveRoots.contains(resolved)) {
+                                effectiveRoots.add(resolved);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (effectiveRoots.isEmpty()) {
+            effectiveRoots = detectRootsFromElements(effectiveElements, docRoot, WRAPPER_NAMES);
+        }
 
         DataSource ds = dataSourceService.getOrCreateDataSource(config);
         boolean isOracle = config.getUrl().toLowerCase().contains(":oracle:");
@@ -172,13 +199,21 @@ public class SchemaProvisioningService {
         try (Connection conn = ds.getConnection();
              Statement stmt = conn.createStatement()) {
 
-            // 4. For EVERY specified root tag, ensure dedicated staging table (<rootTag>_stage) and flattened tables are created
+            // Drop any obsolete empty legacy tables (e.g. pfa, pfaflat, pfa_stage, countriesflat, etc.)
+            cleanupObsoleteEmptyTables(stmt, isOracle);
+
+            // 4. For EVERY identified entity root tag, ensure exactly ONE flattened table (<rootTag>_flat) is created
+            Set<String> provisionedFlats = new HashSet<>();
             for (String rootTag : effectiveRoots) {
                 if (rootTag == null || rootTag.trim().isEmpty()) continue;
-                String safe = rootTag.replaceAll("[^a-zA-Z0-9_]", "_");
-                String stageTable = safe.toLowerCase() + "_stage";
-                createdTables.addAll(provisionSpecificStagingTable(stmt, stageTable, rootTag, effectiveElements, isOracle));
-                for (String flatTable : List.of(safe.toLowerCase() + "_flat", safe + "Flat")) {
+                String norm = rootTag.trim().toLowerCase();
+                if (WRAPPER_NAMES.contains(norm) || (docRoot != null && norm.equalsIgnoreCase(docRoot))
+                        || XmlSchemaDiscoveryService.isWrapperContainerTag(norm, docRoot)) {
+                    continue; // Never provision docRoot or wrappers as entity tables
+                }
+                String safe = norm.replaceAll("[^a-zA-Z0-9_]", "_");
+                String flatTable = safe + "_flat";
+                if (provisionedFlats.add(flatTable)) {
                     createdTables.addAll(provisionSpecificFlattenedTable(stmt, flatTable, rootTag, effectiveElements, isOracle));
                 }
             }
@@ -191,6 +226,10 @@ public class SchemaProvisioningService {
                 // 6. Provision canonical Master & 1-to-N Child tables dynamically derived from discovered XML elements
                 for (String rootTag : effectiveRoots) {
                     if (rootTag == null || rootTag.trim().isEmpty()) continue;
+                    String norm = rootTag.trim().toLowerCase();
+                    if (WRAPPER_NAMES.contains(norm) || (docRoot != null && norm.equalsIgnoreCase(docRoot))) {
+                        continue;
+                    }
                     createdTables.addAll(provisionDynamicRelationalTables(stmt, rootTag, effectiveElements, isOracle));
                 }
 
@@ -301,6 +340,24 @@ public class SchemaProvisioningService {
             desiredCols.add("extra_attributes");
             colDefs.append(", extra_attributes ").append(isOracle ? "CLOB" : "TEXT");
 
+            // Enterprise traceability & versioning fields
+            desiredCols.add("bnpp_id");
+            colDefs.append(", bnpp_id VARCHAR(64)");
+            desiredCols.add("source_bnpp_id");
+            colDefs.append(", source_bnpp_id VARCHAR(64)");
+            desiredCols.add("staging_bnpp_id");
+            colDefs.append(", staging_bnpp_id VARCHAR(64)");
+            desiredCols.add("version_number");
+            colDefs.append(", version_number INT DEFAULT 1");
+            desiredCols.add("tag_name");
+            colDefs.append(", tag_name VARCHAR(100)");
+            desiredCols.add("payload_hash");
+            colDefs.append(", payload_hash VARCHAR(64)");
+            desiredCols.add("created_at");
+            colDefs.append(", created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+            desiredCols.add("updated_at");
+            colDefs.append(", updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+
             String createSql;
             if (isOracle) {
                 createSql = "CREATE TABLE " + tableName + " (" + colDefs + ")";
@@ -309,6 +366,18 @@ public class SchemaProvisioningService {
             }
 
             executeTableSqlSafe(stmt, tableName, createSql, tables, desiredCols, isOracle);
+
+            try {
+                if (!isOracle) {
+                    stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_bnpp ON " + tableName + "(bnpp_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_src_bnpp ON " + tableName + "(source_bnpp_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_hash ON " + tableName + "(payload_hash)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_ver ON " + tableName + "(version_number)");
+                } else {
+                    try { stmt.execute("CREATE UNIQUE INDEX idx_" + tableName.toLowerCase() + "_bnpp ON " + tableName + "(bnpp_id)"); } catch (Exception ignored) {}
+                    try { stmt.execute("CREATE INDEX idx_" + tableName.toLowerCase() + "_src_bnpp ON " + tableName + "(source_bnpp_id)"); } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
         }
 
         // Add foreign key constraints defined in mappings
@@ -385,6 +454,11 @@ public class SchemaProvisioningService {
                         masterCols.add(col);
                         String colType = el.getDetectedType() != null ? el.getDetectedType() : "VARCHAR(255)";
                         if (colType.equalsIgnoreCase("VARCHAR")) colType = "VARCHAR(255)";
+                        if (col.contains("detail") || col.contains("address") || col.contains("reference")
+                                || col.contains("description") || col.contains("note") || col.contains("profile") || col.contains("payload")
+                                || col.contains("type") || col.contains("image")) {
+                            colType = isOracle ? "CLOB" : "TEXT";
+                        }
                         if (isOracle && colType.equalsIgnoreCase("TEXT")) colType = "CLOB";
                         String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col)
                                 ? "\"" + col + "\"" : col;
@@ -397,6 +471,24 @@ public class SchemaProvisioningService {
         masterCols.add("extra_attributes");
         masterColDefs.append(", extra_attributes ").append(isOracle ? "CLOB" : "TEXT");
 
+        // Enterprise traceability & versioning fields
+        masterCols.add("bnpp_id");
+        masterColDefs.append(", bnpp_id VARCHAR(64)");
+        masterCols.add("source_bnpp_id");
+        masterColDefs.append(", source_bnpp_id VARCHAR(64)");
+        masterCols.add("staging_bnpp_id");
+        masterColDefs.append(", staging_bnpp_id VARCHAR(64)");
+        masterCols.add("version_number");
+        masterColDefs.append(", version_number INT DEFAULT 1");
+        masterCols.add("tag_name");
+        masterColDefs.append(", tag_name VARCHAR(100)");
+        masterCols.add("payload_hash");
+        masterColDefs.append(", payload_hash VARCHAR(64)");
+        masterCols.add("created_at");
+        masterColDefs.append(", created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+        masterCols.add("updated_at");
+        masterColDefs.append(", updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+
         String masterSql;
         if (isOracle) {
             masterSql = "CREATE TABLE " + safeRootTable + " (" + masterColDefs + ")";
@@ -404,6 +496,20 @@ public class SchemaProvisioningService {
             masterSql = "CREATE TABLE IF NOT EXISTS " + safeRootTable + " (" + masterColDefs + ")";
         }
         executeTableSqlSafe(stmt, safeRootTable, masterSql, tables, masterCols, isOracle);
+
+        try {
+            if (!isOracle) {
+                stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + safeRootTable.toLowerCase() + "_bnpp ON " + safeRootTable + "(bnpp_id)");
+                stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + safeRootTable.toLowerCase() + "_" + masterIdCol + " ON " + safeRootTable + "(" + masterIdCol + ")");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + safeRootTable.toLowerCase() + "_src_bnpp ON " + safeRootTable + "(source_bnpp_id)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + safeRootTable.toLowerCase() + "_hash ON " + safeRootTable + "(payload_hash)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + safeRootTable.toLowerCase() + "_ver ON " + safeRootTable + "(version_number)");
+            } else {
+                try { stmt.execute("CREATE UNIQUE INDEX idx_" + safeRootTable.toLowerCase() + "_bnpp ON " + safeRootTable + "(bnpp_id)"); } catch (Exception ignored) {}
+                try { stmt.execute("CREATE UNIQUE INDEX idx_" + safeRootTable.toLowerCase() + "_" + masterIdCol + " ON " + safeRootTable + "(" + masterIdCol + ")"); } catch (Exception ignored) {}
+                try { stmt.execute("CREATE INDEX idx_" + safeRootTable.toLowerCase() + "_src_bnpp ON " + safeRootTable + "(source_bnpp_id)"); } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
 
         // Identify nested tag groups for canonical 1-to-N child tables
         Map<String, Set<String>> childGroups = new LinkedHashMap<>();
@@ -466,6 +572,24 @@ public class SchemaProvisioningService {
                 childDesiredCols.add("extra_attributes");
                 childCols.append(", extra_attributes ").append(isOracle ? "CLOB" : "TEXT");
 
+                // Enterprise traceability & versioning fields
+                childDesiredCols.add("bnpp_id");
+                childCols.append(", bnpp_id VARCHAR(64)");
+                childDesiredCols.add("source_bnpp_id");
+                childCols.append(", source_bnpp_id VARCHAR(64)");
+                childDesiredCols.add("staging_bnpp_id");
+                childCols.append(", staging_bnpp_id VARCHAR(64)");
+                childDesiredCols.add("version_number");
+                childCols.append(", version_number INT DEFAULT 1");
+                childDesiredCols.add("tag_name");
+                childCols.append(", tag_name VARCHAR(100)");
+                childDesiredCols.add("payload_hash");
+                childCols.append(", payload_hash VARCHAR(64)");
+                childDesiredCols.add("created_at");
+                childCols.append(", created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+                childDesiredCols.add("updated_at");
+                childCols.append(", updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+
                 String childSql;
                 if (isOracle) {
                     childSql = "CREATE TABLE " + childTable + " (id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " + masterIdCol + " NUMBER(19)" + childCols + ")";
@@ -473,6 +597,17 @@ public class SchemaProvisioningService {
                     childSql = "CREATE TABLE IF NOT EXISTS " + childTable + " (id BIGSERIAL PRIMARY KEY, " + masterIdCol + " BIGINT" + childCols + ")";
                 }
                 executeTableSqlSafe(stmt, childTable, childSql, tables, childDesiredCols, isOracle);
+
+                try {
+                    if (!isOracle) {
+                        stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + childTable.toLowerCase() + "_bnpp ON " + childTable + "(bnpp_id)");
+                        stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + childTable.toLowerCase() + "_src_bnpp ON " + childTable + "(source_bnpp_id)");
+                        stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + childTable.toLowerCase() + "_hash ON " + childTable + "(payload_hash)");
+                    } else {
+                        try { stmt.execute("CREATE UNIQUE INDEX idx_" + childTable.toLowerCase() + "_bnpp ON " + childTable + "(bnpp_id)"); } catch (Exception ignored) {}
+                        try { stmt.execute("CREATE INDEX idx_" + childTable.toLowerCase() + "_src_bnpp ON " + childTable + "(source_bnpp_id)"); } catch (Exception ignored) {}
+                    }
+                } catch (Exception ignored) {}
 
                 // Add Foreign Key constraint linking child table to master table
                 try {
@@ -561,6 +696,24 @@ public class SchemaProvisioningService {
                 }
             }
 
+            // Enterprise traceability & versioning fields
+            desiredCols.add("bnpp_id");
+            colDefs.append(", bnpp_id VARCHAR(64)");
+            desiredCols.add("source_bnpp_id");
+            colDefs.append(", source_bnpp_id VARCHAR(64)");
+            desiredCols.add("staging_bnpp_id");
+            colDefs.append(", staging_bnpp_id VARCHAR(64)");
+            desiredCols.add("version_number");
+            colDefs.append(", version_number INT DEFAULT 1");
+            desiredCols.add("tag_name");
+            colDefs.append(", tag_name VARCHAR(100)");
+            desiredCols.add("payload_hash");
+            colDefs.append(", payload_hash VARCHAR(64)");
+            desiredCols.add("created_at");
+            colDefs.append(", created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+            desiredCols.add("updated_at");
+            colDefs.append(", updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+
             String sql;
             if (isOracle) {
                 sql = "CREATE TABLE " + tableName + " (" + colDefs + ")";
@@ -568,6 +721,17 @@ public class SchemaProvisioningService {
                 sql = "CREATE TABLE IF NOT EXISTS " + tableName + " (" + colDefs + ")";
             }
             executeTableSqlSafe(stmt, tableName, sql, tables, desiredCols, isOracle);
+
+            try {
+                if (!isOracle) {
+                    stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_bnpp ON " + tableName + "(bnpp_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_src_bnpp ON " + tableName + "(source_bnpp_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_hash ON " + tableName + "(payload_hash)");
+                } else {
+                    try { stmt.execute("CREATE UNIQUE INDEX idx_" + tableName.toLowerCase() + "_bnpp ON " + tableName + "(bnpp_id)"); } catch (Exception ignored) {}
+                    try { stmt.execute("CREATE INDEX idx_" + tableName.toLowerCase() + "_src_bnpp ON " + tableName + "(source_bnpp_id)"); } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
         }
 
         return tables;
@@ -590,7 +754,8 @@ public class SchemaProvisioningService {
         }
 
         Set<String> desiredCols = new LinkedHashSet<>(List.of(
-                "job_execution_id", "record_identifier", "record_action", "record_date",
+                "job_execution_id", "bnpp_id", "tag_name", "version_number",
+                "record_identifier", "record_action", "record_date",
                 "xml_version", "schema_version", "payload_hash", "status",
                 "raw_payload", "extra_attributes"
         ));
@@ -705,33 +870,62 @@ public class SchemaProvisioningService {
         }
 
         Set<String> desiredCols = new LinkedHashSet<>(List.of(
-                "job_execution_id", "record_identifier", "record_action", "record_date",
+                "job_execution_id", "bnpp_id", "tag_name", "version_number",
+                "record_identifier", "record_action", "record_date",
                 "xml_version", "schema_version", "payload_hash", "status",
                 "raw_payload", "extra_attributes"
         ));
 
         StringBuilder colDefs = new StringBuilder();
+        String tagNorm = rootTag != null ? rootTag.toLowerCase() : "";
+
+        // Detect complex sub-tags under rootTag (tags that contain nested elements)
+        Set<String> subTags = new LinkedHashSet<>();
         if (discoveredXmlElements != null) {
-            String tagNorm = rootTag != null ? rootTag.toLowerCase() : "";
+            for (DiscoveredElement el : discoveredXmlElements) {
+                String rawName = el.getName();
+                String[] parts = rawName.split("/");
+                int rootIdx = -1;
+                for (int i = 0; i < parts.length; i++) {
+                    if (parts[i].equalsIgnoreCase(tagNorm)) {
+                        rootIdx = i;
+                        break;
+                    }
+                }
+                if (rootIdx >= 0 && rootIdx + 1 < parts.length) {
+                    if (parts.length > rootIdx + 2) {
+                        String subTag = parts[rootIdx + 1].toLowerCase().replace("@", "");
+                        subTags.add(subTag);
+                    }
+                } else if (parts.length >= 3 && parts[0].equalsIgnoreCase(tagNorm)) {
+                    String subTag = parts[1].toLowerCase().replace("@", "");
+                    subTags.add(subTag);
+                }
+            }
+        }
+
+        // Direct leaf elements and attributes belonging to root
+        if (discoveredXmlElements != null) {
             for (DiscoveredElement el : discoveredXmlElements) {
                 String rawName = el.getName();
                 String enclosing = el.getEnclosingTag() != null ? el.getEnclosingTag().toLowerCase() : "";
-                boolean matchesTag = false;
-                if (!enclosing.isEmpty() && enclosing.equalsIgnoreCase(tagNorm)) {
-                    matchesTag = true;
-                } else if (rawName.toLowerCase().startsWith(tagNorm + "/") || rawName.toLowerCase().startsWith(tagNorm + "/@")) {
-                    matchesTag = true;
-                } else if (enclosing.isEmpty() || !rawName.contains("/")) {
-                    matchesTag = true;
-                }
+                boolean directChild = enclosing.equalsIgnoreCase(tagNorm)
+                        || rawName.toLowerCase().startsWith(tagNorm + "/@")
+                        || (rawName.toLowerCase().startsWith(tagNorm + "/") && rawName.split("/").length == 2)
+                        || (!rawName.contains("/") && !rawName.startsWith("@") && enclosing.isEmpty());
 
-                if (matchesTag) {
+                if (directChild) {
                     String col = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
                     col = col.replace("@", "").replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
-                    if (!col.isEmpty() && !desiredCols.contains(col) && !col.equalsIgnoreCase("id")) {
+                    if (!col.isEmpty() && !desiredCols.contains(col) && !col.equalsIgnoreCase("id") && !subTags.contains(col)) {
                         desiredCols.add(col);
                         String colType = el.getDetectedType() != null ? el.getDetectedType() : "VARCHAR(255)";
                         if (colType.equalsIgnoreCase("VARCHAR")) colType = "VARCHAR(255)";
+                        if (col.contains("detail") || col.contains("address") || col.contains("reference")
+                                || col.contains("description") || col.contains("note") || col.contains("profile") || col.contains("payload")
+                                || col.contains("type") || col.contains("image")) {
+                            colType = isOracle ? "CLOB" : "TEXT";
+                        }
                         if (isOracle && colType.equalsIgnoreCase("TEXT")) colType = "CLOB";
                         String safeCol = col;
                         String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col)
@@ -742,11 +936,25 @@ public class SchemaProvisioningService {
             }
         }
 
+        // Sub-tags: store nested details in raw XML format (TEXT/CLOB column)
+        for (String subTag : subTags) {
+            String safeSubTag = subTag.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+            if (!desiredCols.contains(safeSubTag) && !safeSubTag.equalsIgnoreCase("id")) {
+                desiredCols.add(safeSubTag);
+                String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(safeSubTag)
+                        ? "\"" + safeSubTag + "\"" : safeSubTag;
+                colDefs.append(", ").append(quotedCol).append(" ").append(isOracle ? "CLOB" : "TEXT");
+            }
+        }
+
         String createSql;
         if (isOracle) {
             createSql = "CREATE TABLE " + flatTable + " (" +
                     "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
                     "job_execution_id NUMBER(19), " +
+                    "bnpp_id VARCHAR2(64), " +
+                    "tag_name VARCHAR2(100), " +
+                    "version_number NUMBER(10) DEFAULT 1, " +
                     "record_identifier VARCHAR2(100), " +
                     "record_action VARCHAR2(50), " +
                     "record_date VARCHAR2(50), " +
@@ -764,6 +972,9 @@ public class SchemaProvisioningService {
             createSql = "CREATE TABLE IF NOT EXISTS " + flatTable + " (" +
                     "id BIGSERIAL PRIMARY KEY, " +
                     "job_execution_id BIGINT, " +
+                    "bnpp_id VARCHAR(64), " +
+                    "tag_name VARCHAR(100), " +
+                    "version_number INT DEFAULT 1, " +
                     "record_identifier VARCHAR(100), " +
                     "record_action VARCHAR(50), " +
                     "record_date VARCHAR(50), " +
@@ -783,9 +994,12 @@ public class SchemaProvisioningService {
 
         try {
             if (!isOracle) {
+                stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_hash ON " + flatTable + "(record_identifier, payload_hash)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_status ON " + flatTable + "(status)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_version ON " + flatTable + "(xml_version, schema_version)");
+            } else {
+                try { stmt.execute("CREATE UNIQUE INDEX idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)"); } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
 
@@ -958,17 +1172,92 @@ public class SchemaProvisioningService {
         return new ArrayList<>(map.values());
     }
 
-    private List<String> detectRootsFromElements(List<DiscoveredElement> elements) {
+    private void cleanupObsoleteEmptyTables(Statement stmt, boolean isOracle) {
+        Set<String> obsoleteTables = new LinkedHashSet<>(List.of(
+                "pfa", "pfa_flat", "pfa_stage", "pfaflat",
+                "countriesflat", "countries_stage", "countries_flat",
+                "countrylistsflat", "countrylists_stage", "countrylists_flat", "countrylists",
+                "descriptionlists1_flat", "descriptionlists2_flat", "descriptionlists3_flat", "descriptionlists4_flat",
+                "addressesflat", "address_flat", "activestatus_flat", "datevalue_flat", "deceased_flat",
+                "entitiesflat", "entities_flat",
+                "personsflat", "persons_flat",
+                "recordflat", "records_flat", "canopyapp_flat",
+                "namevalue_flat", "occupation_flat", "occupationlist_flat",
+                "persondate_flat", "personname_flat", "personrole_flat",
+                "profilenotes_flat", "roles_flat"
+        ));
+
+        try {
+            Connection conn = stmt.getConnection();
+            DatabaseMetaData meta = conn.getMetaData();
+            try (ResultSet rs = meta.getTables(null, null, "%", new String[]{"TABLE"})) {
+                while (rs.next()) {
+                    String tName = rs.getString("TABLE_NAME");
+                    if (tName != null) {
+                        String lower = tName.toLowerCase();
+                        if (lower.endsWith("_stage") || (lower.endsWith("flat") && !lower.endsWith("_flat"))
+                                || lower.contains("__")
+                                || lower.matches(".*lists\\d*_flat$")
+                                || lower.equals("countries_flat") || lower.equals("persons_flat") || lower.equals("entities_flat")
+                                || lower.startsWith("pfa") || lower.equals("recordflat") || lower.equals("records_flat")) {
+                            obsoleteTables.add(tName);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        for (String tbl : obsoleteTables) {
+            try {
+                ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + tbl);
+                if (rs.next() && rs.getLong(1) == 0) {
+                    rs.close();
+                    stmt.execute("DROP TABLE " + tbl + (isOracle ? " CASCADE CONSTRAINTS" : " CASCADE"));
+                    log.info("Cleaned up obsolete empty legacy table '{}'", tbl);
+                } else {
+                    rs.close();
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    public String detectDocumentRoot(String sourcePath) {
+        if (sourcePath == null || sourcePath.trim().isEmpty()) return null;
+        try (BufferedReader reader = openReaderForSource(sourcePath)) {
+            XMLInputFactory factory = XMLInputFactory.newInstance();
+            factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+            factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+            XMLStreamReader streamReader = factory.createXMLStreamReader(reader);
+            while (streamReader.hasNext()) {
+                int event = streamReader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    return streamReader.getLocalName();
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private List<String> detectRootsFromElements(List<DiscoveredElement> elements, String docRoot, Set<String> wrapperNames) {
         if (elements == null || elements.isEmpty()) return List.of("record");
         Set<String> roots = new LinkedHashSet<>();
         for (DiscoveredElement el : elements) {
             String name = el.getName();
             if (name != null && name.contains("/")) {
                 String[] parts = name.split("/");
-                if (parts.length >= 2 && !parts[0].toLowerCase().endsWith("list") && !parts[0].toLowerCase().endsWith("lists")) {
-                    roots.add(parts[0]);
-                } else if (parts.length >= 3) {
-                    roots.add(parts[1]);
+                String candidate = null;
+                for (String p : parts) {
+                    if (p.startsWith("@")) continue;
+                    String norm = p.toLowerCase();
+                    if ((wrapperNames != null && wrapperNames.contains(norm))
+                            || (docRoot != null && norm.equalsIgnoreCase(docRoot))) {
+                        continue;
+                    }
+                    candidate = p;
+                    break;
+                }
+                if (candidate != null && !candidate.isEmpty()) {
+                    roots.add(candidate);
                 }
             }
         }

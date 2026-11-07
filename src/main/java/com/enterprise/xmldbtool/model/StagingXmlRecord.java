@@ -17,6 +17,9 @@ public class StagingXmlRecord {
     private String recordDate;
     private String rawPayload;
     private String payloadHash;
+    private String bnppId;
+    private String tagName;
+    private Integer versionNumber = 1;
     private String xmlVersion;
     private String schemaVersion;
     private String status; // STAGED, NORMALIZED, SKIPPED_UNCHANGED, FAILED
@@ -63,6 +66,15 @@ public class StagingXmlRecord {
 
     public String getPayloadHash() { return payloadHash; }
     public void setPayloadHash(String payloadHash) { this.payloadHash = payloadHash; }
+
+    public String getBnppId() { return bnppId; }
+    public void setBnppId(String bnppId) { this.bnppId = bnppId; }
+
+    public String getTagName() { return tagName; }
+    public void setTagName(String tagName) { this.tagName = tagName; }
+
+    public Integer getVersionNumber() { return versionNumber; }
+    public void setVersionNumber(Integer versionNumber) { this.versionNumber = versionNumber; }
 
     public String getXmlVersion() { return xmlVersion; }
     public void setXmlVersion(String xmlVersion) { this.xmlVersion = xmlVersion; }

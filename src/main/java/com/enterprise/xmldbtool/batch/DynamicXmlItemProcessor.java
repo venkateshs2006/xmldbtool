@@ -6,6 +6,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.item.ItemProcessor;
 
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamReader;
+import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -107,12 +111,59 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         }
 
         Map<String, List<Map<String, Object>>> multiTableRecords = new LinkedHashMap<>();
+        String entityTag = (String) xmlRecord.get("_entity_tag");
+        if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
 
         for (String tableName : targetTables) {
             List<FieldMapping> tblMappings = tableMappings.get(tableName);
             if (tblMappings == null || tblMappings.isEmpty()) continue;
 
-            boolean hasIdMapped = tblMappings.stream().anyMatch(m -> "id".equalsIgnoreCase(m.getTargetColumn()));
+            if (entityTag != null && !entityTag.isEmpty()) {
+                String normEntity = entityTag.toLowerCase().replaceAll("[^a-zA-Z0-9]", "");
+                String singEntity = DynamicXmlUnmarshaller.singularize(normEntity);
+                String plurEntity = DynamicXmlUnmarshaller.pluralize(normEntity);
+
+                boolean tableRelevant = tblMappings.stream().anyMatch(m -> {
+                    String xf = m.getXmlField();
+                    if (xf != null) {
+                        String clean = xf.replace("@", "").toLowerCase().replaceAll("[^a-zA-Z0-9/]", "");
+                        String firstTag = clean.contains("/") ? clean.substring(0, clean.indexOf("/")) : clean;
+                        if (firstTag.equals(normEntity) || firstTag.equals(singEntity) || firstTag.equals(plurEntity)
+                                || firstTag.startsWith(normEntity) || firstTag.startsWith(singEntity)) {
+                            return true;
+                        }
+                    }
+                    String tt = m.getTargetTable();
+                    if (tt != null) {
+                        String normT = tt.toLowerCase().replaceAll("[^a-zA-Z0-9]", "");
+                        if (normT.equals(normEntity) || normT.equals(singEntity) || normT.equals(plurEntity)
+                                || normT.startsWith(normEntity) || normT.startsWith(singEntity)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }) || tableName.toLowerCase().startsWith(normEntity) || tableName.toLowerCase().startsWith(singEntity);
+
+                if (!tableRelevant) {
+                    continue; // Skip tables that are completely irrelevant to this XML entity fragment
+                }
+            }
+
+            String pkCol = null;
+            for (FieldMapping m : tblMappings) {
+                if ("PK".equalsIgnoreCase(m.getConstraintType()) && m.getTargetColumn() != null) {
+                    pkCol = m.getTargetColumn().trim();
+                    break;
+                }
+            }
+            if (pkCol == null) {
+                for (FieldMapping m : tblMappings) {
+                    if ("id".equalsIgnoreCase(m.getTargetColumn())) {
+                        pkCol = m.getTargetColumn().trim();
+                        break;
+                    }
+                }
+            }
 
             // Find if unmarshaller captured a repeating entity collection for this table
             List<Map<String, Object>> entityList = findEntityRecordsForTable(tableName, tblMappings, xmlRecord);
@@ -162,7 +213,7 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                         }
                     }
 
-                    if (isValidRow(rowMap, hasIdMapped)) {
+                    if (isValidRow(rowMap, pkCol)) {
                         validRows.add(rowMap);
                     }
                 }
@@ -179,7 +230,7 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                     }
                 }
 
-                if (isValidRow(rowMap, hasIdMapped)) {
+                if (isValidRow(rowMap, pkCol)) {
                     validRows.add(rowMap);
                 }
             }
@@ -213,15 +264,15 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         return payload;
     }
 
-    private boolean isValidRow(Map<String, Object> cols, boolean hasIdMapped) {
+    private boolean isValidRow(Map<String, Object> cols, String pkCol) {
         if (cols == null || cols.isEmpty()) {
             return false;
         }
         if (cols.values().stream().allMatch(val -> val == null || (val instanceof String s && s.trim().isEmpty()))) {
             return false;
         }
-        if (hasIdMapped) {
-            Object idVal = cols.get("id");
+        if (pkCol != null) {
+            Object idVal = cols.get(pkCol);
             if (idVal == null || (idVal instanceof String s && s.trim().isEmpty())) {
                 return false;
             }
@@ -237,8 +288,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
 
         String normTable = tableName.toLowerCase().trim();
         String singular = DynamicXmlUnmarshaller.singularize(normTable);
+        String plural = DynamicXmlUnmarshaller.pluralize(normTable);
 
-        // 1. Check exact table name or singular in _entities_*
+        // 1. Check exact table name, singular, or plural in _entities_*
         Object list = xmlRecord.get("_entities_" + normTable);
         if (list instanceof List<?> l && !l.isEmpty()) {
             return (List<Map<String, Object>>) list;
@@ -247,21 +299,36 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         if (list instanceof List<?> l && !l.isEmpty()) {
             return (List<Map<String, Object>>) list;
         }
+        list = xmlRecord.get("_entities_" + plural);
+        if (list instanceof List<?> l && !l.isEmpty()) {
+            return (List<Map<String, Object>>) list;
+        }
 
-        // Check if sub-tag column contains serialized JSON array/object from staging table
-        Object subTagJson = xmlRecord.get(normTable);
-        if (subTagJson == null) subTagJson = xmlRecord.get(singular);
-        if (subTagJson instanceof String jsonStr && (jsonStr.trim().startsWith("[") || jsonStr.trim().startsWith("{"))) {
-            try {
-                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                if (jsonStr.trim().startsWith("[")) {
-                    List<Map<String, Object>> parsed = mapper.readValue(jsonStr, new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
+        // 2. Check if sub-tag column contains raw XML (e.g. <addresses> inside person_flat) or JSON
+        for (String key : List.of(normTable, singular, plural,
+                "_subtag_xml_" + normTable, "_subtag_xml_" + singular, "_subtag_xml_" + plural,
+                "_subtag_" + normTable, "_subtag_" + singular, "_subtag_" + plural)) {
+            Object subTagVal = xmlRecord.get(key);
+            if (subTagVal instanceof String str && !str.trim().isEmpty()) {
+                String trimmed = str.trim();
+                if (trimmed.startsWith("<")) {
+                    List<Map<String, Object>> parsed = parseRawXmlSubTagEntities(trimmed, normTable, xmlRecord);
                     if (!parsed.isEmpty()) return parsed;
-                } else {
-                    Map<String, Object> parsed = mapper.readValue(jsonStr, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
-                    if (!parsed.isEmpty()) return List.of(parsed);
+                } else if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+                    try {
+                        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                        if (trimmed.startsWith("[")) {
+                            List<Map<String, Object>> parsed = mapper.readValue(trimmed, new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
+                            if (!parsed.isEmpty()) return parsed;
+                        } else {
+                            Map<String, Object> parsed = mapper.readValue(trimmed, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                            if (!parsed.isEmpty()) return List.of(parsed);
+                        }
+                    } catch (Exception ignored) {}
                 }
-            } catch (Exception ignored) {}
+            } else if (subTagVal instanceof List<?> l && !l.isEmpty() && l.get(0) instanceof Map) {
+                return (List<Map<String, Object>>) subTagVal;
+            }
         }
 
         // 2. If table is main entity and no direct _entities_* was found, it's a single record
@@ -324,6 +391,98 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         return Collections.emptyList();
     }
 
+    /**
+     * Parses nested raw XML fragments stored in flat tables (e.g. <addresses><address id="1">... inside person_flat)
+     * and extracts repeating child entity maps for multi-table relational projection.
+     */
+    public static List<Map<String, Object>> parseRawXmlSubTagEntities(String rawXml, String expectedEntityTag, Map<String, Object> parentRecord) {
+        if (rawXml == null || rawXml.trim().isEmpty() || !rawXml.trim().startsWith("<")) {
+            return Collections.emptyList();
+        }
+        List<Map<String, Object>> results = new ArrayList<>();
+        try {
+            XMLInputFactory factory = XMLInputFactory.newInstance();
+            factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+            factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+
+            XMLStreamReader reader = factory.createXMLStreamReader(new StringReader(rawXml));
+            int depth = 0;
+            Map<String, Object> currentEntity = null;
+            int entityDepth = -1;
+            StringBuilder textBuffer = new StringBuilder();
+
+            while (reader.hasNext()) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String localName = reader.getLocalName();
+                    depth++;
+                    textBuffer.setLength(0);
+
+                    boolean isStartOfEntity = false;
+                    if (currentEntity == null) {
+                        String norm = localName.toLowerCase();
+                        String normExpected = expectedEntityTag != null ? expectedEntityTag.toLowerCase() : "";
+                        String singExpected = DynamicXmlUnmarshaller.singularize(normExpected);
+                        if (depth == 2 || (depth == 1 && (norm.equals(normExpected) || norm.equals(singExpected)))) {
+                            isStartOfEntity = true;
+                        }
+                    }
+
+                    if (isStartOfEntity) {
+                        currentEntity = new LinkedHashMap<>();
+                        entityDepth = depth;
+                        if (parentRecord != null) {
+                            for (Map.Entry<String, Object> pEntry : parentRecord.entrySet()) {
+                                String pk = pEntry.getKey().toLowerCase();
+                                if (pk.equals("id") || pk.equals("@id") || pk.endsWith("_id")) {
+                                    currentEntity.put("parent_" + pk, pEntry.getValue());
+                                }
+                            }
+                        }
+                        int attrCount = reader.getAttributeCount();
+                        for (int i = 0; i < attrCount; i++) {
+                            String aName = reader.getAttributeLocalName(i);
+                            String aVal = reader.getAttributeValue(i);
+                            currentEntity.put("@" + aName, aVal);
+                            currentEntity.put(aName, aVal);
+                            currentEntity.put(localName + "/@" + aName, aVal);
+                            currentEntity.put(localName + "/" + aName, aVal);
+                        }
+                    } else if (currentEntity != null && depth > entityDepth) {
+                        int attrCount = reader.getAttributeCount();
+                        for (int i = 0; i < attrCount; i++) {
+                            String aName = reader.getAttributeLocalName(i);
+                            String aVal = reader.getAttributeValue(i);
+                            currentEntity.put("@" + aName, aVal);
+                            currentEntity.put(aName, aVal);
+                            currentEntity.put(localName + "/@" + aName, aVal);
+                        }
+                    }
+                } else if (event == XMLStreamConstants.CHARACTERS || event == XMLStreamConstants.CDATA) {
+                    if (!reader.isWhiteSpace()) {
+                        textBuffer.append(reader.getText());
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    String localName = reader.getLocalName();
+                    String text = textBuffer.toString().trim();
+                    if (currentEntity != null && !text.isEmpty()) {
+                        currentEntity.put(localName, text);
+                        currentEntity.put(localName.toLowerCase(), text);
+                    }
+                    if (currentEntity != null && depth == entityDepth) {
+                        results.add(currentEntity);
+                        currentEntity = null;
+                        entityDepth = -1;
+                    }
+                    depth--;
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Notice parsing raw XML sub-tag entities: {}", ex.getMessage());
+        }
+        return results;
+    }
+
     private Object applyTransform(Object value, String transform) {
         if (value == null) {
             return null;
@@ -368,33 +527,44 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 }
             }
 
-            // If the record fragment has an unqualified attribute matching rawAttr, check if no conflicting qualified tags exist
-            val = xmlRecord.get("@" + rawAttr);
-            if (val != null) {
-                boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
-                        k.endsWith("/@" + rawAttr) && !k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/"));
-                if (!hasOtherTagAttr) {
-                    return val;
-                }
-            }
+            String entityTag = (String) xmlRecord.get("_entity_tag");
+            if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
 
-            val = xmlRecord.get(rawAttr);
-            if (val != null) {
-                boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
-                        k.endsWith("/@" + rawAttr) && !k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/"));
-                if (!hasOtherTagAttr) {
-                    return val;
-                }
-            }
+            boolean tagMatches = (entityTag == null) || entityTag.equalsIgnoreCase(tagPrefix)
+                    || DynamicXmlUnmarshaller.singularize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.singularize(tagPrefix))
+                    || DynamicXmlUnmarshaller.pluralize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.pluralize(tagPrefix))
+                    || tagPrefix.equalsIgnoreCase(this.defaultTargetTable)
+                    || tagPrefix.equalsIgnoreCase("record");
 
-            // Check leaf element for nested entity records (e.g. "Person/NameDetails/Name/NameValue/FirstName" -> "FirstName")
-            String leaf = xmlField.substring(xmlField.lastIndexOf("/") + 1).replace("@", "");
-            if (!leaf.isEmpty()) {
-                val = xmlRecord.get(leaf);
-                if (val != null) return val;
-                for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
-                    if (entry.getKey().equalsIgnoreCase(leaf)) {
-                        return entry.getValue();
+            if (tagMatches) {
+                // If the record fragment has an unqualified attribute matching rawAttr, check if no conflicting qualified tags exist
+                val = xmlRecord.get("@" + rawAttr);
+                if (val != null) {
+                    boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
+                            k.endsWith("/@" + rawAttr) && !k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/"));
+                    if (!hasOtherTagAttr) {
+                        return val;
+                    }
+                }
+
+                val = xmlRecord.get(rawAttr);
+                if (val != null) {
+                    boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
+                            k.endsWith("/@" + rawAttr) && !k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/"));
+                    if (!hasOtherTagAttr) {
+                        return val;
+                    }
+                }
+
+                // Check leaf element for nested entity records (e.g. "Person/NameDetails/Name/NameValue/FirstName" -> "FirstName")
+                String leaf = xmlField.substring(xmlField.lastIndexOf("/") + 1).replace("@", "");
+                if (!leaf.isEmpty()) {
+                    val = xmlRecord.get(leaf);
+                    if (val != null) return val;
+                    for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                        if (entry.getKey().equalsIgnoreCase(leaf)) {
+                            return entry.getValue();
+                        }
                     }
                 }
             }

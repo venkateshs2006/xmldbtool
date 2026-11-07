@@ -24,6 +24,7 @@
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/DbTestResponse.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/DiscoveredElement.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/FieldMapping.java
+/home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/JobCheckpoint.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/JobExecutionSummary.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/JobLaunchRequest.java
 /home/sv/Projects/xmldbtool/src/main/java/com/enterprise/xmldbtool/model/JobLaunchResponse.java

@@ -17,8 +17,16 @@ public class JobExecutionSummary {
     private long totalErrors;
     private double recordsPerSecond;
     private String errorMessage;
+    private String streamingState = "IDLE";
+    private String currentPhase = "";
 
     public JobExecutionSummary() {}
+
+    public String getStreamingState() { return streamingState; }
+    public void setStreamingState(String streamingState) { this.streamingState = streamingState; }
+
+    public String getCurrentPhase() { return currentPhase; }
+    public void setCurrentPhase(String currentPhase) { this.currentPhase = currentPhase; }
 
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }

@@ -45,6 +45,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
         final ElementFrame parent;
         final Map<String, Object> data = new LinkedHashMap<>();
         final StringBuilder text = new StringBuilder();
+        final StringBuilder rawXml = new StringBuilder();
         int childElementCount = 0;
         int childEntityCount = 0;
         boolean hasDirectAttributes = false;
@@ -124,12 +125,16 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     currentFrame.childElementCount++;
                 }
 
+                frame.rawXml.append("<").append(localName);
+
                 // Extract all attributes and record both qualified (tag/@attr) and unqualified (@attr, attr)
                 Iterator<?> attributes = startElement.getAttributes();
                 while (attributes.hasNext()) {
                     Attribute attr = (Attribute) attributes.next();
                     String rawAttrName = attr.getName().getLocalPart();
                     String attrValue = attr.getValue();
+
+                    frame.rawXml.append(" ").append(rawAttrName).append("=\"").append(escapeXmlAttr(attrValue)).append("\"");
 
                     frame.hasDirectAttributes = true;
                     frame.data.put("@" + rawAttrName, attrValue);
@@ -146,6 +151,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         recordMap.putIfAbsent(rawAttrName, attrValue);
                     }
                 }
+                frame.rawXml.append(">");
 
                 // Inherit contextual identifiers from ancestor frames (e.g. person_id for nested address)
                 ElementFrame anc = currentFrame;
@@ -181,8 +187,12 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 currentFrame = frame;
             } else if (event.isCharacters()) {
                 Characters characters = event.asCharacters();
-                if (!characters.isWhiteSpace() && currentFrame != null) {
-                    currentFrame.text.append(characters.getData());
+                if (currentFrame != null) {
+                    String chunk = characters.getData();
+                    if (!characters.isWhiteSpace()) {
+                        currentFrame.text.append(chunk);
+                    }
+                    currentFrame.rawXml.append(escapeXmlText(chunk));
                 }
             } else if (event.isEndElement()) {
                 EndElement endElement = event.asEndElement();
@@ -192,6 +202,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 if (currentFrame != null) {
                     ElementFrame finishedFrame = currentFrame;
                     currentFrame = finishedFrame.parent;
+                    finishedFrame.rawXml.append("</").append(closedTag).append(">");
                     String trimmedText = finishedFrame.text.toString().trim();
 
                     if (!trimmedText.isEmpty()) {
@@ -200,11 +211,23 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         recordMap.put(closedTag, trimmedText);
                     }
 
+                    if (depth == 1 && finishedFrame.childElementCount > 0) {
+                        String rawXmlContent = finishedFrame.rawXml.toString().trim();
+                        recordMap.put(closedTag, rawXmlContent);
+                        recordMap.put(closedTag.toLowerCase(), rawXmlContent);
+                        recordMap.put("_subtag_xml_" + closedTag.toLowerCase(), rawXmlContent);
+                    }
+
                     // Propagate values to parent frame
                     if (finishedFrame.parent != null) {
                         if (!trimmedText.isEmpty()) {
                             finishedFrame.parent.data.put(closedTag, trimmedText);
                             finishedFrame.parent.data.put(closedTag + "/value", trimmedText);
+                        }
+                        if (depth == 1 && finishedFrame.childElementCount > 0) {
+                            String rawXmlContent = finishedFrame.rawXml.toString().trim();
+                            finishedFrame.parent.data.put(closedTag, rawXmlContent);
+                            finishedFrame.parent.data.put(closedTag.toLowerCase(), rawXmlContent);
                         }
                         for (Map.Entry<String, Object> entry : finishedFrame.data.entrySet()) {
                             if (entry.getKey().contains("/")) {
@@ -213,6 +236,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                                 finishedFrame.parent.data.putIfAbsent(closedTag + "/" + entry.getKey(), entry.getValue());
                             }
                         }
+                        finishedFrame.parent.rawXml.append(finishedFrame.rawXml);
                     }
 
                     // Determine if this is an entity record (and not a container wrapper of child entities)
@@ -278,6 +302,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     currentFrame.childElementCount++;
                 }
 
+                frame.rawXml.append("<").append(localName);
                 int attrCount = reader.getAttributeCount();
                 if (attrCount > 0) {
                     frame.hasDirectAttributes = true;
@@ -285,6 +310,8 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 for (int i = 0; i < attrCount; i++) {
                     String rawAttrName = reader.getAttributeLocalName(i);
                     String attrValue = reader.getAttributeValue(i);
+
+                    frame.rawXml.append(" ").append(rawAttrName).append("=\"").append(escapeXmlAttr(attrValue)).append("\"");
 
                     frame.data.put("@" + rawAttrName, attrValue);
                     frame.data.put(rawAttrName, attrValue);
@@ -300,6 +327,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         recordMap.putIfAbsent(rawAttrName, attrValue);
                     }
                 }
+                frame.rawXml.append(">");
 
                 ElementFrame anc = currentFrame;
                 while (anc != null) {
@@ -333,8 +361,12 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
 
                 currentFrame = frame;
             } else if (event == XMLStreamConstants.CHARACTERS || event == XMLStreamConstants.CDATA) {
-                if (!reader.isWhiteSpace() && currentFrame != null) {
-                    currentFrame.text.append(reader.getText());
+                if (currentFrame != null) {
+                    String chunk = reader.getText();
+                    if (!reader.isWhiteSpace()) {
+                        currentFrame.text.append(chunk);
+                    }
+                    currentFrame.rawXml.append(escapeXmlText(chunk));
                 }
             } else if (event == XMLStreamConstants.END_ELEMENT) {
                 String closedTag = reader.getLocalName();
@@ -343,6 +375,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 if (currentFrame != null) {
                     ElementFrame finishedFrame = currentFrame;
                     currentFrame = finishedFrame.parent;
+                    finishedFrame.rawXml.append("</").append(closedTag).append(">");
                     String text = finishedFrame.text.toString().trim();
 
                     if (!text.isEmpty()) {
@@ -351,10 +384,22 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         recordMap.put(closedTag, text);
                     }
 
+                    if (depth == 1 && finishedFrame.childElementCount > 0) {
+                        String rawXmlContent = finishedFrame.rawXml.toString().trim();
+                        recordMap.put(closedTag, rawXmlContent);
+                        recordMap.put(closedTag.toLowerCase(), rawXmlContent);
+                        recordMap.put("_subtag_xml_" + closedTag.toLowerCase(), rawXmlContent);
+                    }
+
                     if (finishedFrame.parent != null) {
                         if (!text.isEmpty()) {
                             finishedFrame.parent.data.put(closedTag, text);
                             finishedFrame.parent.data.put(closedTag + "/value", text);
+                        }
+                        if (depth == 1 && finishedFrame.childElementCount > 0) {
+                            String rawXmlContent = finishedFrame.rawXml.toString().trim();
+                            finishedFrame.parent.data.put(closedTag, rawXmlContent);
+                            finishedFrame.parent.data.put(closedTag.toLowerCase(), rawXmlContent);
                         }
                         for (Map.Entry<String, Object> entry : finishedFrame.data.entrySet()) {
                             if (entry.getKey().contains("/")) {
@@ -363,6 +408,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                                 finishedFrame.parent.data.putIfAbsent(closedTag + "/" + entry.getKey(), entry.getValue());
                             }
                         }
+                        finishedFrame.parent.rawXml.append(finishedFrame.rawXml);
                     }
 
                     boolean isEntityRecord = (finishedFrame.hasDirectAttributes || (finishedFrame.childElementCount > 0 && finishedFrame.childEntityCount == 0))
@@ -442,6 +488,22 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
         String key = "_entities_" + tag;
         List<Map<String, Object>> list = (List<Map<String, Object>>) recordMap.computeIfAbsent(key, k -> new ArrayList<>());
         list.add(new LinkedHashMap<>(data));
+    }
+
+    private static String escapeXmlAttr(String text) {
+        if (text == null) return "";
+        return text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&apos;");
+    }
+
+    private static String escapeXmlText(String text) {
+        if (text == null) return "";
+        return text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;");
     }
 
     private XMLEventReader extractEventReader(Source source) {

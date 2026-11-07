@@ -15,6 +15,11 @@ public class JobTelemetryResponse {
     private String startTime;
     private String endTime;
     private String message;
+    private String streamingState = "IDLE";
+    private String currentPhase = "Preparing";
+    private String currentAction = "";
+    private long stagedCount;
+    private long skippedUnchanged;
     private List<MigrationErrorRecord> recentErrors = new ArrayList<>();
     private List<String> targetTables = new ArrayList<>();
     private java.util.Map<String, Long> tableWriteCounts = new java.util.LinkedHashMap<>();
@@ -33,6 +38,21 @@ public class JobTelemetryResponse {
 
     public String getMessage() { return message; }
     public void setMessage(String message) { this.message = message; }
+
+    public String getStreamingState() { return streamingState; }
+    public void setStreamingState(String streamingState) { this.streamingState = streamingState; }
+
+    public String getCurrentPhase() { return currentPhase; }
+    public void setCurrentPhase(String currentPhase) { this.currentPhase = currentPhase; }
+
+    public String getCurrentAction() { return currentAction; }
+    public void setCurrentAction(String currentAction) { this.currentAction = currentAction; }
+
+    public long getStagedCount() { return stagedCount; }
+    public void setStagedCount(long stagedCount) { this.stagedCount = stagedCount; }
+
+    public long getSkippedUnchanged() { return skippedUnchanged; }
+    public void setSkippedUnchanged(long skippedUnchanged) { this.skippedUnchanged = skippedUnchanged; }
 
     public Long getJobExecutionId() { return jobExecutionId; }
     public void setJobExecutionId(Long jobExecutionId) { this.jobExecutionId = jobExecutionId; }

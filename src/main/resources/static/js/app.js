@@ -61,6 +61,42 @@ let speedLineChart = null;
 let qualityDoughnutChart = null;
 
 // =========================================================================
+// Global Authenticated Fetch Interceptor & Session Auto-Redirect
+// =========================================================================
+const originalFetch = window.fetch;
+window.fetch = async function(resource, init = {}) {
+    init = init || {};
+    init.headers = init.headers || {};
+    if (AppState.authToken) {
+        if (init.headers instanceof Headers) {
+            if (!init.headers.has('Authorization')) {
+                init.headers.set('Authorization', 'Bearer ' + AppState.authToken);
+            }
+        } else if (Array.isArray(init.headers)) {
+            if (!init.headers.some(([k]) => k.toLowerCase() === 'authorization')) {
+                init.headers.push(['Authorization', 'Bearer ' + AppState.authToken]);
+            }
+        } else {
+            if (!init.headers['Authorization']) {
+                init.headers['Authorization'] = 'Bearer ' + AppState.authToken;
+            }
+        }
+    }
+    const response = await originalFetch(resource, init);
+    if (response.status === 401) {
+        const urlStr = typeof resource === 'string' ? resource : (resource.url || '');
+        if (!urlStr.includes('/api/auth/login')) {
+            sessionStorage.clear();
+            AppState.authToken = null;
+            AppState.currentUser = null;
+            renderLoginView();
+            showToast('Your session has expired or is invalid. Please log in again.', 'warning', 'Session Expired');
+        }
+    }
+    return response;
+};
+
+// =========================================================================
 // Initialization & Authentication Guard
 // =========================================================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -78,7 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
     checkAuthSession();
 });
 
-function checkAuthSession() {
+async function checkAuthSession() {
     const token = sessionStorage.getItem('xmldb_auth_token');
     const userJson = sessionStorage.getItem('xmldb_user');
 
@@ -86,13 +122,82 @@ function checkAuthSession() {
         try {
             AppState.authToken = token;
             AppState.currentUser = JSON.parse(userJson);
-            renderAuthenticatedApp();
-            return;
+            const response = await fetch('/api/auth/me', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                if (data.authenticated !== false && data.user) {
+                    AppState.currentUser = data.user;
+                    sessionStorage.setItem('xmldb_user', JSON.stringify(data.user));
+                    renderAuthenticatedApp();
+                    return;
+                }
+            }
         } catch (e) {
-            sessionStorage.clear();
+            console.warn('Session verification failed:', e);
         }
     }
+    sessionStorage.clear();
+    AppState.currentUser = null;
+    AppState.authToken = null;
     renderLoginView();
+}
+
+function applyRolePermissions() {
+    const role = (AppState.currentUser?.role || 'PLANNER').toUpperCase();
+
+    const navSchedule = document.getElementById('nav-btn-schedule');
+    const navJobList = document.getElementById('nav-btn-job-list');
+    const navExecSummary = document.getElementById('nav-btn-execution-summary');
+    const navUsers = document.getElementById('nav-btn-users');
+    const btnCreateJob = document.getElementById('btn-create-new-job');
+    const btnSubmitApproval = document.getElementById('btn-submit-approval');
+    const btnSaveJob = document.getElementById('btn-save-job-config');
+    const btnSaveRun = document.getElementById('btn-save-and-run-job');
+
+    if (role === 'APPROVER') {
+        // Approver can see ONLY 2 pages: Job List and Monitoring (Execution Summary)
+        if (navSchedule) navSchedule.classList.add('hidden');
+        if (navUsers) navUsers.classList.add('hidden');
+        if (navJobList) navJobList.classList.remove('hidden');
+        if (navExecSummary) navExecSummary.classList.remove('hidden');
+        if (btnCreateJob) btnCreateJob.classList.add('hidden');
+        if (btnSaveRun) btnSaveRun.classList.add('hidden');
+
+        // Redirect away if currently on an unauthorized tab
+        if (AppState.activePage === 'schedule' || AppState.activePage === 'users' || !AppState.activePage) {
+            AppState.activePage = 'job-list';
+        }
+    } else if (role === 'PLANNER') {
+        // Planner can schedule jobs, review configs, but cannot manage users
+        if (navSchedule) navSchedule.classList.remove('hidden');
+        if (navJobList) navJobList.classList.remove('hidden');
+        if (navExecSummary) navExecSummary.classList.remove('hidden');
+        if (navUsers) navUsers.classList.add('hidden');
+        if (btnCreateJob) btnCreateJob.classList.remove('hidden');
+
+        // In Step 5: Save as Draft & Submit for Approval only (Save & Run Migration removed)
+        if (btnSubmitApproval) btnSubmitApproval.classList.remove('hidden');
+        if (btnSaveJob) btnSaveJob.classList.remove('hidden');
+        if (btnSaveRun) btnSaveRun.classList.add('hidden');
+
+        if (AppState.activePage === 'users') {
+            AppState.activePage = 'schedule';
+        }
+    } else {
+        // ADMIN: full access to everything
+        if (navSchedule) navSchedule.classList.remove('hidden');
+        if (navJobList) navJobList.classList.remove('hidden');
+        if (navExecSummary) navExecSummary.classList.remove('hidden');
+        if (navUsers) navUsers.classList.remove('hidden');
+        if (btnCreateJob) btnCreateJob.classList.remove('hidden');
+
+        // Step 5: all actions available
+        if (btnSubmitApproval) btnSubmitApproval.classList.remove('hidden');
+        if (btnSaveJob) btnSaveJob.classList.remove('hidden');
+        if (btnSaveRun) btnSaveRun.classList.remove('hidden');
+    }
 }
 
 function renderAuthenticatedApp() {
@@ -102,16 +207,21 @@ function renderAuthenticatedApp() {
     if (AppState.currentUser) {
         document.getElementById('current-user-name').textContent = AppState.currentUser.fullName || AppState.currentUser.username;
         const roleBadge = document.getElementById('current-user-role');
-        roleBadge.textContent = AppState.currentUser.role || 'USER';
-        if (AppState.currentUser.role === 'ADMIN') {
-            roleBadge.className = 'text-[9px] font-mono uppercase px-1 rounded bg-emerald-100 text-bnp-emerald font-bold';
+        const role = (AppState.currentUser.role || 'PLANNER').toUpperCase();
+        roleBadge.textContent = role;
+        if (role === 'ADMIN') {
+            roleBadge.className = 'text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-bold';
+        } else if (role === 'APPROVER') {
+            roleBadge.className = 'text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-bold';
         } else {
-            roleBadge.className = 'text-[9px] font-mono uppercase px-1 rounded bg-slate-100 text-slate-500 font-bold';
+            roleBadge.className = 'text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-emerald-100 text-bnp-emerald font-bold';
         }
     }
 
-    // Default to Schedule Job or restore last tab
-    switchPage(AppState.activePage || 'schedule');
+    applyRolePermissions();
+
+    const defaultPage = (AppState.currentUser?.role || '').toUpperCase() === 'APPROVER' ? 'job-list' : 'schedule';
+    switchPage(AppState.activePage || defaultPage);
 }
 
 function renderLoginView() {
@@ -219,6 +329,14 @@ function initNavigationListeners() {
 }
 
 function switchPage(pageName) {
+    const role = (AppState.currentUser?.role || 'PLANNER').toUpperCase();
+    if (role === 'APPROVER' && (pageName === 'schedule' || pageName === 'users')) {
+        pageName = 'job-list';
+    }
+    if (role === 'PLANNER' && pageName === 'users') {
+        pageName = 'schedule';
+    }
+
     AppState.activePage = pageName;
 
     // Update active nav button
@@ -369,8 +487,50 @@ function initStepHandlers() {
         document.getElementById('xml-file-path').value = 'sample-data/large-sample.xml';
         document.getElementById('xml-root-element').value = 'record';
         document.getElementById('batch-chunk-size').value = '1000';
+        detectCandidateRootsFromInput(true);
         showToast('Loaded demo file path: sample-data/large-sample.xml', 'info', 'Sample XML');
     });
+
+    // Step 2: Instant candidate root tags detection as soon as XML path is entered
+    const xmlPathField = document.getElementById('xml-file-path');
+    if (xmlPathField) {
+        xmlPathField.addEventListener('input', () => {
+            clearTimeout(detectRootsDebounceTimer);
+            detectRootsDebounceTimer = setTimeout(() => detectCandidateRootsFromInput(false), 300);
+        });
+        xmlPathField.addEventListener('change', () => {
+            clearTimeout(detectRootsDebounceTimer);
+            detectCandidateRootsFromInput(true);
+        });
+        xmlPathField.addEventListener('blur', () => {
+            clearTimeout(detectRootsDebounceTimer);
+            detectCandidateRootsFromInput(false);
+        });
+        xmlPathField.addEventListener('paste', () => {
+            setTimeout(() => detectCandidateRootsFromInput(true), 50);
+        });
+        xmlPathField.addEventListener('keyup', (e) => {
+            if (e.key === 'Enter') {
+                clearTimeout(detectRootsDebounceTimer);
+                detectCandidateRootsFromInput(true);
+            }
+        });
+    }
+
+    const btnDetectRoots = document.getElementById('btn-detect-xml-roots');
+    if (btnDetectRoots) {
+        btnDetectRoots.addEventListener('click', () => {
+            clearTimeout(detectRootsDebounceTimer);
+            detectCandidateRootsFromInput(true);
+        });
+    }
+
+    const xmlRootField = document.getElementById('xml-root-element');
+    if (xmlRootField) {
+        xmlRootField.addEventListener('input', () => {
+            updateCandidateChipsState();
+        });
+    }
 
     // Step 2: Schema Registry Select
     const schemaRegSelect = document.getElementById('schema-registry-select');
@@ -497,20 +657,34 @@ function initStepHandlers() {
         addMappingRow();
     });
 
-    // Step 4: Next to Preview
+    // Step 4: Next to Review & Confirm
     document.getElementById('btn-step4-next').addEventListener('click', () => {
-        generateDataPreview();
+        showJobConfigurationOverview();
     });
 
-    // Step 5: Save Job Configuration
-    document.getElementById('btn-save-job-config').addEventListener('click', () => {
-        saveJobConfiguration(false);
-    });
+    // Step 5: Save as Draft
+    const btnSaveDraft = document.getElementById('btn-save-job-config');
+    if (btnSaveDraft) {
+        btnSaveDraft.addEventListener('click', () => {
+            saveJobConfiguration(false, false);
+        });
+    }
 
-    // Step 5: Save & Run Migration Immediately
-    document.getElementById('btn-save-and-run-job').addEventListener('click', () => {
-        saveJobConfiguration(true);
-    });
+    // Step 5: Submit for Approval
+    const btnSubmitApproval = document.getElementById('btn-submit-approval');
+    if (btnSubmitApproval) {
+        btnSubmitApproval.addEventListener('click', () => {
+            saveJobConfiguration(false, true);
+        });
+    }
+
+    // Step 5: Save & Run Migration Immediately (Admin only)
+    const btnSaveRun = document.getElementById('btn-save-and-run-job');
+    if (btnSaveRun) {
+        btnSaveRun.addEventListener('click', () => {
+            saveJobConfiguration(true, false);
+        });
+    }
 }
 
 function canNavigateToStep(stepNum) {
@@ -545,6 +719,13 @@ function navigateToStep(step) {
             section.classList.remove('hidden');
         } else {
             section.classList.add('hidden');
+        }
+    }
+
+    if (step === 2) {
+        const pathInput = document.getElementById('xml-file-path');
+        if (pathInput && pathInput.value.trim() && !lastDetectedXmlPath) {
+            detectCandidateRootsFromInput(true);
         }
     }
 
@@ -700,6 +881,7 @@ async function resetWorkflow(clearDbConfig = false) {
     AppState.previewSkipReason = '';
 
     // Reset Step 2 Form (Source XML)
+    lastDetectedXmlPath = '';
     const xmlPathInput = document.getElementById('xml-file-path');
     if (xmlPathInput) xmlPathInput.value = '';
     const rootElInput = document.getElementById('xml-root-element');
@@ -712,6 +894,10 @@ async function resetWorkflow(clearDbConfig = false) {
     if (candContainer) candContainer.innerHTML = '';
     const sizeBadge = document.getElementById('xml-file-size-badge');
     if (sizeBadge) sizeBadge.textContent = 'Size: --';
+    const sizeBadge2 = document.getElementById('detected-xml-size-badge');
+    if (sizeBadge2) sizeBadge2.classList.add('hidden');
+    const indicator = document.getElementById('xml-file-detect-indicator');
+    if (indicator) indicator.classList.add('hidden');
     const registrySelect = document.getElementById('schema-registry-select');
     if (registrySelect) registrySelect.value = '';
 
@@ -988,7 +1174,7 @@ function applyAutoGeneratedMappings(mappings) {
     updateTableSequenceBanner();
 }
 
-async function runSchemaDiscovery() {
+async function runSchemaDiscovery(targetStep = 3) {
     collectSourceForm();
     const rootTags = AppState.source.rootElement ? AppState.source.rootElement.split(',').map(s => s.trim()).filter(Boolean) : ['record'];
 
@@ -1071,7 +1257,9 @@ async function runSchemaDiscovery() {
             }
 
             renderDiscoveredSchema();
-            navigateToStep(3);
+            if (targetStep) {
+                navigateToStep(targetStep);
+            }
 
             const createdMsg = result.createdTables && result.createdTables.length > 0
                 ? ` Provisioned ${AppState.schema.tables.length} canonical tables in target DB.`
@@ -1195,6 +1383,94 @@ function renderDiscoveredSchema() {
     }
 }
 
+let detectRootsDebounceTimer = null;
+let lastDetectedXmlPath = '';
+
+async function detectCandidateRootsFromInput(force = false) {
+    const input = document.getElementById('xml-file-path');
+    if (!input) return;
+    const path = input.value.trim();
+    if (!path || path.length < 2) {
+        lastDetectedXmlPath = '';
+        const wrapper = document.getElementById('candidate-root-tags-wrapper');
+        if (wrapper) wrapper.classList.add('hidden');
+        const sizeBadge = document.getElementById('detected-xml-size-badge');
+        if (sizeBadge) sizeBadge.classList.add('hidden');
+        return;
+    }
+
+    if (!force && path === lastDetectedXmlPath) {
+        return;
+    }
+
+    lastDetectedXmlPath = path;
+
+    const wrapper = document.getElementById('candidate-root-tags-wrapper');
+    const indicator = document.getElementById('xml-file-detect-indicator');
+
+    if (indicator) indicator.classList.remove('hidden');
+
+    try {
+        const resp = await fetch('/api/schema/detect-roots', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sourceXmlPath: path })
+        });
+        const data = await resp.json();
+
+        if (data && data.success && data.candidateRootElements && data.candidateRootElements.length > 0) {
+            renderCandidateRootChips(data.candidateRootElements);
+
+            // Auto-populate root element input with candidate root tags
+            const rootInput = document.getElementById('xml-root-element');
+            if (rootInput && (!rootInput.value.trim() || rootInput.value.trim().toLowerCase() === 'record')) {
+                rootInput.value = data.candidateRootElements.join(', ');
+                updateCandidateChipsState();
+                collectSourceForm();
+            }
+
+            if (data.fileSizeFormatted) {
+                const sizeBadge = document.getElementById('xml-file-size-badge');
+                if (sizeBadge) sizeBadge.textContent = 'Size: ' + data.fileSizeFormatted;
+                const sizeBadge2 = document.getElementById('detected-xml-size-badge');
+                if (sizeBadge2) {
+                    sizeBadge2.textContent = 'Size: ' + data.fileSizeFormatted;
+                    sizeBadge2.classList.remove('hidden');
+                }
+            }
+        } else {
+            lastDetectedXmlPath = '';
+            if (wrapper) wrapper.classList.add('hidden');
+        }
+    } catch (err) {
+        lastDetectedXmlPath = '';
+        console.warn('Could not auto-detect candidate root elements:', err);
+    } finally {
+        if (indicator) indicator.classList.add('hidden');
+    }
+}
+
+function updateCandidateChipsState() {
+    const rootInput = document.getElementById('xml-root-element');
+    const container = document.getElementById('candidate-root-tags-container');
+    if (!rootInput || !container) return;
+
+    const currentVal = rootInput.value.trim();
+    const currentTags = currentVal ? currentVal.split(',').map(s => s.trim().toLowerCase()) : [];
+
+    container.querySelectorAll('button[data-tag]').forEach(chip => {
+        const tag = chip.getAttribute('data-tag');
+        const isSelected = currentTags.includes(tag.toLowerCase());
+        if (isSelected) {
+            chip.className = 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-700 text-white border border-emerald-800 transition shadow-xs flex items-center gap-1';
+            chip.innerHTML = `<i class="fas fa-check text-[9px]"></i><span>${escapeHtml(tag)}</span>`;
+        } else {
+            chip.className = 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-600 hover:text-white transition shadow-2xs flex items-center gap-1';
+            chip.innerHTML = `<i class="fas fa-plus text-[9px]"></i><span>${escapeHtml(tag)}</span>`;
+        }
+    });
+}
+
 function renderCandidateRootChips(candidates) {
     const wrapper = document.getElementById('candidate-root-tags-wrapper');
     const container = document.getElementById('candidate-root-tags-container');
@@ -1211,6 +1487,7 @@ function renderCandidateRootChips(candidates) {
     candidates.forEach(tag => {
         const chip = document.createElement('button');
         chip.type = 'button';
+        chip.setAttribute('data-tag', tag);
         chip.className = 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-white text-emerald-800 border border-emerald-300 hover:bg-emerald-600 hover:text-white transition shadow-2xs flex items-center gap-1';
         chip.innerHTML = `<i class="fas fa-plus text-[9px]"></i><span>${escapeHtml(tag)}</span>`;
         chip.title = `Click to add or toggle ${tag} in XML Fragment Record Elements`;
@@ -1232,11 +1509,14 @@ function renderCandidateRootChips(candidates) {
                 rootInput.value = remaining.length > 0 ? remaining.join(', ') : tag;
                 showToast(`Removed root tag '${tag}'.`, 'info');
             }
+            updateCandidateChipsState();
             collectSourceForm();
         });
 
         container.appendChild(chip);
     });
+
+    updateCandidateChipsState();
 }
 
 function renderFlattenedTablesBanner(flatTables) {
@@ -1725,223 +2005,138 @@ function collectFieldMappings() {
 }
 
 // =========================================================================
-// STEP 5: PREVIEW & DUMMY DATA FOR > 100MB FILES
+// STEP 5: CONFIGURATION REVIEW & EXECUTION CONFIRMATION
 // =========================================================================
-async function generateDataPreview() {
+function showJobConfigurationOverview() {
     const mappings = collectFieldMappings();
     if (mappings.length === 0) {
-        showToast('Please map at least one XML tag to a target column.', 'warning', 'No Mappings');
+        showToast('Please map at least one XML tag to a target column before reviewing.', 'warning', 'No Mappings');
         return;
     }
+    AppState.mapping.fieldMappings = mappings;
 
-    const payload = {
-        dbConfig: {
-            engine: AppState.dbConnection.engine,
-            host: AppState.dbConnection.host,
-            port: AppState.dbConnection.port,
-            databaseName: AppState.dbConnection.databaseName,
-            schema: AppState.dbConnection.schema,
-            username: AppState.dbConnection.username,
-            password: AppState.dbConnection.password,
-            url: AppState.dbConnection.url
-        },
-        sourceXmlPath: AppState.source.filePath,
-        recordRootElement: AppState.source.rootElement,
-        targetTable: AppState.mapping.targetTable,
-        tableOrder: AppState.mapping.tableOrder,
-        previewLimit: 5,
-        mappings: mappings
-    };
+    // 1. Target Database Profile
+    const dbEngine = AppState.dbConnection.engine || 'POSTGRESQL';
+    const dbEngineBadge = document.getElementById('review-db-engine-badge');
+    if (dbEngineBadge) dbEngineBadge.textContent = dbEngine;
 
-    const btnStep4Next = document.getElementById('btn-step4-next');
-    const origHtml = btnStep4Next.innerHTML;
-    btnStep4Next.disabled = true;
-    btnStep4Next.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Generating Preview...`;
+    const dbUrl = document.getElementById('review-db-url');
+    if (dbUrl) {
+        dbUrl.textContent = AppState.dbConnection.url || '--';
+        dbUrl.title = AppState.dbConnection.url || '';
+    }
 
-    try {
-        const response = await fetch('/api/preview/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
+    const dbSchema = document.getElementById('review-db-schema');
+    if (dbSchema) dbSchema.textContent = AppState.dbConnection.schema || 'public';
 
-        const result = await response.json();
+    const dbUser = document.getElementById('review-db-user');
+    if (dbUser) dbUser.textContent = AppState.dbConnection.username || '--';
 
-        if (response.ok && result.success) {
-            AppState.previewSkipped = !!result.previewSkipped;
-            AppState.isDummyData = !!result.dummyData;
-            AppState.previewSkipReason = result.skipReason || '';
+    // 2. Source XML Details
+    const xmlPath = document.getElementById('review-xml-path');
+    if (xmlPath) {
+        xmlPath.textContent = AppState.source.filePath || '--';
+        xmlPath.title = AppState.source.filePath || '';
+    }
 
-            // Update banner
-            const skippedBanner = document.getElementById('preview-skipped-banner');
-            const skippedReason = document.getElementById('preview-skipped-reason');
-            if (AppState.previewSkipped || AppState.isDummyData) {
-                if (skippedBanner) skippedBanner.classList.remove('hidden');
-                if (skippedReason && AppState.previewSkipReason) {
-                    skippedReason.textContent = AppState.previewSkipReason;
-                }
-                showToast(result.message || 'File size exceeds 100 MB. Showing tag-generated dummy preview data.', 'info', 'Large File Mode');
-            } else {
-                if (skippedBanner) skippedBanner.classList.add('hidden');
-                showToast('Preview generated successfully from XML fragments.', 'success', 'Preview Ready');
-            }
-
-            // Pre-fill job name if empty
-            const jobNameInput = document.getElementById('job-name-input');
-            if (jobNameInput && !jobNameInput.value) {
-                const primaryTbl = AppState.mapping.targetTable || 'Data';
-                jobNameInput.value = `${primaryTbl.charAt(0).toUpperCase() + primaryTbl.slice(1)} Ingestion Job`;
-            }
-
-            renderMultiTablePreviewTabs(result);
-            navigateToStep(5);
+    const xmlSizeBadge = document.getElementById('review-xml-size-badge');
+    if (xmlSizeBadge) {
+        if (AppState.source.fileSizeFormatted) {
+            xmlSizeBadge.textContent = AppState.source.fileSizeFormatted;
+        } else if (AppState.source.fileSizeBytes > 0) {
+            const gb = (AppState.source.fileSizeBytes / (1024 * 1024 * 1024)).toFixed(2);
+            xmlSizeBadge.textContent = gb > 0.1 ? `${gb} GB File` : `${Math.round(AppState.source.fileSizeBytes / (1024 * 1024))} MB File`;
         } else {
-            showToast(result.message || 'Error occurred while generating XML data preview.', 'error', 'Preview Error');
+            xmlSizeBadge.textContent = '> 6 GB File';
         }
-    } catch (err) {
-        showToast(err.message || 'Network exception during preview generation.', 'error', 'Network Error');
-    } finally {
-        btnStep4Next.disabled = false;
-        btnStep4Next.innerHTML = origHtml;
-    }
-}
-
-function renderMultiTablePreviewTabs(result) {
-    const tabsContainer = document.getElementById('preview-table-tabs');
-    tabsContainer.innerHTML = '';
-    AppState.tablePreviews = result.tablePreviews || {};
-
-    const tableNames = Object.keys(AppState.tablePreviews);
-
-    if (tableNames.length === 0) {
-        renderPreviewTable(result.previewRows || [], result.columns || []);
-        document.getElementById('preview-sql-template').textContent = result.generatedSqlTemplate || '-- No SQL generated --';
-        document.getElementById('preview-active-table-name').textContent = AppState.mapping.targetTable || 'Primary Table';
-        return;
     }
 
-    tableNames.forEach((tbl, idx) => {
-        const previewData = AppState.tablePreviews[tbl];
-        const tabBtn = document.createElement('button');
-        tabBtn.type = 'button';
-        tabBtn.className = `preview-tab-btn px-4 py-2 rounded-lg font-bold text-xs transition border flex items-center gap-2 ${idx === 0 ? 'bg-bnp-emerald text-white border-bnp-emerald shadow-sm' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'}`;
-        tabBtn.dataset.table = tbl;
-        const countText = AppState.isDummyData
-            ? `${(previewData.rows || []).length} dummy rows`
-            : `${(previewData.rows || []).length} rows`;
+    const rawRoots = AppState.source.rootElement || 'record';
+    const xmlRoots = document.getElementById('review-xml-roots');
+    if (xmlRoots) {
+        xmlRoots.textContent = rawRoots;
+        xmlRoots.title = rawRoots;
+    }
 
-        tabBtn.innerHTML = `
-            <span class="w-4 h-4 rounded-full ${idx === 0 ? 'bg-white text-bnp-emerald' : 'bg-bnp-emerald text-white'} text-[10px] flex items-center justify-center font-bold">${idx + 1}</span>
-            <i class="fas fa-table ${idx === 0 ? 'text-white' : 'text-bnp-emerald'}"></i>
-            <span>${escapeHtml(tbl)}</span>
-            <span class="preview-tab-count px-1.5 py-0.2 rounded text-[10px] ${idx === 0 ? 'bg-emerald-800/40 text-white' : 'bg-gray-100 text-gray-600'}">${countText}</span>
-        `;
+    const chunkSizeEl = document.getElementById('review-chunk-size');
+    if (chunkSizeEl) {
+        chunkSizeEl.textContent = `${(AppState.source.chunkSize || 1000).toLocaleString()} records`;
+    }
 
-        tabBtn.addEventListener('click', () => {
-            selectPreviewTab(tbl);
+    // 3. Extract mapped canonical tables
+    const mappedTablesSet = new Set();
+    mappings.forEach(m => {
+        if (m.targetTable && m.targetTable.trim()) {
+            mappedTablesSet.add(m.targetTable.trim());
+        }
+    });
+    if (AppState.mapping.targetTable && AppState.mapping.targetTable.trim()) {
+        mappedTablesSet.add(AppState.mapping.targetTable.trim());
+    }
+    const mappedTables = Array.from(mappedTablesSet);
+
+    // 4. Mapping count badge
+    const mappingBadge = document.getElementById('review-mapping-count-badge');
+    if (mappingBadge) {
+        mappingBadge.textContent = `${mappings.length} Mapped Fields across ${mappedTables.length} Canonical Tables`;
+    }
+
+    // 5. Populate flat staging tables list (<entity>_flat)
+    const flatListContainer = document.getElementById('review-flat-tables-list');
+    if (flatListContainer) {
+        flatListContainer.innerHTML = '';
+        const flatTableNames = new Set();
+        const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
+        rootTokens.forEach(rt => {
+            const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+            flatTableNames.add(clean.endsWith('_flat') ? clean : clean + '_flat');
+        });
+        mappedTables.forEach(mt => {
+            const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+            flatTableNames.add(clean.endsWith('_flat') ? clean : clean + '_flat');
         });
 
-        tabsContainer.appendChild(tabBtn);
-    });
+        flatTableNames.forEach(ft => {
+            const pill = document.createElement('span');
+            pill.className = 'px-2 py-1 rounded bg-blue-50 text-blue-800 border border-blue-200 font-bold flex items-center gap-1.5 shadow-2xs';
+            pill.innerHTML = `<i class="fas fa-layer-group text-blue-500 text-[10px]"></i> ${escapeHtml(ft)}`;
+            flatListContainer.appendChild(pill);
+        });
+    }
 
-    selectPreviewTab(tableNames[0]);
-}
-
-function selectPreviewTab(tableName) {
-    document.querySelectorAll('.preview-tab-btn').forEach(btn => {
-        const badge = btn.querySelector('.preview-tab-count');
-        const numSpan = btn.querySelector('span:first-child');
-        const icon = btn.querySelector('i');
-
-        if (btn.dataset.table === tableName) {
-            btn.className = 'preview-tab-btn px-4 py-2 rounded-lg font-bold text-xs transition border flex items-center gap-2 bg-bnp-emerald text-white border-bnp-emerald shadow-sm';
-            if (numSpan) numSpan.className = 'w-4 h-4 rounded-full bg-white text-bnp-emerald text-[10px] flex items-center justify-center font-bold';
-            if (icon) icon.className = 'fas fa-table text-white';
-            if (badge) badge.className = 'preview-tab-count px-1.5 py-0.2 rounded text-[10px] bg-emerald-800/40 text-white';
+    // 6. Populate canonical relational destination tables list
+    const canonicalListContainer = document.getElementById('review-canonical-tables-list');
+    if (canonicalListContainer) {
+        canonicalListContainer.innerHTML = '';
+        if (mappedTables.length === 0) {
+            canonicalListContainer.innerHTML = '<span class="text-gray-400 italic">None configured</span>';
         } else {
-            btn.className = 'preview-tab-btn px-4 py-2 rounded-lg font-bold text-xs transition border flex items-center gap-2 bg-white text-gray-700 border-gray-200 hover:bg-gray-50';
-            if (numSpan) numSpan.className = 'w-4 h-4 rounded-full bg-bnp-emerald text-white text-[10px] flex items-center justify-center font-bold';
-            if (icon) icon.className = 'fas fa-table text-bnp-emerald';
-            if (badge) badge.className = 'preview-tab-count px-1.5 py-0.2 rounded text-[10px] bg-gray-100 text-gray-600';
-        }
-    });
-
-    const data = AppState.tablePreviews[tableName];
-    if (data) {
-        renderPreviewTable(data.rows || [], data.columns || [], tableName);
-        document.getElementById('preview-active-table-name').textContent = tableName;
-        document.getElementById('preview-sql-template').textContent = data.sqlTemplate || '-- No SQL generated --';
-
-        const countBadge = document.getElementById('preview-record-count-badge');
-        if (countBadge) {
-            if (AppState.isDummyData) {
-                countBadge.textContent = `${(data.rows || []).length} Dummy Records (File > 100MB)`;
-                countBadge.className = 'px-3 py-1 rounded-md text-xs font-mono font-bold bg-amber-50 text-amber-800 border border-amber-300';
-            } else {
-                countBadge.textContent = `${(data.rows || []).length} Records Tested (${tableName})`;
-                countBadge.className = 'px-3 py-1 rounded-md text-xs font-mono font-bold bg-emerald-50 text-bnp-emerald border border-emerald-300';
-            }
+            mappedTables.forEach((tbl, idx) => {
+                const pill = document.createElement('span');
+                pill.className = 'px-2 py-1 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 font-bold flex items-center gap-1.5 shadow-2xs';
+                pill.innerHTML = `<span class="text-emerald-600 font-mono text-[10px]">[${idx + 1}]</span><i class="fas fa-table text-emerald-600 text-[10px]"></i> ${escapeHtml(tbl)}`;
+                canonicalListContainer.appendChild(pill);
+            });
         }
     }
+
+    // 7. Pre-fill Job Name if empty
+    const jobNameInput = document.getElementById('job-name-input');
+    if (jobNameInput && !jobNameInput.value) {
+        const primaryTbl = AppState.mapping.targetTable || (mappedTables.length > 0 ? mappedTables[0] : 'Enterprise');
+        jobNameInput.value = `${primaryTbl.charAt(0).toUpperCase() + primaryTbl.slice(1)} Ingestion Job`;
+    }
+
+    navigateToStep(5);
 }
 
-function renderPreviewTable(rows, columns, tableName = '') {
-    const thead = document.getElementById('preview-table-head');
-    const tbody = document.getElementById('preview-table-body');
-
-    thead.innerHTML = '';
-    tbody.innerHTML = '';
-
-    if (columns.length === 0) {
-        thead.innerHTML = '<tr><th class="px-4 py-3">No mapped columns</th></tr>';
-        tbody.innerHTML = '<tr><td class="px-4 py-6 text-center text-gray-400">No preview records.</td></tr>';
-        return;
-    }
-
-    let trHead = '<tr>';
-    trHead += '<th class="px-3 py-3 w-16 text-gray-500 font-bold">#</th>';
-    columns.forEach(col => {
-        let constraintBadge = '';
-        const mapping = (AppState.mapping.fieldMappings || []).find(m =>
-            (m.targetTable || '').toLowerCase() === (tableName || '').toLowerCase() &&
-            (m.targetColumn || '').toLowerCase() === col.toLowerCase()
-        );
-        if (mapping) {
-            if (mapping.constraintType === 'PK') {
-                constraintBadge = `<span class="px-1.5 py-0.2 rounded text-[8px] bg-amber-100 text-amber-800 font-bold ml-1 border border-amber-300">PK</span>`;
-            } else if (mapping.constraintType === 'FK') {
-                constraintBadge = `<span class="px-1.5 py-0.2 rounded text-[8px] bg-blue-100 text-blue-800 font-bold ml-1 border border-blue-300">FK</span>`;
-            }
-        }
-        trHead += `<th class="px-4 py-3 font-bold text-gray-800">${escapeHtml(col)}${constraintBadge}</th>`;
-    });
-    trHead += '</tr>';
-    thead.innerHTML = trHead;
-
-    if (rows.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="${columns.length + 1}" class="px-4 py-6 text-center text-gray-400">No records generated.</td></tr>`;
-        return;
-    }
-
-    rows.forEach((row, idx) => {
-        let tr = '<tr class="hover:bg-gray-50 transition">';
-        const dummyBadge = AppState.isDummyData
-            ? `<span class="px-1 py-0.2 rounded text-[9px] font-mono bg-amber-100 text-amber-800 ml-1 border border-amber-200">SIM</span>`
-            : '';
-        tr += `<td class="px-3 py-2.5 text-gray-400 font-mono whitespace-nowrap">${idx + 1}${dummyBadge}</td>`;
-        columns.forEach(col => {
-            const val = row[col];
-            tr += `<td class="px-4 py-2.5 font-mono text-gray-800 truncate max-w-xs">${val !== undefined && val !== null ? escapeHtml(String(val)) : '<span class="text-gray-400">NULL</span>'}</td>`;
-        });
-        tr += '</tr>';
-        tbody.innerHTML += tr;
-    });
-}
+// Backward-compatible alias
+const generateDataPreview = showJobConfigurationOverview;
 
 // =========================================================================
 // SAVE JOB CONFIGURATION (Persist to Backend & Job List)
 // =========================================================================
-async function saveJobConfiguration(runImmediately = false) {
+async function saveJobConfiguration(runImmediately = false, isSubmitApproval = false) {
     const jobNameInput = document.getElementById('job-name-input');
     const jobDescInput = document.getElementById('job-desc-input');
 
@@ -1964,6 +2159,15 @@ async function saveJobConfiguration(runImmediately = false) {
     const isStagedPipeline = stagedRadio ? stagedRadio.checked : true;
     const rootTags = AppState.source.rootElement ? AppState.source.rootElement.split(',').map(s => s.trim()).filter(Boolean) : ['record'];
 
+    let approvalStatus = 'PENDING_APPROVAL';
+    if (isSubmitApproval) {
+        approvalStatus = 'PENDING_APPROVAL';
+    } else if (runImmediately) {
+        approvalStatus = 'APPROVED';
+    } else {
+        approvalStatus = 'DRAFT';
+    }
+
     const payload = {
         jobName,
         description,
@@ -1976,6 +2180,7 @@ async function saveJobConfiguration(runImmediately = false) {
         tableOrder: AppState.mapping.tableOrder,
         chunkSize: AppState.source.chunkSize,
         stagedPipeline: isStagedPipeline,
+        approvalStatus: approvalStatus,
         dbConfig: {
             engine: AppState.dbConnection.engine,
             host: AppState.dbConnection.host,
@@ -1987,16 +2192,21 @@ async function saveJobConfiguration(runImmediately = false) {
             url: AppState.dbConnection.url
         },
         mappings: mappings,
-        createdBy: AppState.currentUser ? AppState.currentUser.username : 'admin'
+        createdBy: AppState.currentUser ? AppState.currentUser.username : 'planner'
     };
 
-    const targetBtn = runImmediately
-        ? document.getElementById('btn-save-and-run-job')
-        : document.getElementById('btn-save-job-config');
+    let targetBtn = document.getElementById('btn-save-job-config');
+    if (isSubmitApproval) {
+        targetBtn = document.getElementById('btn-submit-approval') || targetBtn;
+    } else if (runImmediately) {
+        targetBtn = document.getElementById('btn-save-and-run-job') || targetBtn;
+    }
 
-    const origHtml = targetBtn.innerHTML;
-    targetBtn.disabled = true;
-    targetBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-1.5"></i> Saving...`;
+    const origHtml = targetBtn ? targetBtn.innerHTML : '';
+    if (targetBtn) {
+        targetBtn.disabled = true;
+        targetBtn.innerHTML = `<i class="fas fa-spinner fa-spin mr-1.5"></i> ${isSubmitApproval ? 'Submitting...' : 'Saving...'}`;
+    }
 
     try {
         const response = await fetch('/api/job-configs', {
@@ -2007,7 +2217,13 @@ async function saveJobConfiguration(runImmediately = false) {
         const result = await response.json();
 
         if (response.ok) {
-            showToast(`Job '${jobName}' saved successfully to Job List!`, 'success', 'Job Saved');
+            if (isSubmitApproval) {
+                showToast(`Job '${jobName}' submitted for review and approval!`, 'success', 'Submitted for Approval');
+            } else if (runImmediately) {
+                showToast(`Job '${jobName}' approved and starting migration!`, 'success', 'Job Approved & Launched');
+            } else {
+                showToast(`Job '${jobName}' saved as draft to Job List!`, 'success', 'Job Saved');
+            }
 
             if (runImmediately && result.id) {
                 // Execute immediately
@@ -2026,8 +2242,10 @@ async function saveJobConfiguration(runImmediately = false) {
     } catch (e) {
         showToast(e.message || 'Network exception while saving job configuration.', 'error', 'Network Error');
     } finally {
-        targetBtn.disabled = false;
-        targetBtn.innerHTML = origHtml;
+        if (targetBtn) {
+            targetBtn.disabled = false;
+            targetBtn.innerHTML = origHtml;
+        }
     }
 }
 
@@ -2220,7 +2438,7 @@ function applyJsonMapping() {
             // Auto re-run discovery so Step 3 shows only the mapped tags immediately
             if (AppState.source.filePath) {
                 document.getElementById('jsonMappingModal').classList.add('hidden');
-                runSchemaDiscovery();
+                runSchemaDiscovery(4);
                 return;
             }
         } else {
@@ -2318,13 +2536,103 @@ function initJobListHandlers() {
     if (btnCloseReview) btnCloseReview.addEventListener('click', () => document.getElementById('jobReviewModal').classList.add('hidden'));
     if (btnCloseReview2) btnCloseReview2.addEventListener('click', () => document.getElementById('jobReviewModal').classList.add('hidden'));
 
-    // Modal Run Button
+    // Modal Run Button (Planner & Admin)
     const btnModalRun = document.getElementById('btn-modal-run-job');
     if (btnModalRun) {
         btnModalRun.addEventListener('click', async () => {
             if (AppState.currentReviewJob && AppState.currentReviewJob.id) {
                 document.getElementById('jobReviewModal').classList.add('hidden');
                 await executeJobFromConfig(AppState.currentReviewJob.id, AppState.currentReviewJob.jobName);
+            }
+        });
+    }
+
+    // Modal Approve Button (Approver & Admin)
+    const btnModalApprove = document.getElementById('btn-modal-approve-job');
+    if (btnModalApprove) {
+        btnModalApprove.addEventListener('click', async () => {
+            if (!AppState.currentReviewJob || !AppState.currentReviewJob.id) return;
+            const jobId = AppState.currentReviewJob.id;
+            const origHtml = btnModalApprove.innerHTML;
+            btnModalApprove.disabled = true;
+            btnModalApprove.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i> Approving...`;
+            try {
+                const res = await fetch(`/api/job-configs/${jobId}/approve`, { method: 'POST' });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(`Configuration for '${AppState.currentReviewJob.jobName}' has been approved! Planner can now run this job.`, 'success', 'Job Approved');
+                    document.getElementById('jobReviewModal').classList.add('hidden');
+                    loadSavedJobs();
+                } else {
+                    showToast(data.message || 'Failed to approve configuration.', 'error', 'Approval Error');
+                }
+            } catch (err) {
+                showToast(err.message || 'Network error approving configuration.', 'error', 'Network Error');
+            } finally {
+                btnModalApprove.disabled = false;
+                btnModalApprove.innerHTML = origHtml;
+            }
+        });
+    }
+
+    // Modal Reject Button (Shows reject feedback box)
+    const btnModalReject = document.getElementById('btn-modal-reject-job');
+    const rejectBox = document.getElementById('review-modal-reject-box');
+    const rejectReasonInput = document.getElementById('review-modal-reject-reason');
+    if (btnModalReject) {
+        btnModalReject.addEventListener('click', () => {
+            if (rejectBox) {
+                rejectBox.classList.remove('hidden');
+                if (rejectReasonInput) {
+                    rejectReasonInput.value = '';
+                    rejectReasonInput.focus();
+                }
+            }
+        });
+    }
+
+    // Modal Cancel Rejection
+    const btnCancelReject = document.getElementById('btn-cancel-modal-reject');
+    if (btnCancelReject) {
+        btnCancelReject.addEventListener('click', () => {
+            if (rejectBox) rejectBox.classList.add('hidden');
+        });
+    }
+
+    // Modal Confirm Rejection
+    const btnConfirmReject = document.getElementById('btn-confirm-modal-reject');
+    if (btnConfirmReject) {
+        btnConfirmReject.addEventListener('click', async () => {
+            if (!AppState.currentReviewJob || !AppState.currentReviewJob.id) return;
+            const reason = rejectReasonInput ? rejectReasonInput.value.trim() : '';
+            if (!reason) {
+                showToast('Please provide a mandatory explanation for rejecting this job.', 'warning', 'Reason Required');
+                if (rejectReasonInput) rejectReasonInput.focus();
+                return;
+            }
+            const jobId = AppState.currentReviewJob.id;
+            const origHtml = btnConfirmReject.innerHTML;
+            btnConfirmReject.disabled = true;
+            btnConfirmReject.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i> Rejecting...`;
+            try {
+                const res = await fetch(`/api/job-configs/${jobId}/reject`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(`Configuration rejected. Feedback has been recorded for the Planner.`, 'info', 'Configuration Rejected');
+                    document.getElementById('jobReviewModal').classList.add('hidden');
+                    loadSavedJobs();
+                } else {
+                    showToast(data.message || 'Failed to reject configuration.', 'error', 'Reject Error');
+                }
+            } catch (err) {
+                showToast(err.message || 'Network error rejecting configuration.', 'error', 'Network Error');
+            } finally {
+                btnConfirmReject.disabled = false;
+                btnConfirmReject.innerHTML = origHtml;
             }
         });
     }
@@ -2347,16 +2655,39 @@ async function loadSavedJobs() {
             return;
         }
 
+        const role = (AppState.currentUser?.role || 'PLANNER').toUpperCase();
+
         tbody.innerHTML = '';
         jobs.forEach((job, idx) => {
             const tr = document.createElement('tr');
             tr.className = 'hover:bg-gray-50 transition';
+
+            const approval = (job.approvalStatus || 'APPROVED').toUpperCase();
+            let approvalBadge = '';
+            if (approval === 'APPROVED') {
+                const reviewerInfo = job.reviewedBy ? `Approved by ${job.reviewedBy}${job.reviewedAt ? ' on ' + job.reviewedAt : ''}` : 'Approved';
+                approvalBadge = `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-100 text-bnp-emerald border border-emerald-200" title="${escapeHtml(reviewerInfo)}"><i class="fas fa-check-circle text-[9px]"></i> APPROVED</span>`;
+            } else if (approval === 'REJECTED') {
+                const rejectInfo = job.rejectionReason ? `Reason: ${job.rejectionReason}` : 'Rejected by Approver';
+                approvalBadge = `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-red-100 text-red-700 border border-red-200" title="${escapeHtml(rejectInfo)}"><i class="fas fa-ban text-[9px]"></i> REJECTED</span>`;
+            } else if (approval === 'PENDING_APPROVAL') {
+                approvalBadge = `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-100 text-amber-800 border border-amber-200" title="Awaiting Approver review"><i class="fas fa-clock text-[9px]"></i> PENDING APPROVAL</span>`;
+            } else {
+                approvalBadge = `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-100 text-slate-600 border border-slate-200"><i class="fas fa-pencil text-[9px]"></i> DRAFT</span>`;
+            }
 
             const statusClass =
                 job.lastRunStatus === 'RUNNING' ? 'bg-amber-100 text-amber-800' :
                 job.lastRunStatus === 'SUCCESS' || job.lastRunStatus === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
                 job.lastRunStatus === 'FAILED' ? 'bg-red-100 text-red-700' :
                 'bg-slate-100 text-slate-700';
+
+            const runStatusInfo = job.lastRunStatus ? `
+                <div class="mt-1 flex items-center gap-1">
+                    <span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold ${statusClass}">${escapeHtml(job.lastRunStatus)}</span>
+                    ${job.lastRunAt ? `<span class="text-[9px] text-gray-400 font-mono">${escapeHtml(job.lastRunAt)}</span>` : ''}
+                </div>
+            ` : '';
 
             const displayTable = job.tableOrder && job.tableOrder.length > 0
                 ? job.tableOrder.join(', ')
@@ -2366,6 +2697,44 @@ async function loadSavedJobs() {
             const pipelineBadge = isStaged
                 ? `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-purple-50 text-purple-700 border border-purple-200" title="Two-Stage Dynamic Pipeline (StAX Staging + Delta Upsert)"><i class="fas fa-layer-group text-[8px]"></i> STAGED</span>`
                 : `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-100 text-slate-600 border border-slate-200" title="Single-Pass Direct Streaming"><i class="fas fa-bolt text-[8px]"></i> DIRECT</span>`;
+
+            // Action buttons based on user role and approval state
+            const canRun = approval === 'APPROVED' && role !== 'APPROVER';
+            const canDelete = role === 'ADMIN' || role === 'PLANNER';
+
+            let actionButtonsHtml = `
+                <button type="button" class="btn-review-job btn text-xs py-1 px-2.5 bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 mr-1.5" data-id="${job.id}">
+                    <i class="fas fa-eye mr-1"></i> Review
+                </button>
+            `;
+
+            if (canRun) {
+                actionButtonsHtml += `
+                    <button type="button" class="btn-run-job btn text-xs py-1 px-2.5 bg-emerald-50 text-bnp-emerald border border-emerald-300 hover:bg-emerald-100 mr-1.5 font-bold" data-id="${job.id}">
+                        <i class="fas fa-play mr-1"></i> Run Job
+                    </button>
+                `;
+            } else if (approval === 'REJECTED' && role !== 'APPROVER') {
+                actionButtonsHtml += `
+                    <span class="inline-flex items-center text-[10px] text-red-600 font-mono mr-1.5 bg-red-50 border border-red-200 px-2 py-0.5 rounded cursor-help" title="${escapeHtml(job.rejectionReason || 'Rejected by Approver')}">
+                        <i class="fas fa-ban mr-1"></i> Rejected
+                    </span>
+                `;
+            } else if (approval === 'PENDING_APPROVAL' && role !== 'APPROVER') {
+                actionButtonsHtml += `
+                    <span class="inline-flex items-center text-[10px] text-amber-700 font-mono mr-1.5 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded cursor-help" title="Awaiting Approver review">
+                        <i class="fas fa-clock mr-1"></i> Pending
+                    </span>
+                `;
+            }
+
+            if (canDelete) {
+                actionButtonsHtml += `
+                    <button type="button" class="btn-delete-job btn text-xs py-1 px-2 text-red-500 hover:bg-red-50 border border-transparent hover:border-red-200" data-id="${job.id}" title="Delete Job">
+                        <i class="fas fa-trash-can"></i>
+                    </button>
+                `;
+            }
 
             tr.innerHTML = `
                 <td class="px-4 py-3.5 text-gray-400 font-mono">${idx + 1}</td>
@@ -2380,29 +2749,24 @@ async function loadSavedJobs() {
                 <td class="px-4 py-3.5 font-mono text-gray-600">${job.chunkSize || 1000}</td>
                 <td class="px-4 py-3.5 font-mono text-gray-500 text-[11px] truncate max-w-[160px]" title="${escapeHtml(job.sourceXmlPath)}">${escapeHtml(job.sourceXmlPath)}</td>
                 <td class="px-4 py-3.5">
-                    <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${statusClass}">
-                        ${escapeHtml(job.lastRunStatus || job.status || 'READY')}
-                    </span>
-                    ${job.lastRunAt ? `<div class="text-[9px] text-gray-400 font-mono mt-0.5">${escapeHtml(job.lastRunAt)}</div>` : ''}
+                    ${approvalBadge}
+                    ${runStatusInfo}
                 </td>
                 <td class="px-4 py-3.5 font-mono text-gray-500">${escapeHtml(job.createdBy || 'admin')}</td>
                 <td class="px-4 py-3.5 text-right whitespace-nowrap">
-                    <button type="button" class="btn-review-job btn text-xs py-1 px-2.5 bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 mr-1.5" data-id="${job.id}">
-                        <i class="fas fa-eye mr-1"></i> Review
-                    </button>
-                    <button type="button" class="btn-run-job btn text-xs py-1 px-2.5 bg-emerald-50 text-bnp-emerald border border-emerald-300 hover:bg-emerald-100 mr-1.5 font-bold" data-id="${job.id}">
-                        <i class="fas fa-play mr-1"></i> Run Job
-                    </button>
-                    <button type="button" class="btn-delete-job btn text-xs py-1 px-2 text-red-500 hover:bg-red-50 border border-transparent hover:border-red-200" data-id="${job.id}" title="Delete Job">
-                        <i class="fas fa-trash-can"></i>
-                    </button>
+                    ${actionButtonsHtml}
                 </td>
             `;
 
             // Row action listeners
-            tr.querySelector('.btn-review-job').addEventListener('click', () => openReviewModal(job));
-            tr.querySelector('.btn-run-job').addEventListener('click', () => executeJobFromConfig(job.id, job.jobName));
-            tr.querySelector('.btn-delete-job').addEventListener('click', () => deleteJobConfig(job.id, job.jobName));
+            const reviewBtn = tr.querySelector('.btn-review-job');
+            if (reviewBtn) reviewBtn.addEventListener('click', () => openReviewModal(job));
+
+            const runBtn = tr.querySelector('.btn-run-job');
+            if (runBtn) runBtn.addEventListener('click', () => executeJobFromConfig(job.id, job.jobName));
+
+            const deleteBtn = tr.querySelector('.btn-delete-job');
+            if (deleteBtn) deleteBtn.addEventListener('click', () => deleteJobConfig(job.id, job.jobName));
 
             tbody.appendChild(tr);
         });
@@ -2413,6 +2777,93 @@ async function loadSavedJobs() {
 
 function openReviewModal(job) {
     AppState.currentReviewJob = job;
+    const role = (AppState.currentUser?.role || 'PLANNER').toUpperCase();
+    const approval = (job.approvalStatus || 'APPROVED').toUpperCase();
+
+    // Reset and configure approval banner
+    const banner = document.getElementById('review-modal-approval-banner');
+    const bannerIcon = document.getElementById('review-modal-banner-icon');
+    const bannerTitle = document.getElementById('review-modal-banner-title');
+    const bannerSubtitle = document.getElementById('review-modal-banner-subtitle');
+    const bannerBadge = document.getElementById('review-modal-banner-badge');
+    const rejectBox = document.getElementById('review-modal-reject-box');
+    const rejectReasonInput = document.getElementById('review-modal-reject-reason');
+    if (rejectBox) rejectBox.classList.add('hidden');
+    if (rejectReasonInput) rejectReasonInput.value = '';
+
+    if (banner) {
+        banner.className = 'p-3.5 rounded-xl border text-xs flex items-center justify-between gap-3';
+        if (approval === 'APPROVED') {
+            banner.classList.add('bg-emerald-50', 'border-emerald-200');
+            bannerIcon.className = 'w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 bg-emerald-100 text-bnp-emerald';
+            bannerIcon.innerHTML = `<i class="fas fa-circle-check"></i>`;
+            bannerTitle.className = 'font-bold text-emerald-900';
+            bannerTitle.textContent = `Approved by ${job.reviewedBy || 'Approver'}`;
+            bannerSubtitle.className = 'text-[11px] text-emerald-700 mt-0.5';
+            bannerSubtitle.textContent = `Configuration approved on ${job.reviewedAt || 'N/A'}. Ready for execution.`;
+            bannerBadge.className = 'px-2.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase shrink-0 bg-emerald-200 text-emerald-900';
+            bannerBadge.textContent = 'APPROVED';
+        } else if (approval === 'REJECTED') {
+            banner.classList.add('bg-red-50', 'border-red-200');
+            bannerIcon.className = 'w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 bg-red-100 text-red-600';
+            bannerIcon.innerHTML = `<i class="fas fa-ban"></i>`;
+            bannerTitle.className = 'font-bold text-red-900';
+            bannerTitle.textContent = `Configuration Rejected by ${job.reviewedBy || 'Approver'}`;
+            bannerSubtitle.className = 'text-[11px] text-red-700 mt-0.5';
+            bannerSubtitle.textContent = `Reason: ${job.rejectionReason || 'No specific reason provided.'}`;
+            bannerBadge.className = 'px-2.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase shrink-0 bg-red-200 text-red-900';
+            bannerBadge.textContent = 'REJECTED';
+        } else if (approval === 'PENDING_APPROVAL') {
+            banner.classList.add('bg-amber-50', 'border-amber-200');
+            bannerIcon.className = 'w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 bg-amber-100 text-amber-700';
+            bannerIcon.innerHTML = `<i class="fas fa-clock"></i>`;
+            bannerTitle.className = 'font-bold text-amber-900';
+            bannerTitle.textContent = 'Pending Approver Review';
+            bannerSubtitle.className = 'text-[11px] text-amber-700 mt-0.5';
+            bannerSubtitle.textContent = 'Submitted by Planner. Awaiting Approver or Admin decision.';
+            bannerBadge.className = 'px-2.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase shrink-0 bg-amber-200 text-amber-900';
+            bannerBadge.textContent = 'PENDING';
+        } else {
+            banner.classList.add('bg-slate-50', 'border-slate-200');
+            bannerIcon.className = 'w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm shrink-0 bg-slate-200 text-slate-700';
+            bannerIcon.innerHTML = `<i class="fas fa-pencil"></i>`;
+            bannerTitle.className = 'font-bold text-slate-800';
+            bannerTitle.textContent = 'Draft Configuration';
+            bannerSubtitle.className = 'text-[11px] text-slate-600 mt-0.5';
+            bannerSubtitle.textContent = 'Saved as draft. Submit for approval when ready to proceed.';
+            bannerBadge.className = 'px-2.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase shrink-0 bg-slate-200 text-slate-700';
+            bannerBadge.textContent = 'DRAFT';
+        }
+        banner.classList.remove('hidden');
+    }
+
+    // Modal action buttons:
+    const btnApprove = document.getElementById('btn-modal-approve-job');
+    const btnReject = document.getElementById('btn-modal-reject-job');
+    const btnRun = document.getElementById('btn-modal-run-job');
+
+    // Approver & Admin can approve/reject when status is PENDING_APPROVAL
+    const canApproveOrReject = (role === 'APPROVER' || role === 'ADMIN') && approval === 'PENDING_APPROVAL';
+    if (btnApprove) btnApprove.classList.toggle('hidden', !canApproveOrReject);
+    if (btnReject) btnReject.classList.toggle('hidden', !canApproveOrReject);
+
+    // Planner & Admin can run ONLY IF APPROVED
+    // Approver can NEVER run
+    const canRunModal = role !== 'APPROVER' && approval === 'APPROVED';
+    if (btnRun) btnRun.classList.toggle('hidden', !canRunModal);
+
+    const statusBadge = document.getElementById('review-modal-status-badge');
+    if (statusBadge) {
+        if (approval === 'APPROVED') {
+            statusBadge.innerHTML = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-100 text-bnp-emerald">APPROVED</span>`;
+        } else if (approval === 'REJECTED') {
+            statusBadge.innerHTML = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-red-100 text-red-700">REJECTED</span>`;
+        } else if (approval === 'PENDING_APPROVAL') {
+            statusBadge.innerHTML = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-amber-100 text-amber-800">PENDING</span>`;
+        } else {
+            statusBadge.innerHTML = `<span class="px-2 py-0.5 rounded font-bold text-[10px] bg-slate-100 text-slate-600">DRAFT</span>`;
+        }
+    }
 
     document.getElementById('review-modal-job-name').textContent = job.jobName;
     document.getElementById('review-modal-desc').textContent = job.description || 'Configured dynamic ingestion pipeline';
@@ -2486,6 +2937,11 @@ function openReviewModal(job) {
 }
 
 async function executeJobFromConfig(jobId, jobName = '') {
+    const role = (AppState.currentUser?.role || '').toUpperCase();
+    if (role === 'APPROVER') {
+        showToast('Approvers do not have permission to execute jobs.', 'error', 'Access Denied');
+        return;
+    }
     showToast(`Launching Spring Batch ingestion for '${jobName || 'Job #' + jobId}'...`, 'info', 'Starting Job');
 
     try {
@@ -2815,21 +3271,31 @@ async function loadExecutionHistory(isSilent = false) {
         const history = await response.json();
         AppState.executionHistory = history;
 
-        if (badge) badge.textContent = `${history.length} Executions`;
+        const effectiveCount = Math.max(history.length, AppState.activeJobExecutionId ? 1 : 0);
+        if (badge) badge.textContent = `${effectiveCount} Executions`;
 
         // Populate dropdown options
         if (dropdown) {
             const currentSelected = dropdown.value || 'ALL';
-            let optionsHtml = `<option value="ALL">All Executions (${history.length})</option>`;
+            let optionsHtml = `<option value="ALL">All Executions (${effectiveCount})</option>`;
             history.forEach(exec => {
-                const writtenStr = (exec.totalWritten || 0).toLocaleString();
-                optionsHtml += `<option value="${exec.executionId}">Job #${exec.executionId} - ${escapeHtml(exec.jobName || 'Batch Ingestion')} [${exec.status}] (${writtenStr} written)</option>`;
+                const writtenStr = (exec.totalWritten || exec.totalRead || 0).toLocaleString();
+                const phaseStr = exec.currentPhase ? ` [${exec.currentPhase}]` : ` [${exec.status}]`;
+                optionsHtml += `<option value="${exec.executionId}">Job #${exec.executionId} - ${escapeHtml(exec.jobName || 'Batch Ingestion')}${phaseStr} (${writtenStr} records)</option>`;
             });
+
+            // Ensure active job is always present in dropdown even if history sync has slight lag
+            if (AppState.activeJobExecutionId && !history.some(e => String(e.executionId) === String(AppState.activeJobExecutionId))) {
+                optionsHtml += `<option value="${AppState.activeJobExecutionId}">Job #${AppState.activeJobExecutionId} - Active Ingestion [STREAMING]</option>`;
+            }
+
             dropdown.innerHTML = optionsHtml;
 
-            // Preserve current user selection
+            // Preserve current user selection or stick to active job
             if (Array.from(dropdown.options).some(opt => opt.value === currentSelected)) {
                 dropdown.value = currentSelected;
+            } else if (AppState.activeJobExecutionId) {
+                dropdown.value = String(AppState.activeJobExecutionId);
             } else {
                 dropdown.value = 'ALL';
             }
@@ -2909,15 +3375,19 @@ function updateTransferredFromTelemetry(data) {
 
     const written = data.totalWritten || 0;
     const read = data.totalRead || 0;
+    const effectiveDisplay = written > 0 ? written : read;
 
-    if (totalTransferredEl) totalTransferredEl.textContent = written.toLocaleString();
+    if (totalTransferredEl) totalTransferredEl.textContent = effectiveDisplay.toLocaleString();
     if (totalReadEl) totalReadEl.textContent = read.toLocaleString();
     if (totalWrittenEl) totalWrittenEl.textContent = written.toLocaleString();
 
     if (execBadgeEl) {
         const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
-        execBadgeEl.textContent = `Job #${data.jobExecutionId} (${isRunning ? 'STREAMING' : data.status})`;
+        const streamState = data.streamingState || (isRunning ? 'STREAMING' : data.status);
+        execBadgeEl.textContent = `Job #${data.jobExecutionId} (${streamState})`;
         execBadgeEl.className = `px-2 py-0.5 rounded-full font-bold text-[10px] font-mono shadow-2xs ${
+            streamState === 'STREAMING' ? 'bg-blue-100 text-blue-800 animate-pulse' :
+            streamState === 'NORMALIZING' ? 'bg-indigo-100 text-indigo-800 animate-pulse' :
             isRunning ? 'bg-blue-100 text-blue-800 animate-pulse' :
             data.status === 'COMPLETED' ? 'bg-emerald-100 text-emerald-800' :
             data.status === 'FAILED' ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-800'
@@ -2926,7 +3396,11 @@ function updateTransferredFromTelemetry(data) {
 
     if (subtitleEl) {
         const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
-        if (isRunning) {
+        if (data.currentAction) {
+            subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> ${escapeHtml(data.currentAction)}`;
+        } else if (data.currentPhase) {
+            subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> ${escapeHtml(data.currentPhase)}`;
+        } else if (isRunning) {
             subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> Streaming Active (Job #${data.jobExecutionId})`;
         } else {
             subtitleEl.innerHTML = `<i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Finished Ingestion (Job #${data.jobExecutionId})`;
@@ -2954,6 +3428,10 @@ function applyExecutionHistoryFilter(selectedId) {
         renderExecutionRows(history);
         const latestExec = history.length > 0 ? history[0] : null;
         updateTransferredCard(latestExec, history.length);
+        if (latestExec) {
+            updateTableBreakdown(latestExec);
+            updateThroughputAndState(latestExec);
+        }
 
         // If an active job is running, keep status panel visible for it
         const running = history.find(e => e.status === 'RUNNING' || e.status === 'STARTED');
@@ -2993,6 +3471,23 @@ function applyExecutionHistoryFilter(selectedId) {
 
     const selectedExec = history.find(e => String(e.executionId) === String(selectedId));
     if (!selectedExec) {
+        if (selectedId !== 'ALL' && AppState.activeJobExecutionId && String(selectedId) === String(AppState.activeJobExecutionId)) {
+            const activeSummary = {
+                executionId: selectedId,
+                jobName: `Job #${selectedId} - Active Ingestion`,
+                status: 'RUNNING',
+                streamingState: 'STREAMING',
+                currentPhase: 'Phase 1: Streaming XML to flat tables (StAX)',
+                totalRead: 0,
+                totalWritten: 0,
+                totalErrors: 0,
+                targetTable: 'MULTI_TABLE'
+            };
+            updateTransferredCard(activeSummary, 1);
+            updateSelectedJobStatusPanel(activeSummary);
+            renderExecutionRows([activeSummary]);
+            return;
+        }
         if (statusPanel) statusPanel.classList.add('hidden');
         renderExecutionRows(history);
         const latestExec = history.length > 0 ? history[0] : null;
@@ -3002,6 +3497,8 @@ function applyExecutionHistoryFilter(selectedId) {
 
     updateTransferredCard(selectedExec, 1);
     updateSelectedJobStatusPanel(selectedExec);
+    updateTableBreakdown(selectedExec);
+    updateThroughputAndState(selectedExec);
     renderExecutionRows([selectedExec]);
 
     if (selectedExec.status === 'FAILED') {
@@ -3078,15 +3575,28 @@ function updateSelectedJobStatusPanel(jobData) {
         }
     }
 
+    const role = (AppState.currentUser?.role || '').toUpperCase();
     const btnStop = document.getElementById('btn-stop-active-job');
     if (btnStop) {
-        if (jobData.status === 'STARTED' || jobData.status === 'RUNNING') {
+        if (role !== 'APPROVER' && (jobData.status === 'STARTED' || jobData.status === 'RUNNING')) {
             btnStop.classList.remove('hidden');
             btnStop.onclick = async () => {
                 await stopBatchJob(execId);
             };
         } else {
             btnStop.classList.add('hidden');
+        }
+    }
+
+    const btnResume = document.getElementById('btn-resume-selected-job');
+    if (btnResume) {
+        if (role !== 'APPROVER' && (jobData.status === 'STOPPED' || jobData.status === 'FAILED')) {
+            btnResume.classList.remove('hidden');
+            btnResume.onclick = async () => {
+                await resumeBatchJob(execId);
+            };
+        } else {
+            btnResume.classList.add('hidden');
         }
     }
 }
@@ -3191,9 +3701,15 @@ function renderExecutionRows(executions) {
                     <td class="px-4 py-2.5 text-bnp-emerald font-bold font-mono">${tbl.written.toLocaleString()}</td>
                     <td class="px-4 py-2.5 font-bold font-mono ${tbl.errors > 0 ? 'text-red-600' : 'text-gray-400'}">${tbl.errors.toLocaleString()}</td>
                     <td rowspan="${numRows}" class="px-4 py-3 text-center align-middle bg-white">
-                        <button type="button" class="btn btn-secondary text-[11px] py-1 px-2.5 font-sans font-semibold btn-inspect-exec" data-id="${exec.executionId}">
-                            <i class="fas fa-eye text-bnp-emerald mr-1"></i> Inspect
-                        </button>
+                        <div class="flex flex-col items-center gap-1.5 justify-center">
+                            <button type="button" class="btn btn-secondary text-[11px] py-1 px-2.5 font-sans font-semibold btn-inspect-exec" data-id="${exec.executionId}">
+                                <i class="fas fa-eye text-bnp-emerald mr-1"></i> Inspect
+                            </button>
+                            ${((exec.status === 'STOPPED' || exec.status === 'FAILED') && (AppState.currentUser?.role || '').toUpperCase() !== 'APPROVER') ? `
+                            <button type="button" class="btn text-[11px] py-1 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-sans font-semibold rounded shadow-2xs btn-resume-exec" data-id="${exec.executionId}">
+                                <i class="fas fa-play text-white mr-1"></i> Resume
+                            </button>` : ''}
+                        </div>
                     </td>
                 `;
             } else {
@@ -3233,6 +3749,16 @@ function renderExecutionRows(executions) {
             }
         });
     });
+
+    // Wire resume buttons
+    tbody.querySelectorAll('.btn-resume-exec').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            const execId = btn.getAttribute('data-id');
+            if (execId) {
+                await resumeBatchJob(execId);
+            }
+        });
+    });
 }
 
 function startActiveJobMonitor(jobExecutionId) {
@@ -3247,12 +3773,34 @@ function startActiveJobMonitor(jobExecutionId) {
         if (!opt) {
             opt = document.createElement('option');
             opt.value = jobExecutionId;
-            opt.textContent = `Job #${jobExecutionId} - Active Ingestion [RUNNING]`;
+            opt.textContent = `Job #${jobExecutionId} - Active Ingestion [STREAMING]`;
             dropdown.appendChild(opt);
         }
         dropdown.value = jobExecutionId;
     }
+
+    // Set immediate visual indication that job has started
+    const stateEl = document.getElementById('metric-speed-state');
+    if (stateEl) {
+        stateEl.textContent = 'STREAMING (PHASE 1)';
+        stateEl.className = 'font-mono font-bold text-blue-600 text-[11px] animate-pulse';
+    }
+    const subtitleEl = document.getElementById('metric-speed-subtitle');
+    if (subtitleEl) {
+        subtitleEl.textContent = `Job #${jobExecutionId} streaming active`;
+    }
+    const execBadgeEl = document.getElementById('metric-history-executions-badge');
+    if (execBadgeEl) {
+        execBadgeEl.textContent = `Job #${jobExecutionId} (STREAMING)`;
+        execBadgeEl.className = 'px-2 py-0.5 rounded-full font-bold text-[10px] font-mono shadow-2xs bg-blue-100 text-blue-800 animate-pulse';
+    }
+    const xferSubEl = document.getElementById('metric-transferred-subtitle');
+    if (xferSubEl) {
+        xferSubEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> Phase 1: Streaming XML to flat tables (Job #${jobExecutionId})`;
+    }
+
     startUnifiedLiveTelemetryEngine();
+    pollJobTelemetry(jobExecutionId);
 }
 
 function renderTelemetryData(data) {
@@ -3343,6 +3891,11 @@ async function pollJobTelemetry(jobExecutionId) {
 }
 
 async function stopBatchJob(jobExecutionId) {
+    const role = (AppState.currentUser?.role || '').toUpperCase();
+    if (role === 'APPROVER') {
+        showToast('Approvers do not have permission to stop jobs.', 'warning', 'Permission Denied');
+        return;
+    }
     try {
         const response = await fetch(`/api/jobs/${jobExecutionId}/stop`, { method: 'POST' });
         const result = await response.json();
@@ -3352,6 +3905,31 @@ async function stopBatchJob(jobExecutionId) {
         }
     } catch (e) {
         showToast('Failed to send stop signal.', 'error');
+    }
+}
+
+async function resumeBatchJob(jobExecutionId) {
+    const role = (AppState.currentUser?.role || '').toUpperCase();
+    if (role === 'APPROVER') {
+        showToast('Approvers do not have permission to start or resume jobs.', 'warning', 'Permission Denied');
+        return;
+    }
+    try {
+        showToast(`Requesting resume/restart for Job #${jobExecutionId}...`, 'info', 'Resuming Job');
+        const response = await fetch(`/api/jobs/${jobExecutionId}/resume`, { method: 'POST' });
+        const result = await response.json();
+        if (response.ok && result.success) {
+            showToast(`Job resumed successfully as Execution #${result.jobExecutionId}`, 'success', 'Job Resumed');
+            if (result.jobExecutionId) {
+                startActiveJobMonitor(result.jobExecutionId);
+            }
+            await loadExecutionHistory();
+            await runLiveTelemetryCycle();
+        } else {
+            showToast(result.message || 'Failed to resume job.', 'error', 'Resume Error');
+        }
+    } catch (e) {
+        showToast('Failed to contact server for job resume: ' + e.message, 'error', 'Error');
     }
 }
 
@@ -3365,15 +3943,20 @@ function updateTableBreakdown(data) {
     const targetTables = data.targetTables || Object.keys(writeCounts);
 
     if (targetTables.length === 0 && Object.keys(writeCounts).length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No active or historical table write statistics available.</td></tr>`;
-        if (badge) badge.textContent = `0 Tables Active`;
+        if (data.status === 'RUNNING' || data.status === 'STARTED') {
+            tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-blue-600 font-sans text-xs animate-pulse"><i class="fas fa-spinner fa-spin mr-2"></i> Streaming records from XML source into flat staging...</td></tr>`;
+            if (badge) badge.textContent = `Streaming Active`;
+        } else {
+            tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No active or historical table write statistics available.</td></tr>`;
+            if (badge) badge.textContent = `0 Tables Active`;
+        }
         return;
     }
 
     const allTables = Array.from(new Set([...targetTables, ...Object.keys(writeCounts)]));
     if (badge) badge.textContent = `${allTables.length} Tables Active`;
 
-    const totalWrittenAll = data.totalWritten || 1;
+    const totalWrittenAll = (data.totalWritten || 0) > 0 ? data.totalWritten : (data.totalRead || 1);
 
     let html = '';
     allTables.forEach(tableName => {
@@ -3381,6 +3964,7 @@ function updateTableBreakdown(data) {
         const errors = errorCounts[tableName] || 0;
         const pct = totalWrittenAll > 0 ? Math.min(100, Math.round((written / totalWrittenAll) * 100)) : 0;
         const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
+        const streamState = data.streamingState || (isRunning ? 'STREAMING' : (data.status || 'COMMITTED'));
 
         html += `
             <tr class="hover:bg-slate-50/80 transition">
@@ -3406,11 +3990,13 @@ function updateTableBreakdown(data) {
                 </td>
                 <td class="px-4 py-2.5">
                     <span class="px-2 py-0.5 rounded text-[10px] font-bold ${
+                        streamState === 'STREAMING' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+                        streamState === 'NORMALIZING' ? 'bg-indigo-100 text-indigo-700 animate-pulse' :
                         isRunning ? 'bg-blue-100 text-blue-700 animate-pulse' :
                         data.status === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
                         data.status === 'FAILED' ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-600'
                     }">
-                        ${isRunning ? 'STREAMING' : (data.status || 'COMMITTED')}
+                        ${escapeHtml(streamState)}
                     </span>
                 </td>
             </tr>
@@ -3421,18 +4007,19 @@ function updateTableBreakdown(data) {
 
 function updateThroughputAndState(data) {
     let speed = Math.round(data.recordsPerSecond || 0);
-    if (speed === 0 && (data.totalWritten || 0) > 0) {
+    const effectiveTotal = (data.totalWritten || 0) > 0 ? data.totalWritten : (data.totalRead || 0);
+    if (speed === 0 && effectiveTotal > 0) {
         if (data.startTime && data.endTime) {
             try {
                 const s = new Date(data.startTime.replace(/-/g, '/')).getTime();
                 const e = new Date(data.endTime.replace(/-/g, '/')).getTime();
                 const sec = Math.max(1, (e - s) / 1000);
-                speed = Math.round(data.totalWritten / sec);
+                speed = Math.round(effectiveTotal / sec);
             } catch (ignored) {
-                speed = Math.max(1, data.totalWritten);
+                speed = Math.max(1, effectiveTotal);
             }
         } else {
-            speed = Math.max(1, Math.min(1000, data.totalWritten));
+            speed = Math.max(1, Math.min(1000, effectiveTotal));
         }
     }
     const speedEl = document.getElementById('metric-live-speed');
@@ -3450,25 +4037,35 @@ function updateThroughputAndState(data) {
 
     const stateEl = document.getElementById('metric-speed-state');
     if (stateEl) {
-        const st = data.status || 'IDLE';
-        if (st === 'RUNNING' || st === 'STARTED') {
-            stateEl.textContent = 'STREAMING';
+        const streamState = data.streamingState || data.status || 'IDLE';
+        if (streamState === 'STREAMING') {
+            stateEl.textContent = 'STREAMING (PHASE 1)';
             stateEl.className = 'font-mono font-bold text-blue-600 text-[11px] animate-pulse';
-        } else if (st === 'COMPLETED') {
+        } else if (streamState === 'NORMALIZING') {
+            stateEl.textContent = 'NORMALIZING (PHASE 2)';
+            stateEl.className = 'font-mono font-bold text-indigo-600 text-[11px] animate-pulse';
+        } else if (streamState === 'RUNNING' || streamState === 'STARTED') {
+            stateEl.textContent = 'RUNNING';
+            stateEl.className = 'font-mono font-bold text-blue-600 text-[11px] animate-pulse';
+        } else if (streamState === 'COMPLETED') {
             stateEl.textContent = 'COMPLETED';
             stateEl.className = 'font-mono font-bold text-emerald-600 text-[11px]';
-        } else if (st === 'FAILED') {
+        } else if (streamState === 'FAILED') {
             stateEl.textContent = 'FAILED';
             stateEl.className = 'font-mono font-bold text-red-600 text-[11px]';
         } else {
-            stateEl.textContent = st;
-            stateEl.className = 'font-mono font-bold text-gray-500 text-[11px]';
+            stateEl.textContent = streamState;
+            stateEl.className = 'font-mono font-bold text-amber-600 text-[11px]';
         }
     }
 
     const subtitleEl = document.getElementById('metric-speed-subtitle');
     if (subtitleEl) {
-        if (data.status === 'RUNNING' || data.status === 'STARTED') {
+        if (data.currentAction) {
+            subtitleEl.textContent = data.currentAction;
+        } else if (data.currentPhase) {
+            subtitleEl.textContent = `Job #${data.jobExecutionId}: ${data.currentPhase}`;
+        } else if (data.status === 'RUNNING' || data.status === 'STARTED') {
             subtitleEl.textContent = `Job #${data.jobExecutionId} streaming active`;
         } else {
             subtitleEl.textContent = `Job #${data.jobExecutionId} (${data.status})`;
@@ -3651,14 +4248,14 @@ function updateCharts(data) {
     }
 
     if (qualityDoughnutChart) {
-        const committed = data.totalWritten || 0;
+        const committed = (data.totalWritten || 0) > 0 ? data.totalWritten : (data.totalRead || 0);
         const errors = data.totalErrors || 0;
         qualityDoughnutChart.data.datasets[0].data = (committed === 0 && errors === 0) ? [1, 0] : [committed, errors];
         qualityDoughnutChart.update('none');
     }
 
     const committedEl = document.getElementById('doughnut-committed-val');
-    if (committedEl) committedEl.textContent = (data.totalWritten || 0).toLocaleString();
+    if (committedEl) committedEl.textContent = ((data.totalWritten || 0) > 0 ? data.totalWritten : (data.totalRead || 0)).toLocaleString();
 
     const errorsEl = document.getElementById('doughnut-errors-val');
     if (errorsEl) errorsEl.textContent = (data.totalErrors || 0).toLocaleString();

@@ -12,6 +12,7 @@ import com.enterprise.xmldbtool.model.DbConnectionConfig;
 import com.enterprise.xmldbtool.model.DbTestResponse;
 import com.enterprise.xmldbtool.service.DynamicBatchJobService;
 import com.enterprise.xmldbtool.service.DynamicDataSourceService;
+import com.enterprise.xmldbtool.service.DynamicSchemaResolutionService;
 import com.enterprise.xmldbtool.service.SchemaProvisioningService;
 import com.enterprise.xmldbtool.service.XmlPreviewService;
 import com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService;
@@ -27,6 +28,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -60,6 +62,9 @@ class DynamicXmlIngestionTest {
 
     @Autowired
     private SchemaProvisioningService provisioningService;
+
+    @Autowired
+    private com.enterprise.xmldbtool.controller.SchemaDiscoveryController schemaDiscoveryController;
 
     @Autowired
     private javax.sql.DataSource dataSource;
@@ -1569,7 +1574,7 @@ class DynamicXmlIngestionTest {
         assertTrue(tableNames.contains("staging_xml_records"), "Must contain flat staging table 'staging_xml_records'");
 
         // Verify flattened Person table based on XML tags exists
-        assertTrue(tableNames.contains("personflat"), "Must contain PersonFlat flattened table");
+        assertTrue(tableNames.contains("personflat") || tableNames.contains("person_flat"), "Must contain flattened table for Person");
 
         // Verify canonical Master and 1-to-N child tables exist
         assertTrue(tableNames.contains("person"), "Must contain Master Person table");
@@ -1604,7 +1609,8 @@ class DynamicXmlIngestionTest {
             try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM Person")) {
                 assertTrue(rs.next());
             }
-            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM PersonFlat")) {
+            String flatPersonTable = tableNames.contains("personflat") ? "PersonFlat" : "person_flat";
+            try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM " + flatPersonTable)) {
                 assertTrue(rs.next());
             }
             try (java.sql.ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM Description1List")) {
@@ -2072,7 +2078,7 @@ class DynamicXmlIngestionTest {
     }
 
     @Test
-    @DisplayName("Verify _stage table creation, root tags/attributes in columns, sub-tags in JSON format, and UI exclusion")
+    @DisplayName("Verify _flat table creation, root tags/attributes in columns, sub-tags in raw XML format, and no unwanted _stage tables")
     void testStagingTableSuffixAndSubTagsInJsonFormat() throws Exception {
         org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
 
@@ -2092,31 +2098,36 @@ class DynamicXmlIngestionTest {
         com.enterprise.xmldbtool.model.SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
         assertTrue(response.isSuccess());
 
-        // 1. Verify _stage table is created
-        assertTrue(response.getCreatedTables().stream().anyMatch(t -> t.equalsIgnoreCase("person_stage")),
-                "Must create dedicated staging table 'person_stage' with _stage suffix");
+        // 1. Verify strictly person_flat is created, and NO unwanted _stage tables are created
+        assertTrue(response.getCreatedTables().stream().anyMatch(t -> t.equalsIgnoreCase("person_flat")),
+                "Must create dedicated flattened table 'person_flat' with _flat suffix");
+        assertFalse(response.getCreatedTables().stream().anyMatch(t -> t.equalsIgnoreCase("person_stage")),
+                "Must NOT create unwanted _stage tables like 'person_stage'");
 
-        // 2. Verify _stage tables are NOT shown in discoveredTables (hidden from UI)
+        // 2. Verify _stage tables are NOT created or shown in discoveredTables
         assertFalse(response.getDiscoveredTables().stream().anyMatch(t -> t.getTableName().toLowerCase().endsWith("_stage")),
-                "_stage tables must NOT be shown in discoveredTables (golden source hidden from UI)");
+                "_stage tables must NOT be created or shown in discoveredTables");
 
-        // 3. Verify _stage table columns exist in DB
+        // 3. Verify person_flat table columns exist in DB
         List<Map<String, Object>> cols = jdbc.queryForList(
-                "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'PERSON_STAGE'"
+                "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'PERSON_FLAT'"
         );
-        assertFalse(cols.isEmpty(), "person_stage columns must exist in database");
+        assertFalse(cols.isEmpty(), "person_flat columns must exist in database");
         Set<String> colNames = cols.stream().map(c -> String.valueOf(c.get("COLUMN_NAME")).toLowerCase()).collect(java.util.stream.Collectors.toSet());
 
         // Root attributes and leaf tags stored into columns
-        assertTrue(colNames.contains("id"), "person_stage must contain 'id' column");
-        assertTrue(colNames.contains("status"), "person_stage must contain 'status' column");
-        assertTrue(colNames.contains("name"), "person_stage must contain 'name' column");
-        assertTrue(colNames.contains("age"), "person_stage must contain 'age' column");
+        assertTrue(colNames.contains("id"), "person_flat must contain 'id' column");
+        assertTrue(colNames.contains("bnpp_id"), "person_flat must contain 'bnpp_id' column");
+        assertTrue(colNames.contains("tag_name"), "person_flat must contain 'tag_name' column");
+        assertTrue(colNames.contains("version_number"), "person_flat must contain 'version_number' column");
+        assertTrue(colNames.contains("status"), "person_flat must contain 'status' column");
+        assertTrue(colNames.contains("name"), "person_flat must contain 'name' column");
+        assertTrue(colNames.contains("age"), "person_flat must contain 'age' column");
 
-        // Sub-tag 'addresses' column exists to hold nested structures in JSON format
-        assertTrue(colNames.contains("addresses"), "person_stage must contain sub-tag 'addresses' column");
+        // Sub-tag 'addresses' column exists to hold nested structures in raw XML format
+        assertTrue(colNames.contains("addresses"), "person_flat must contain sub-tag 'addresses' column");
 
-        // 4. Stream XML fragments and verify sub-tag is populated in JSON format
+        // 4. Stream XML fragments and verify sub-tag is populated in raw XML format
         stagingStreamingService.streamXmlToStaging(
                 "sample-data/test.xml",
                 List.of("person"),
@@ -2127,21 +2138,22 @@ class DynamicXmlIngestionTest {
                 500
         );
 
-        List<Map<String, Object>> stageRows = jdbc.queryForList("SELECT * FROM person_stage WHERE job_execution_id = 88801");
-        assertFalse(stageRows.isEmpty(), "person_stage must have records streamed into it");
-        Map<String, Object> firstRow = stageRows.get(0);
+        List<Map<String, Object>> flatRows = jdbc.queryForList("SELECT * FROM person_flat WHERE job_execution_id = 88801 ORDER BY id ASC");
+        assertFalse(flatRows.isEmpty(), "person_flat must have records streamed into it");
+        Map<String, Object> firstRow = flatRows.get(0);
 
         assertEquals("James Smith", firstRow.get("name"), "Leaf tag 'name' stored into column");
         assertEquals("active", firstRow.get("status"), "Attribute 'status' stored into column");
         assertEquals("37", firstRow.get("age"), "Leaf tag 'age' stored into column");
 
-        // Verify sub-tag 'addresses' contains valid JSON format
+        // Verify sub-tag 'addresses' contains valid raw XML format
         Object addressesVal = firstRow.get("addresses");
         assertNotNull(addressesVal, "Sub-tag 'addresses' column must not be null");
-        String addressesJson = String.valueOf(addressesVal);
-        assertTrue(addressesJson.startsWith("[") || addressesJson.startsWith("{"), "Sub-tag details must be stored in JSON format");
-        assertTrue(addressesJson.contains("123 Main St") || addressesJson.contains("street"), "Sub-tag JSON must contain address details");
-        assertTrue(addressesJson.contains("New York") || addressesJson.contains("city"), "Sub-tag JSON must contain city details");
+        String addressesXml = String.valueOf(addressesVal).trim();
+        assertTrue(addressesXml.startsWith("<addresses>") && addressesXml.endsWith("</addresses>"),
+                "Sub-tag details must be stored in raw XML format, actual: " + addressesXml);
+        assertTrue(addressesXml.contains("<street>123 Main St</street>"), "Sub-tag raw XML must contain street tag");
+        assertTrue(addressesXml.contains("<city>New York</city>"), "Sub-tag raw XML must contain city tag");
     }
 
     @Test
@@ -2469,6 +2481,625 @@ class DynamicXmlIngestionTest {
         assertFalse(actualDbTableNames.contains("entity"), "DB must NOT have provisioned unmapped table entity");
         assertFalse(actualDbTableNames.contains("descriptionlist1s"), "DB must NOT have provisioned unmapped table descriptionlist1s");
         assertFalse(actualDbTableNames.contains("descriptionlist1"), "DB must NOT have provisioned unmapped table descriptionlist1");
+    }
+
+    @Test
+    @DisplayName("Verify end-to-end staged pipeline with bnpp_id, versioning, tag_name, deduplication, and delta update")
+    void testStagedIngestionWithPartitionedFlatTablesAndBnppIdAndVersioning() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:bnpp_test_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        // Define field mappings for Person
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("person/@id", "Person", "person_id", "NONE", "PK"),
+                new FieldMapping("person/@status", "Person", "status", "UPPER", "NONE"),
+                new FieldMapping("person/name", "Person", "name", "NONE", "NONE"),
+                new FieldMapping("person/age", "Person", "age", "NONE", "NONE")
+        );
+
+        // 1. Initial ingestion with file 1 (Contains Person 9001: Alice, Age 30)
+        java.io.File fileV1 = java.io.File.createTempFile("person_v1_", ".xml");
+        fileV1.deleteOnExit();
+        java.nio.file.Files.writeString(fileV1.toPath(), """
+            <dataset date="20261107">
+                <persons>
+                    <person id="9001" status="active">
+                        <name>Alice</name>
+                        <age>30</age>
+                    </person>
+                </persons>
+            </dataset>
+            """);
+
+        com.enterprise.xmldbtool.model.JobLaunchRequest reqV1 = new com.enterprise.xmldbtool.model.JobLaunchRequest();
+        reqV1.setDbConfig(config);
+        reqV1.setSourceXmlPath(fileV1.getAbsolutePath());
+        reqV1.setRecordRootElement("person");
+        reqV1.setStagedPipeline(true);
+        reqV1.setMappings(mappings);
+        reqV1.setXmlVersion("v1.0");
+
+        // Provision schema
+        provisioningService.provisionDiscoveredTables(config, fileV1.getAbsolutePath(), List.of("person"), Collections.emptyList(), mappings);
+
+        // Stream to flat staging
+        stagingStreamingService.streamXmlToStaging(fileV1.getAbsolutePath(), List.of("person"), "v1.0", "v1.0.0", 101L, testDs, 100);
+
+        // Check that person_flat contains bnpp_id and tag_name
+        Map<String, Object> flatRow = jdbcTemplate.queryForMap("SELECT * FROM person_flat WHERE record_identifier = '9001'");
+        assertNotNull(flatRow.get("bnpp_id"), "Flat table must contain bnpp_id");
+        assertTrue(isValidUuid((String) flatRow.get("bnpp_id")), "Flat table bnpp_id must be a valid UUID");
+        assertEquals("person", flatRow.get("tag_name"));
+
+        // Normalize from staging to destination table Person
+        DynamicSchemaResolutionService.NormalizationSummary normV1 = schemaResolutionService.normalizeStagingToCanonical(
+                101L, testDs, mappings, List.of("Person"), "Person", 100
+        );
+        assertTrue(normV1.normalizedCount() >= 1, "Must normalize at least 1 record");
+
+        // Verify destination table Person
+        Map<String, Object> personV1 = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 9001");
+        assertTrue(isValidUuid((String) personV1.get("bnpp_id")), "Destination table must hold unique UUID bnpp_id");
+        assertEquals(flatRow.get("bnpp_id"), personV1.get("source_bnpp_id"), "Canonical table must reference flat table's bnpp_id");
+        assertEquals("person", personV1.get("tag_name"), "Destination table must hold tag_name");
+        assertEquals(1, ((Number) personV1.get("version_number")).intValue(), "Initial version must be 1");
+        assertEquals("Alice", personV1.get("name"));
+        assertNotNull(personV1.get("payload_hash"), "Must compute payload_hash");
+
+        // 2. Upload the EXACT SAME file a second time: Verify duplicate is ignored / skipped
+        stagingStreamingService.streamXmlToStaging(fileV1.getAbsolutePath(), List.of("person"), "v1.0", "v1.0.0", 102L, testDs, 100);
+        DynamicSchemaResolutionService.NormalizationSummary normV2 = schemaResolutionService.normalizeStagingToCanonical(
+                102L, testDs, mappings, List.of("Person"), "Person", 100
+        );
+        // Duplicate should be ignored, write count must be 0
+        long countAfterDup = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Person WHERE person_id = 9001", Long.class);
+        assertEquals(1, countAfterDup, "Duplicate re-upload must NOT insert duplicate row");
+        Map<String, Object> personDup = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 9001");
+        assertEquals(1, ((Number) personDup.get("version_number")).intValue(), "Version must remain 1 for unchanged duplicate");
+        assertEquals(personV1.get("bnpp_id"), personDup.get("bnpp_id"), "Canonical UUID bnpp_id must not change on duplicate");
+
+        // 3. Upload MODIFIED XML file (Person 9001 changed name to 'Alice Smith', plus NEW Person 9002 'Bob')
+        java.io.File fileV2 = java.io.File.createTempFile("person_v2_", ".xml");
+        fileV2.deleteOnExit();
+        java.nio.file.Files.writeString(fileV2.toPath(), """
+            <dataset date="20261108">
+                <persons>
+                    <person id="9001" status="active">
+                        <name>Alice Smith</name>
+                        <age>31</age>
+                    </person>
+                    <person id="9002" status="active">
+                        <name>Bob</name>
+                        <age>25</age>
+                    </person>
+                </persons>
+            </dataset>
+            """);
+
+        stagingStreamingService.streamXmlToStaging(fileV2.getAbsolutePath(), List.of("person"), "v2.0", "v1.0.0", 103L, testDs, 100);
+        DynamicSchemaResolutionService.NormalizationSummary normV3 = schemaResolutionService.normalizeStagingToCanonical(
+                103L, testDs, mappings, List.of("Person"), "Person", 100
+        );
+
+        // Verify Person 9001 is updated with version 2
+        Map<String, Object> personV2Updated = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 9001");
+        assertEquals(personV1.get("bnpp_id"), personV2Updated.get("bnpp_id"), "Canonical UUID bnpp_id must be preserved across updates");
+        assertEquals("Alice Smith", personV2Updated.get("name"), "Name must be updated to Alice Smith");
+        assertEquals(2, ((Number) personV2Updated.get("version_number")).intValue(), "Changed record version_number must bump to 2");
+        assertNotNull(personV2Updated.get("source_bnpp_id"), "source_bnpp_id must reference updated staging bnpp_id");
+
+        // Verify Person 9002 is inserted with version 1
+        Map<String, Object> personNew = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 9002");
+        assertTrue(isValidUuid((String) personNew.get("bnpp_id")), "New record must have valid UUID bnpp_id");
+        assertNotEquals(personV1.get("bnpp_id"), personNew.get("bnpp_id"), "New record must have distinct UUID");
+        assertEquals("Bob", personNew.get("name"));
+        assertEquals(1, ((Number) personNew.get("version_number")).intValue(), "New record must have version 1");
+        assertNotNull(personNew.get("source_bnpp_id"), "New record must have source_bnpp_id");
+    }
+
+    @Test
+    @DisplayName("Verify PFA XML streaming populates staging and destination tables without duplicate flat or stage tables")
+    void testPfaXmlStreamingAndIngestionPopulatesTablesWithoutDuplicateOrEmptyTables() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:pfa_clean_test_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        String samplePath = "src/test/resources/pfa-sample.xml";
+
+        // 1. Provision schema dynamically from pfa-sample.xml
+        List<String> createdTables = provisioningService.provisionDiscoveredTables(
+                config, samplePath, List.of("Person"), Collections.emptyList(), Collections.emptyList()
+        );
+
+        // Verify NO duplicate flat or stage tables were created
+        List<String> createdLower = createdTables.stream().map(String::toLowerCase).toList();
+        assertFalse(createdLower.contains("pfaflat"), "Must NOT create camel-case pfaflat table");
+        assertFalse(createdLower.contains("pfa_flat"), "Must NOT create pfa_flat table for document root");
+        assertFalse(createdLower.contains("pfa_stage"), "Must NOT create pfa_stage table");
+        assertFalse(createdLower.contains("pfa"), "Must NOT create pfa table for document root");
+        assertFalse(createdLower.contains("countriesflat"), "Must NOT create countriesflat");
+        assertFalse(createdLower.contains("countries_stage"), "Must NOT create countries_stage");
+
+        // Verify person_flat IS created
+        assertTrue(createdLower.contains("person_flat"), "Must create person_flat partitioned staging table");
+
+        // 2. Stream PFA XML to staging
+        com.enterprise.xmldbtool.service.StagingXmlStreamingService.StagingSummary stagingSummary = stagingStreamingService.streamXmlToStaging(
+                samplePath, List.of("Person"), "v1.0", "v1.0.0", 201L, testDs, 100
+        );
+
+        assertTrue(stagingSummary.totalRead() >= 1, "Must read at least 1 Person record from pfa-sample.xml");
+        assertTrue(stagingSummary.stagedCount() >= 1, "Must stage at least 1 Person record");
+
+        // Verify staging_xml_records is NOT empty
+        long stagingCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM staging_xml_records", Long.class);
+        assertTrue(stagingCount >= 1, "staging_xml_records must NOT be empty");
+
+        // Verify person_flat is NOT empty and has bnpp_id
+        long flatCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM person_flat", Long.class);
+        assertTrue(flatCount >= 1, "person_flat table must NOT be empty");
+        Map<String, Object> flatRow = jdbcTemplate.queryForMap("SELECT * FROM person_flat WHERE record_identifier = '1447992'");
+        assertTrue(isValidUuid((String) flatRow.get("bnpp_id")), "Flat table must hold UUID bnpp_id");
+
+        // 3. Normalize from staging into destination tables
+        DynamicSchemaResolutionService.NormalizationSummary normSummary = schemaResolutionService.normalizeStagingToCanonical(
+                201L, testDs, Collections.emptyList(), List.of("Person"), "Person", 100
+        );
+
+        assertTrue(normSummary.normalizedCount() >= 1, "Must normalize records into destination tables");
+
+        // Verify destination table Person is NOT empty
+        long personCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Person", Long.class);
+        assertTrue(personCount >= 1, "Destination table Person must NOT be empty");
+
+        Map<String, Object> personRow = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 1447992");
+        assertTrue(isValidUuid((String) personRow.get("bnpp_id")), "Canonical Person must hold UUID bnpp_id");
+        assertEquals(flatRow.get("bnpp_id"), personRow.get("source_bnpp_id"), "Canonical Person must reference flat table's bnpp_id");
+        assertEquals("Person", personRow.get("tag_name"));
+        assertEquals(1, ((Number) personRow.get("version_number")).intValue());
+    }
+
+    @Test
+    @DisplayName("Verify /api/schema/detect-roots endpoint detects candidate root tags immediately upon entering XML file")
+    void testDetectCandidateRootsEndpoint() {
+        assertNotNull(schemaDiscoveryController, "SchemaDiscoveryController must be autowired");
+
+        // 1. Valid XML with candidate root elements
+        Map<String, Object> req = Map.of("sourceXmlPath", "sample-data/pfa-sample.xml");
+        org.springframework.http.ResponseEntity<Map<String, Object>> response = schemaDiscoveryController.detectRoots(req);
+        assertEquals(200, response.getStatusCode().value());
+
+        Map<String, Object> body = response.getBody();
+        assertNotNull(body);
+        assertTrue((Boolean) body.get("success"));
+
+        @SuppressWarnings("unchecked")
+        List<String> candidates = (List<String>) body.get("candidateRootElements");
+        assertNotNull(candidates);
+        assertTrue(candidates.contains("Person"), "Candidate roots must contain Person");
+        assertTrue(candidates.contains("CountryName"), "Candidate roots must contain CountryName");
+        assertNotNull(body.get("fileSizeFormatted"), "File size must be formatted");
+
+        // 2. GET endpoint with query param
+        org.springframework.http.ResponseEntity<Map<String, Object>> getResp = schemaDiscoveryController.detectRootsGet("sample-data/large-sample.xml", null);
+        assertEquals(200, getResp.getStatusCode().value());
+        assertNotNull(getResp.getBody());
+        assertTrue((Boolean) getResp.getBody().get("success"));
+        assertEquals("record", getResp.getBody().get("defaultRootElement"));
+    }
+
+    @Test
+    @DisplayName("Verify multi-section test.xml streams 20 records into each dedicated flat table with no empty or extraneous tables")
+    void testXmlMultiSectionStreamingPopulatesAllFlatTablesWithoutEmptyOrExtraneousTables() throws Exception {
+        String testXmlPath = "sample-data/test.xml";
+
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:test_xml_multi_section_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        // 1. Candidate Root Detection
+        List<String> candidates = discoveryService.detectCandidateRootElements(testXmlPath);
+        assertNotNull(candidates);
+        List<String> expectedRoots = List.of(
+                "countrylist", "country", "descriptionlist1", "descriptionlist2",
+                "descriptionlist3", "descriptionlist4", "person", "entity"
+        );
+        for (String expected : expectedRoots) {
+            assertTrue(candidates.contains(expected), "Candidates must contain entity root: " + expected);
+        }
+        // Verify container wrappers and leaf attributes are NOT in candidates
+        assertFalse(candidates.contains("canopyapp"), "Must NOT contain docRoot canopyapp");
+        assertFalse(candidates.contains("countrylists"), "Must NOT contain wrapper countrylists");
+        assertFalse(candidates.contains("countries"), "Must NOT contain wrapper countries");
+        assertFalse(candidates.contains("descriptionlists1"), "Must NOT contain wrapper descriptionlists1");
+        assertFalse(candidates.contains("descriptionlists2"), "Must NOT contain wrapper descriptionlists2");
+        assertFalse(candidates.contains("descriptionlists3"), "Must NOT contain wrapper descriptionlists3");
+        assertFalse(candidates.contains("descriptionlists4"), "Must NOT contain wrapper descriptionlists4");
+        assertFalse(candidates.contains("persons"), "Must NOT contain wrapper persons");
+        assertFalse(candidates.contains("entities"), "Must NOT contain wrapper entities");
+        assertFalse(candidates.contains("record"), "Must NOT contain wrapper record when child entities exist");
+        assertFalse(candidates.contains("address"), "Must NOT contain child field address");
+        assertFalse(candidates.contains("street"), "Must NOT contain child field street");
+        assertFalse(candidates.contains("name"), "Must NOT contain child field name");
+
+        // 2. Schema Provisioning: Provision tables for the detected entity roots
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        discReq.setSourceXmlPath(testXmlPath);
+        discReq.setRecordRootElements(candidates);
+        discReq.setDbConfig(config);
+        discReq.setAutoCreateTables(true);
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
+        assertTrue(discResp.isSuccess());
+
+        List<String> createdTables = discResp.getCreatedTables();
+        assertNotNull(createdTables);
+        List<String> createdLower = createdTables.stream().map(String::toLowerCase).toList();
+
+        // Verify exactly the 8 entity flat tables are created
+        for (String expected : expectedRoots) {
+            String flatTable = expected + "_flat";
+            assertTrue(createdLower.contains(flatTable), "Must create dedicated flat table: " + flatTable);
+        }
+
+        // Verify NO concatenated tables (e.g. countrylist__descriptionlist1...) were created
+        for (String t : createdLower) {
+            assertFalse(t.contains("__"), "Table name must not contain '__': " + t);
+            assertFalse(t.matches(".*lists\\d*_flat$"), "Must NOT create wrapper flat table ending in lists: " + t);
+        }
+        assertFalse(createdLower.contains("countrylists_flat"), "Must NOT create countrylists_flat");
+        assertFalse(createdLower.contains("persons_flat"), "Must NOT create persons_flat");
+        assertFalse(createdLower.contains("entities_flat"), "Must NOT create entities_flat");
+        assertFalse(createdLower.contains("countries_flat"), "Must NOT create countries_flat");
+        assertFalse(createdLower.contains("address_flat"), "Must NOT create address_flat");
+
+        // 3. StAX XML Streaming: Stream all 8 sections into their respective flat tables
+        long testJobExecutionId = 77701L;
+        com.enterprise.xmldbtool.service.StagingXmlStreamingService.StagingSummary summary = stagingStreamingService.streamXmlToStaging(
+                testXmlPath,
+                candidates,
+                "v1.0",
+                "v1.0.0",
+                testJobExecutionId,
+                testDs,
+                500
+        );
+
+        assertEquals(160, summary.totalRead(), "Must read all 160 records across 8 sections (20 records each)");
+        assertEquals(160, summary.stagedCount(), "Must stage all 160 records");
+
+        // 4. Verify EVERY single flat table is populated with 20 records (NONE are empty!)
+        for (String expected : expectedRoots) {
+            String flatTable = expected + "_flat";
+            long count = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM " + flatTable + " WHERE job_execution_id = ?",
+                    Long.class,
+                    testJobExecutionId
+            );
+            assertEquals(20, count, "Flat table '" + flatTable + "' must have exactly 20 records (not empty!)");
+        }
+
+        // 5. Verify person_flat holds raw XML for addresses and proper metadata columns
+        Map<String, Object> personRow1 = jdbcTemplate.queryForMap(
+                "SELECT * FROM person_flat WHERE job_execution_id = ? AND record_identifier = '1'",
+                testJobExecutionId
+        );
+        assertNotNull(personRow1);
+        assertTrue(isValidUuid((String) personRow1.get("bnpp_id")), "person_flat bnpp_id must be a UUID");
+        assertEquals("person", personRow1.get("tag_name"));
+        assertEquals(1, ((Number) personRow1.get("version_number")).intValue());
+        assertEquals("James Smith", personRow1.get("name"));
+        assertEquals("active", personRow1.get("status"));
+
+        String rawAddressesXml = (String) personRow1.get("addresses");
+        assertNotNull(rawAddressesXml, "addresses column must hold raw XML");
+        assertTrue(rawAddressesXml.contains("<addresses>"), "addresses raw XML must contain opening tag");
+        assertTrue(rawAddressesXml.contains("123 Main St"), "addresses raw XML must contain address street content");
+        assertTrue(rawAddressesXml.contains("</addresses>"), "addresses raw XML must contain closing tag");
+    }
+
+    @Test
+    @DisplayName("Step 2: Verify normalization from partitioned flat tables to canonical relational tables using ingestion.json")
+    void testStep2NormalizeFlatTablesToCanonicalTablesWithIngestionJson() throws Exception {
+        String testXmlPath = "sample-data/test.xml";
+        String mappingJsonPath = "sample-data/ingestion.json";
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:step2_norm_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        // Load ingestion.json mappings
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        List<FieldMapping> mappings = mapper.readValue(
+                new java.io.File(mappingJsonPath),
+                new com.fasterxml.jackson.core.type.TypeReference<List<FieldMapping>>() {}
+        );
+        assertNotNull(mappings);
+        assertFalse(mappings.isEmpty());
+
+        // 1. Provision target canonical tables (Person, Address, Country, CountryList) and flat tables
+        List<String> candidates = discoveryService.detectCandidateRootElements(testXmlPath);
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        discReq.setSourceXmlPath(testXmlPath);
+        discReq.setRecordRootElements(candidates);
+        discReq.setMappings(mappings);
+        discReq.setDbConfig(config);
+        discReq.setAutoCreateTables(true);
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
+        assertTrue(discResp.isSuccess());
+
+        // 2. Phase 1: Stream XML into flat tables
+        long jobExecId = 88801L;
+        com.enterprise.xmldbtool.service.StagingXmlStreamingService.StagingSummary stagingSummary = stagingStreamingService.streamXmlToStaging(
+                testXmlPath,
+                candidates,
+                "v1.0",
+                "v1.0.0",
+                jobExecId,
+                testDs,
+                500
+        );
+        assertEquals(160, stagingSummary.totalRead());
+        assertEquals(160, stagingSummary.stagedCount());
+
+        // Verify status in flat tables is initially un-normalized
+        Long initialPersonCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM person_flat WHERE status != 'NORMALIZED'", Long.class
+        );
+        assertEquals(20, initialPersonCount, "person_flat must have 20 un-normalized records");
+
+        // 3. Phase 2: Execute Normalization from flat tables to canonical relational tables
+        List<String> tableOrder = List.of("CountryList", "Country", "Person", "Address");
+        com.enterprise.xmldbtool.service.DynamicSchemaResolutionService.NormalizationSummary normSummary =
+                schemaResolutionService.normalizeStagingToCanonical(
+                        jobExecId,
+                        testDs,
+                        mappings,
+                        tableOrder,
+                        "Person",
+                        500
+                );
+
+        assertNotNull(normSummary);
+        assertTrue(normSummary.normalizedCount() > 0, "Must normalize records into canonical tables");
+        assertEquals(0, normSummary.failedCount(), "Failed count must be 0");
+
+        // 4. Assert Person canonical table
+        Long personCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Person", Long.class);
+        assertEquals(20, personCount, "Person table must contain 20 records");
+
+        Map<String, Object> person1 = jdbcTemplate.queryForMap(
+                "SELECT * FROM Person WHERE person_id = 1"
+        );
+        assertTrue(isValidUuid((String) person1.get("bnpp_id")), "Person table must hold UUID bnpp_id");
+        assertNotNull(person1.get("source_bnpp_id"), "Person table must reference flat staging bnpp_id");
+        assertTrue(isValidUuid((String) person1.get("source_bnpp_id")), "source_bnpp_id must be a UUID");
+        assertEquals("person", person1.get("tag_name"));
+        assertEquals(1, ((Number) person1.get("version_number")).intValue());
+        assertEquals("ACTIVE", person1.get("status"), "UPPER transform must convert active to ACTIVE");
+        assertEquals("James Smith", person1.get("name"));
+        assertEquals("37", String.valueOf(person1.get("age")));
+        assertNotNull(person1.get("payload_hash"), "payload_hash must be present for delta tracking");
+
+        // 5. Assert Address canonical table (unpacked 1-to-N from raw XML addresses column)
+        Long addressCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Address", Long.class);
+        assertEquals(20, addressCount, "Address table must contain 20 records unpacked from XML");
+
+        Map<String, Object> address1 = jdbcTemplate.queryForMap(
+                "SELECT * FROM Address WHERE id = 1"
+        );
+        assertTrue(isValidUuid((String) address1.get("bnpp_id")), "Address table must hold UUID bnpp_id");
+        assertNotNull(address1.get("source_bnpp_id"), "Address table must reference flat staging bnpp_id");
+        assertTrue(isValidUuid((String) address1.get("source_bnpp_id")), "Address source_bnpp_id must be a UUID");
+        assertEquals("address", address1.get("tag_name"));
+        assertEquals(1, ((Number) address1.get("version_number")).intValue());
+        assertEquals("1", String.valueOf(address1.get("person_id")), "Address person_id FK must link to Person");
+        assertEquals("1", String.valueOf(address1.get("country_id")), "Address country_id FK must link to Country");
+        assertEquals("123 Main St", address1.get("street"));
+        assertEquals("New York", address1.get("city"));
+
+        // 6. Assert CountryList and Country canonical tables
+        Long countryListCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM CountryList", Long.class);
+        assertEquals(20, countryListCount, "CountryList table must contain 20 records");
+
+        Map<String, Object> cl1 = jdbcTemplate.queryForMap("SELECT * FROM CountryList WHERE id = 1");
+        assertTrue(isValidUuid((String) cl1.get("bnpp_id")), "CountryList table must hold UUID bnpp_id");
+        assertNotNull(cl1.get("source_bnpp_id"), "CountryList table must reference flat staging bnpp_id");
+        assertTrue(isValidUuid((String) cl1.get("source_bnpp_id")), "CountryList source_bnpp_id must be a UUID");
+        assertEquals("countrylist", cl1.get("tag_name"));
+        assertEquals(1, ((Number) cl1.get("version_number")).intValue());
+        assertEquals("countrylist1", cl1.get("name"));
+
+        Long countryCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Country", Long.class);
+        assertEquals(20, countryCount, "Country table must contain 20 records");
+
+        Map<String, Object> c1 = jdbcTemplate.queryForMap("SELECT * FROM Country WHERE id = 1");
+        assertTrue(isValidUuid((String) c1.get("bnpp_id")), "Country table must hold UUID bnpp_id");
+        assertNotNull(c1.get("source_bnpp_id"), "Country table must reference flat staging bnpp_id");
+        assertTrue(isValidUuid((String) c1.get("source_bnpp_id")), "Country source_bnpp_id must be a UUID");
+        assertEquals("country", c1.get("tag_name"));
+        assertEquals(1, ((Number) c1.get("version_number")).intValue());
+        assertEquals("1", String.valueOf(c1.get("countrylist_id")), "Country countrylist_id FK must link to CountryList");
+
+        // 7. Assert status updated to 'NORMALIZED' in flat tables and staging_xml_records
+        Long normalizedFlatCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM person_flat WHERE status = 'NORMALIZED'", Long.class
+        );
+        assertEquals(20, normalizedFlatCount, "person_flat records must be updated to NORMALIZED");
+
+        Long remainingStagedFlat = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM person_flat WHERE status = 'STAGED'", Long.class
+        );
+        assertEquals(0, remainingStagedFlat, "No records should remain STAGED in person_flat");
+
+        Long normalizedStagingCount = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM staging_xml_records WHERE tag_name = 'person' AND status = 'NORMALIZED'", Long.class
+        );
+        assertEquals(20, normalizedStagingCount, "staging_xml_records for person must be updated to NORMALIZED");
+    }
+
+    @Test
+    @DisplayName("Step 2: Verify deduplication ignores duplicate file re-upload and increments version on delta changes")
+    void testStep2DeduplicationOnSameFileUploadAndVersionIncrementOnDelta() throws Exception {
+        String testXmlPath = "sample-data/test.xml";
+        String mappingJsonPath = "sample-data/ingestion.json";
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:step2_dedup_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        List<FieldMapping> mappings = mapper.readValue(
+                new java.io.File(mappingJsonPath),
+                new com.fasterxml.jackson.core.type.TypeReference<List<FieldMapping>>() {}
+        );
+
+        // Provision schema
+        List<String> candidates = discoveryService.detectCandidateRootElements(testXmlPath);
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        discReq.setSourceXmlPath(testXmlPath);
+        discReq.setRecordRootElements(candidates);
+        discReq.setMappings(mappings);
+        discReq.setDbConfig(config);
+        discReq.setAutoCreateTables(true);
+        discoveryService.discoverSchema(discReq);
+
+        // Phase 1: Stream to staging
+        long jobExecId = 88802L;
+        stagingStreamingService.streamXmlToStaging(testXmlPath, candidates, "v1.0", "v1.0.0", jobExecId, testDs, 500);
+
+        // Phase 2: First normalization
+        List<String> tableOrder = List.of("CountryList", "Country", "Person", "Address");
+        com.enterprise.xmldbtool.service.DynamicSchemaResolutionService.NormalizationSummary firstNorm =
+                schemaResolutionService.normalizeStagingToCanonical(jobExecId, testDs, mappings, tableOrder, "Person", 500);
+
+        assertTrue(firstNorm.normalizedCount() > 0, "First normalization must write records");
+        assertEquals(20, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Person", Long.class));
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT version_number FROM Person WHERE person_id = 1", Integer.class));
+
+        // --- SUB-TEST A: Identical Duplicate Re-upload (Duplicate Ignored) ---
+        // Simulate re-staging the same records with STAGED status
+        jdbcTemplate.update("UPDATE person_flat SET status = 'STAGED'");
+
+        com.enterprise.xmldbtool.service.DynamicSchemaResolutionService.NormalizationSummary duplicateNorm =
+                schemaResolutionService.normalizeStagingToCanonical(jobExecId, testDs, mappings, tableOrder, "Person", 500);
+
+        // Written count for Person table must be 0 because identical payload hashes are ignored!
+        Long personWrites = duplicateNorm.tableWriteCounts().getOrDefault("Person", 0L);
+        assertEquals(0L, personWrites, "Identical duplicate re-upload must be ignored (0 writes)");
+        assertEquals(20, jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Person", Long.class), "Person count must stay at 20");
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT version_number FROM Person WHERE person_id = 1", Integer.class), "Version must stay at 1");
+
+        // --- SUB-TEST B: Delta Change (Increment Version Number) ---
+        // Modify person_flat record #1: Change age to 42 in raw_payload
+        Map<String, Object> person1Raw = jdbcTemplate.queryForMap("SELECT raw_payload FROM person_flat WHERE record_identifier = '1'");
+        String json = (String) person1Raw.get("raw_payload");
+        Map<String, Object> map = mapper.readValue(json, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        map.put("age", "42");
+        String updatedJson = mapper.writeValueAsString(map);
+
+        jdbcTemplate.update(
+                "UPDATE person_flat SET raw_payload = ?, payload_hash = 'changed_hash_123', status = 'STAGED' WHERE record_identifier = '1'",
+                updatedJson
+        );
+
+        // Run normalization again
+        com.enterprise.xmldbtool.service.DynamicSchemaResolutionService.NormalizationSummary deltaNorm =
+                schemaResolutionService.normalizeStagingToCanonical(jobExecId, testDs, mappings, tableOrder, "Person", 500);
+
+        // Assert record #1 was updated with version_number = 2 and age = 42
+        Map<String, Object> updatedPerson1 = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 1");
+        assertEquals(2, ((Number) updatedPerson1.get("version_number")).intValue(), "Delta record must have version_number incremented to 2");
+        assertEquals("42", String.valueOf(updatedPerson1.get("age")), "Age must be updated to 42");
+
+        // Record #2 should remain untouched at version_number = 1
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT version_number FROM Person WHERE person_id = 2", Integer.class), "Unchanged record #2 must remain at version 1");
+    }
+
+    @Test
+    @DisplayName("Step 2: Verify normalization without ingestion.json auto-derives canonical tables and mappings")
+    void testStep2WithoutIngestionJsonAutoDerivesCanonicalTables() throws Exception {
+        String testXmlPath = "sample-data/test.xml";
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:step2_no_json_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        List<String> candidates = discoveryService.detectCandidateRootElements(testXmlPath);
+
+        // Discover and provision without user mapping JSON (mappings = null)
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        discReq.setSourceXmlPath(testXmlPath);
+        discReq.setRecordRootElements(candidates);
+        discReq.setDbConfig(config);
+        discReq.setAutoCreateTables(true);
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
+        assertTrue(discResp.isSuccess());
+
+        // Phase 1: Stream to staging
+        long jobExecId = 88803L;
+        stagingStreamingService.streamXmlToStaging(testXmlPath, candidates, "v1.0", "v1.0.0", jobExecId, testDs, 500);
+
+        // Phase 2: Normalize with mappings = null (auto-derivation fallback)
+        com.enterprise.xmldbtool.service.DynamicSchemaResolutionService.NormalizationSummary autoNorm =
+                schemaResolutionService.normalizeStagingToCanonical(
+                        jobExecId,
+                        testDs,
+                        null,
+                        null,
+                        "person",
+                        500
+                );
+
+        assertNotNull(autoNorm);
+        assertTrue(autoNorm.normalizedCount() > 0, "Must normalize records using auto-derived schema");
+
+        // Verify person canonical table was populated
+        Long personCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM person", Long.class);
+        assertEquals(20, personCount, "Auto-derived person table must contain 20 records");
+
+        Map<String, Object> p1 = jdbcTemplate.queryForMap("SELECT * FROM person LIMIT 1");
+        assertNotNull(p1.get("bnpp_id"));
+        assertTrue(isValidUuid((String) p1.get("bnpp_id")), "Auto-derived person row must have valid UUID bnpp_id");
+        assertEquals(1, ((Number) p1.get("version_number")).intValue());
+        assertNotNull(p1.get("tag_name"));
+    }
+
+    private boolean isValidUuid(String val) {
+        if (val == null) return false;
+        try {
+            UUID.fromString(val);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }
 

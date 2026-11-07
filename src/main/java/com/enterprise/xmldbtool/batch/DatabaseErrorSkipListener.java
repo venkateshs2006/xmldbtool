@@ -176,6 +176,10 @@ public class DatabaseErrorSkipListener implements SkipListener<Map<String, Objec
         return full.length() > 4000 ? full.substring(0, 4000) : full;
     }
 
+    public void recordError(String phase, String recordDataJson, Throwable t) {
+        persistError(phase, recordDataJson, t);
+    }
+
     public List<MigrationErrorRecord> getRecentErrors() {
         return Collections.unmodifiableList(new ArrayList<>(recentErrors));
     }

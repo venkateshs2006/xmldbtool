@@ -27,6 +27,7 @@ public class DynamicDataSourceService {
     private static final Logger log = LoggerFactory.getLogger(DynamicDataSourceService.class);
 
     private final Map<String, HikariDataSource> poolCache = new ConcurrentHashMap<>();
+    private final Map<String, Long> failureBackoff = new ConcurrentHashMap<>();
 
     /**
      * Tests and validates connection parameters using a temporary connection pool.
@@ -250,17 +251,41 @@ public class DynamicDataSourceService {
                 ? config.getSchema().trim().toLowerCase() : "default";
         String cacheKey = config.getUrl() + ":" + config.getUsername() + ":" + schema;
 
-        return poolCache.computeIfAbsent(cacheKey, k -> {
-            HikariConfig hikariConfig = buildHikariConfig(config);
-            hikariConfig.setMaximumPoolSize(10);
-            hikariConfig.setMinimumIdle(2);
-            hikariConfig.setConnectionTimeout(10000);
-            hikariConfig.setIdleTimeout(30000);
-            hikariConfig.setPoolName("TargetDB-Pool-" + System.currentTimeMillis());
+        HikariDataSource cached = poolCache.get(cacheKey);
+        if (cached != null && !cached.isClosed()) {
+            return cached;
+        }
 
-            log.info("Initialized dynamic Hikari connection pool for target URL: {} (Schema: {})", config.getUrl(), schema);
-            return new HikariDataSource(hikariConfig);
-        });
+        Long lastFail = failureBackoff.get(cacheKey);
+        if (lastFail != null && (System.currentTimeMillis() - lastFail) < 15_000) {
+            throw new IllegalStateException("Connection pool to " + config.getUrl() + " recently failed. Suppressing frequent re-connection attempts.");
+        }
+
+        try {
+            HikariDataSource ds = poolCache.computeIfAbsent(cacheKey, k -> {
+                HikariConfig hikariConfig = buildHikariConfig(config);
+                hikariConfig.setMaximumPoolSize(10);
+                hikariConfig.setMinimumIdle(2);
+                hikariConfig.setConnectionTimeout(10000);
+                hikariConfig.setIdleTimeout(30000);
+                hikariConfig.setPoolName("TargetDB-Pool-" + System.currentTimeMillis());
+
+                log.info("Initialized dynamic Hikari connection pool for target URL: {} (Schema: {})", config.getUrl(), schema);
+                return new HikariDataSource(hikariConfig);
+            });
+            failureBackoff.remove(cacheKey);
+            return ds;
+        } catch (Exception ex) {
+            failureBackoff.put(cacheKey, System.currentTimeMillis());
+            throw ex;
+        }
+    }
+
+    /**
+     * Exposes active target connection pools for telemetry and historical metrics recovery.
+     */
+    public Map<String, HikariDataSource> getActivePools() {
+        return java.util.Collections.unmodifiableMap(poolCache);
     }
 
     /**

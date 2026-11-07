@@ -1,8 +1,6 @@
 package com.enterprise.xmldbtool.model;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
 
 public class SchemaDiscoveryRequest {
     private DbConnectionConfig dbConfig;
@@ -38,16 +36,28 @@ public class SchemaDiscoveryRequest {
     public void setRecordRootElement(String recordRootElement) { this.recordRootElement = recordRootElement; }
 
     public List<String> getRecordRootElements() {
-        if (recordRootElements != null && !recordRootElements.isEmpty()) {
-            return recordRootElements;
+        Set<String> set = new LinkedHashSet<>();
+        if (recordRootElements != null) {
+            for (String r : recordRootElements) {
+                if (r != null && !r.trim().isEmpty()) {
+                    for (String part : r.split("[,;\\s]+")) {
+                        String s = com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.resolveEntityTag(part);
+                        if (s != null && !s.isEmpty() && !com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.isWrapperContainerTag(s, null)) {
+                            set.add(s);
+                        }
+                    }
+                }
+            }
         }
         if (recordRootElement != null && !recordRootElement.trim().isEmpty()) {
-            return Arrays.stream(recordRootElement.split(","))
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .toList();
+            for (String part : recordRootElement.split("[,;\\s]+")) {
+                String s = com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.resolveEntityTag(part);
+                if (s != null && !s.isEmpty() && !com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.isWrapperContainerTag(s, null)) {
+                    set.add(s);
+                }
+            }
         }
-        return List.of("record");
+        return set.isEmpty() ? List.of("record") : new ArrayList<>(set);
     }
 
     public void setRecordRootElements(List<String> recordRootElements) {

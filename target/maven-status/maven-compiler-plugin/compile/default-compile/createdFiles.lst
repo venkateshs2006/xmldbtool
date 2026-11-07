@@ -1,4 +1,5 @@
 com/enterprise/xmldbtool/service/SchemaRegistryService$1$1.class
+com/enterprise/xmldbtool/service/DynamicSchemaResolutionService$NormalizationBatchResult.class
 com/enterprise/xmldbtool/service/StagingXmlStreamingService$StagingSummary.class
 com/enterprise/xmldbtool/service/DynamicSchemaResolutionService$1.class
 com/enterprise/xmldbtool/controller/AuthController.class
@@ -21,6 +22,7 @@ com/enterprise/xmldbtool/service/DynamicDataSourceService.class
 com/enterprise/xmldbtool/model/DbTestResponse.class
 com/enterprise/xmldbtool/service/SchemaProvisioningService.class
 com/enterprise/xmldbtool/controller/SystemTelemetryController.class
+com/enterprise/xmldbtool/service/DynamicSchemaResolutionService$NormalizationProgressCallback.class
 com/enterprise/xmldbtool/model/JobExecutionSummary.class
 com/enterprise/xmldbtool/model/ColumnMetadata.class
 com/enterprise/xmldbtool/batch/DynamicXmlUnmarshaller$DynamicXmlParseException.class
@@ -32,8 +34,10 @@ com/enterprise/xmldbtool/model/JobTelemetryResponse.class
 com/enterprise/xmldbtool/controller/DataPreviewController.class
 com/enterprise/xmldbtool/model/DbConnectionConfig.class
 com/enterprise/xmldbtool/batch/DynamicXmlItemProcessor.class
+com/enterprise/xmldbtool/service/DynamicSchemaResolutionService$ExistingRecordInfo.class
 com/enterprise/xmldbtool/service/XmlSchemaDiscoveryService$1.class
 com/enterprise/xmldbtool/model/SavedJobConfig.class
+com/enterprise/xmldbtool/service/DynamicBatchJobService$4.class
 com/enterprise/xmldbtool/controller/SchemaDiscoveryController.class
 com/enterprise/xmldbtool/model/SchemaDiscoveryResponse.class
 com/enterprise/xmldbtool/service/SchemaRegistryService$1.class
@@ -43,11 +47,13 @@ com/enterprise/xmldbtool/model/FieldMapping.class
 com/enterprise/xmldbtool/service/StagingXmlStreamingService.class
 com/enterprise/xmldbtool/config/BatchConfig.class
 com/enterprise/xmldbtool/model/MigrationErrorRecord.class
+com/enterprise/xmldbtool/service/DynamicBatchJobService$3.class
 com/enterprise/xmldbtool/service/JobConfigService.class
 com/enterprise/xmldbtool/model/TablePreviewData.class
 com/enterprise/xmldbtool/service/StagingXmlStreamingService$2.class
 com/enterprise/xmldbtool/service/UserService.class
 com/enterprise/xmldbtool/service/UserService$1.class
+com/enterprise/xmldbtool/model/JobCheckpoint.class
 com/enterprise/xmldbtool/batch/DynamicXmlItemProcessor$2.class
 com/enterprise/xmldbtool/service/JobConfigService$1.class
 com/enterprise/xmldbtool/model/DataPreviewRequest.class
@@ -65,6 +71,7 @@ com/enterprise/xmldbtool/batch/DynamicXmlItemProcessor$1.class
 com/enterprise/xmldbtool/service/DynamicBatchJobService$2.class
 com/enterprise/xmldbtool/model/TableMetadata.class
 com/enterprise/xmldbtool/service/DynamicSchemaResolutionService.class
+com/enterprise/xmldbtool/service/StagingXmlStreamingService$StreamingProgressCallback.class
 com/enterprise/xmldbtool/batch/DynamicJdbcBatchWriter.class
 com/enterprise/xmldbtool/batch/DynamicXmlUnmarshaller$ElementFrame.class
 com/enterprise/xmldbtool/model/User.class

@@ -1,7 +1,6 @@
 package com.enterprise.xmldbtool.model;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 public class JobLaunchRequest {
     private DbConnectionConfig dbConfig;
@@ -13,10 +12,26 @@ public class JobLaunchRequest {
     private String targetTable;
     private int chunkSize = 1000;
     private List<FieldMapping> mappings = new ArrayList<>();
+    private String ingestMappingJson;
     private List<String> tableOrder = new ArrayList<>();
     private boolean stagedPipeline = false;
+    private Long resumeFromJobExecutionId;
+    private boolean resumeFromCheckpoint = false;
+    private boolean retryFailedRecords = true;
 
     public JobLaunchRequest() {}
+
+    public Long getResumeFromJobExecutionId() { return resumeFromJobExecutionId; }
+    public void setResumeFromJobExecutionId(Long resumeFromJobExecutionId) { this.resumeFromJobExecutionId = resumeFromJobExecutionId; }
+
+    public boolean isResumeFromCheckpoint() { return resumeFromCheckpoint; }
+    public void setResumeFromCheckpoint(boolean resumeFromCheckpoint) { this.resumeFromCheckpoint = resumeFromCheckpoint; }
+
+    public boolean isRetryFailedRecords() { return retryFailedRecords; }
+    public void setRetryFailedRecords(boolean retryFailedRecords) { this.retryFailedRecords = retryFailedRecords; }
+
+    public String getIngestMappingJson() { return ingestMappingJson; }
+    public void setIngestMappingJson(String ingestMappingJson) { this.ingestMappingJson = ingestMappingJson; }
 
     public DbConnectionConfig getDbConfig() { return dbConfig; }
     public void setDbConfig(DbConnectionConfig dbConfig) { this.dbConfig = dbConfig; }
@@ -28,16 +43,28 @@ public class JobLaunchRequest {
     public void setRecordRootElement(String recordRootElement) { this.recordRootElement = recordRootElement; }
 
     public List<String> getRecordRootElements() {
-        if (recordRootElements != null && !recordRootElements.isEmpty()) {
-            return recordRootElements;
+        Set<String> set = new LinkedHashSet<>();
+        if (recordRootElements != null) {
+            for (String r : recordRootElements) {
+                if (r != null && !r.trim().isEmpty()) {
+                    for (String part : r.split("[,;\\s]+")) {
+                        String s = com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.resolveEntityTag(part);
+                        if (s != null && !s.isEmpty() && !com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.isWrapperContainerTag(s, null)) {
+                            set.add(s);
+                        }
+                    }
+                }
+            }
         }
         if (recordRootElement != null && !recordRootElement.trim().isEmpty()) {
-            return java.util.Arrays.stream(recordRootElement.split(","))
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .toList();
+            for (String part : recordRootElement.split("[,;\\s]+")) {
+                String s = com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.resolveEntityTag(part);
+                if (s != null && !s.isEmpty() && !com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.isWrapperContainerTag(s, null)) {
+                    set.add(s);
+                }
+            }
         }
-        return List.of("record");
+        return set.isEmpty() ? List.of("record") : new ArrayList<>(set);
     }
 
     public void setRecordRootElements(List<String> recordRootElements) {

@@ -23,8 +23,16 @@ public class FieldMapping {
         this.xmlField = xmlField;
         this.targetTable = targetTable;
         this.targetColumn = targetColumn;
-        this.transform = transform != null ? transform : "NONE";
-        this.constraintType = constraintType != null ? constraintType : "NONE";
+        if (("PK".equalsIgnoreCase(transform) || "FK".equalsIgnoreCase(transform))
+                && (constraintType == null || "NONE".equalsIgnoreCase(constraintType)
+                    || "UPPER".equalsIgnoreCase(constraintType) || "LOWER".equalsIgnoreCase(constraintType)
+                    || "TRIM".equalsIgnoreCase(constraintType))) {
+            this.constraintType = transform.toUpperCase();
+            this.transform = constraintType != null ? constraintType : "NONE";
+        } else {
+            this.transform = transform != null ? transform : "NONE";
+            this.constraintType = constraintType != null ? constraintType : "NONE";
+        }
     }
 
     public FieldMapping(String xmlField, String targetColumn, String transform) {

@@ -239,7 +239,8 @@ public class XmlSchemaDiscoveryService {
 
     public static boolean isStagingTableName(String tableName) {
         if (tableName == null) return false;
-        return tableName.toLowerCase().endsWith("_stage");
+        String norm = tableName.toLowerCase();
+        return norm.endsWith("_stage");
     }
 
     /**
@@ -492,53 +493,72 @@ public class XmlSchemaDiscoveryService {
             return Collections.emptyList();
         }
 
-        // 1. Collect all XML fields explicitly mentioned in the user mapping file/JSON
-        Set<String> mappedXmlFields = new HashSet<>();
         boolean hasUserMappings = mappings != null && !mappings.isEmpty();
-        if (hasUserMappings) {
-            for (FieldMapping m : mappings) {
-                if (m.getXmlField() != null && !m.getXmlField().trim().isEmpty()) {
-                    String xf = m.getXmlField().trim().toLowerCase().replaceAll("^/+", "");
-                    mappedXmlFields.add(xf);
-                }
-            }
-        }
 
-        // 2. Identify effective root tags to anchor hierarchy
-        Set<String> rootNorms = new LinkedHashSet<>();
-        if (recordRootElements != null && !recordRootElements.isEmpty()) {
-            for (String r : recordRootElements) {
-                if (r != null && !r.trim().isEmpty()) {
-                    rootNorms.add(r.trim().toLowerCase());
-                }
-            }
-        }
-        if (rootNorms.isEmpty() && sourceXmlPath != null) {
-            String detected = detectRecordRootElement(sourceXmlPath);
-            if (detected != null && !detected.trim().isEmpty() && !detected.equalsIgnoreCase("record")) {
-                rootNorms.add(detected.trim().toLowerCase());
-            }
-        }
-        if (rootNorms.isEmpty() && sourceXmlPath != null) {
-            List<String> candidates = detectCandidateRootElements(sourceXmlPath);
-            if (candidates != null) {
-                for (String c : candidates) {
-                    if (c != null && !c.equalsIgnoreCase("record")) {
-                        rootNorms.add(c.toLowerCase());
+        // 1. If user provided a mapping file/JSON:
+        // Refer to the JSON file strictly: show ONLY tags mentioned in the mapping file,
+        // ignore all other tags in the UI as well as when provisioning/storing in DB.
+        if (hasUserMappings) {
+            List<DiscoveredElement> filtered = new ArrayList<>();
+            Set<String> seenFields = new LinkedHashSet<>();
+            for (DiscoveredElement el : rawElements) {
+                String matchedField = getMatchingMappingField(el, mappings);
+                if (matchedField != null) {
+                    String normField = matchedField.toLowerCase();
+                    if (!seenFields.contains(normField)) {
+                        seenFields.add(normField);
+                        DiscoveredElement cleaned = new DiscoveredElement(
+                                matchedField,
+                                el.getEnclosingTag(),
+                                el.isAttribute() || matchedField.contains("/@") || matchedField.startsWith("@"),
+                                el.getSampleValue(),
+                                el.getDetectedType()
+                        );
+                        filtered.add(cleaned);
                     }
                 }
             }
-        }
-        if (rootNorms.isEmpty()) {
-            rootNorms.add("record");
+
+            // Also ensure every mapped field in mappings is represented in discovered elements
+            for (FieldMapping m : mappings) {
+                if (m.getXmlField() != null && !m.getXmlField().trim().isEmpty()) {
+                    String xf = m.getXmlField().trim().replaceAll("^/+", "");
+                    String xfLower = xf.toLowerCase();
+                    if (!seenFields.contains(xfLower)) {
+                        seenFields.add(xfLower);
+                        filtered.add(new DiscoveredElement(
+                                xf,
+                                m.getTargetTable(),
+                                xf.contains("/@") || xf.startsWith("@"),
+                                null,
+                                "VARCHAR(255)"
+                        ));
+                    }
+                }
+            }
+
+            return filtered;
         }
 
-        // Set of qualified paths present in raw elements
-        Set<String> qualifiedPaths = new HashSet<>();
-        for (DiscoveredElement el : rawElements) {
-            if (el.getName().contains("/")) {
-                qualifiedPaths.add(el.getName().toLowerCase());
+        // 2. Dynamic discovery mode (no mapping file provided yet):
+        // Show tags belonging to any of the specified or detected root elements.
+        // Ignore unrelated wrapper tags (e.g. canopyapp, countrylists, descriptionlists).
+        Set<String> activeRoots = new LinkedHashSet<>();
+        if (recordRootElements != null && !recordRootElements.isEmpty()) {
+            for (String r : recordRootElements) {
+                if (r != null && !r.trim().isEmpty() && !r.equalsIgnoreCase("record") && !r.equalsIgnoreCase("records")) {
+                    activeRoots.add(r.trim().toLowerCase());
+                }
             }
+        }
+        if (activeRoots.isEmpty() && sourceXmlPath != null) {
+            String detected = detectRecordRootElement(sourceXmlPath);
+            if (detected != null && !detected.trim().isEmpty() && !detected.equalsIgnoreCase("record") && !detected.equalsIgnoreCase("records")) {
+                activeRoots.add(detected.trim().toLowerCase());
+            }
+        }
+        if (activeRoots.isEmpty()) {
+            activeRoots.add("person");
         }
 
         List<DiscoveredElement> filtered = new ArrayList<>();
@@ -546,56 +566,55 @@ public class XmlSchemaDiscoveryService {
 
         for (DiscoveredElement el : rawElements) {
             String rawName = el.getName();
-            String nameLower = rawName.toLowerCase();
-            String enclosing = el.getEnclosingTag() != null ? el.getEnclosingTag().toLowerCase() : "";
+            String nameLower = rawName.toLowerCase().replaceAll("^/+", "");
 
-            boolean keep;
-            if (hasUserMappings) {
-                // If user provided a mapping file: keep ONLY tags mentioned in the mapping file.
-                // Other tags are ignored in the UI and DB as requested.
-                keep = isElementMatchingMapping(el, mappings);
-            } else {
-                // Dynamic discovery mode (no mapping file yet):
-                // Show ONLY the root tag, related attributes, child tag, child of child tag, grandchild tags.
-                // Ignore unrelated tags outside the root tag hierarchy.
-                boolean belongsToRootHierarchy = false;
-                for (String root : rootNorms) {
-                    if (nameLower.equals(root)
-                            || nameLower.startsWith(root + "/@")
-                            || nameLower.startsWith(root + "/")
-                            || enclosing.equals(root)) {
-                        belongsToRootHierarchy = true;
-                        break;
-                    }
-                }
-                keep = belongsToRootHierarchy;
-            }
+            String matchedRoot = null;
+            String normPath = rawName;
 
-            // Suppress bare duplicate tags when a qualified hierarchical path exists
-            // (e.g. suppress bare "name" when "person/name" exists, or bare "@id" when "person/@id" exists)
-            if (keep) {
-                String leaf = rawName.replace("@", "").toLowerCase();
-                if (!rawName.contains("/") || rawName.startsWith("@")) {
-                    boolean hasQualified = false;
-                    for (String qp : qualifiedPaths) {
-                        if (qp.endsWith("/" + leaf) || qp.endsWith("/@" + leaf)) {
-                            hasQualified = true;
-                            break;
-                        }
-                    }
-                    if (hasQualified && !mappedXmlFields.contains(nameLower)) {
-                        keep = false;
-                    }
+            for (String root : activeRoots) {
+                if (nameLower.contains("/" + root + "/")) {
+                    normPath = rawName.substring(nameLower.indexOf("/" + root + "/") + 1);
+                    matchedRoot = root;
+                    break;
+                } else if (nameLower.startsWith(root + "/")) {
+                    normPath = rawName;
+                    matchedRoot = root;
+                    break;
+                } else if (nameLower.endsWith("/" + root) || nameLower.equals(root)) {
+                    normPath = root;
+                    matchedRoot = root;
+                    break;
                 }
             }
 
-            if (keep && !seenNames.contains(nameLower)) {
-                seenNames.add(nameLower);
-                filtered.add(el);
+            if (matchedRoot != null) {
+                String normLower = normPath.toLowerCase();
+                boolean belongsToRoot = normLower.equals(matchedRoot)
+                        || normLower.startsWith(matchedRoot + "/@")
+                        || normLower.startsWith(matchedRoot + "/");
+
+                if (belongsToRoot) {
+                    boolean isContainer = !el.isAttribute() && !normPath.contains("/@") && (el.getSampleValue() == null || el.getSampleValue().trim().isEmpty());
+                    boolean isIntermediateWrapper = isContainer && (normLower.endsWith("s") || normLower.endsWith("list") || normLower.endsWith("lists"));
+                    if (isIntermediateWrapper && !normLower.equals(matchedRoot)) {
+                        continue;
+                    }
+
+                    if (!seenNames.contains(normLower)) {
+                        seenNames.add(normLower);
+                        DiscoveredElement cleaned = new DiscoveredElement(
+                                normPath,
+                                el.getEnclosingTag(),
+                                el.isAttribute() || normPath.contains("/@"),
+                                el.getSampleValue(),
+                                el.getDetectedType()
+                        );
+                        filtered.add(cleaned);
+                    }
+                }
             }
         }
 
-        // Safety fallback: if everything was filtered out, return raw elements
         if (filtered.isEmpty()) {
             return rawElements;
         }
@@ -604,49 +623,55 @@ public class XmlSchemaDiscoveryService {
     }
 
     /**
-     * Checks if a discovered XML element corresponds to any field specified in the mapping configuration.
+     * Finds matching field in mapping configurations, if any.
      */
-    public static boolean isElementMatchingMapping(DiscoveredElement el, List<FieldMapping> mappings) {
-        if (el == null || mappings == null || mappings.isEmpty()) return false;
+    public static String getMatchingMappingField(DiscoveredElement el, List<FieldMapping> mappings) {
+        if (el == null || mappings == null || mappings.isEmpty()) return null;
         String rawName = el.getName().trim().toLowerCase().replaceAll("^/+", "");
         String rawNoAt = rawName.replace("@", "");
         String enclosing = el.getEnclosingTag() != null ? el.getEnclosingTag().trim().toLowerCase() : "";
 
         for (FieldMapping m : mappings) {
             if (m.getXmlField() == null || m.getXmlField().trim().isEmpty()) continue;
-            String xf = m.getXmlField().trim().toLowerCase().replaceAll("^/+", "");
-            String xfNoAt = xf.replace("@", "");
+            String xf = m.getXmlField().trim().replaceAll("^/+", "");
+            String xfLower = xf.toLowerCase();
+            String xfNoAt = xfLower.replace("@", "");
 
-            // 1. Exact match (e.g. "person/@id" == "person/@id" or "firstname" == "firstname")
-            if (rawName.equals(xf) || rawNoAt.equals(xfNoAt)) {
-                return true;
+            // 1. Exact match
+            if (rawName.equals(xfLower) || rawNoAt.equals(xfNoAt)) {
+                return xf;
             }
 
             // 2. Path matching
-            if (xf.contains("/")) {
-                if (rawName.endsWith("/" + xf) || xf.endsWith("/" + rawName)) {
-                    return true;
+            if (xfLower.contains("/")) {
+                if (rawName.endsWith("/" + xfLower) || xfLower.endsWith("/" + rawName)) {
+                    return xf;
                 }
                 if (rawNoAt.endsWith("/" + xfNoAt) || xfNoAt.endsWith("/" + rawNoAt)) {
-                    return true;
+                    return xf;
                 }
             } else {
-                // If mapping specifies a simple tag/attribute without path (e.g. "@id" or "street" or "name")
                 String leaf = rawName.contains("/") ? rawName.substring(rawName.lastIndexOf("/") + 1) : rawName;
                 if (leaf.replace("@", "").equals(xfNoAt)) {
-                    // Scope check: must belong to the mapped target table or enclosing entity
                     if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
                         String tbl = m.getTargetTable().trim().toLowerCase();
                         if (rawName.startsWith(tbl + "/") || enclosing.equals(tbl) || rawName.contains("/" + tbl + "/") || rawName.endsWith("/" + tbl) || rawName.equals(tbl)) {
-                            return true;
+                            return xf;
                         }
                     } else {
-                        return true;
+                        return xf;
                     }
                 }
             }
         }
-        return false;
+        return null;
+    }
+
+    /**
+     * Checks if a discovered XML element corresponds to any field specified in the mapping configuration.
+     */
+    public static boolean isElementMatchingMapping(DiscoveredElement el, List<FieldMapping> mappings) {
+        return getMatchingMappingField(el, mappings) != null;
     }
 
     public List<FieldMapping> parseMappingsFromJsonStringOrFile(String jsonOrPath) {
@@ -989,11 +1014,49 @@ public class XmlSchemaDiscoveryService {
     }
 
     /**
+     * Identifies whether a tag name represents a wrapper/container tag rather than an entity record fragment.
+     * Container tags group repeating child records together and should not be treated as isolated entity records.
+     */
+    public static boolean isWrapperContainerTag(String tag, String docRoot) {
+        if (tag == null || tag.trim().isEmpty()) return false;
+        String norm = tag.trim().toLowerCase();
+        if (docRoot != null && norm.equalsIgnoreCase(docRoot.trim())) return true;
+        if (Set.of("records", "items", "data", "dataset", "entries", "feed", "catalog", "root",
+                   "canopyapp", "pfa", "countries", "persons", "entities", "countrylists", "descriptionlists").contains(norm)) {
+            return true;
+        }
+        if (norm.matches(".*lists\\d*") || norm.endsWith("lists")) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Resolves a container / plural tag into its singular entity record tag name.
+     * e.g., countrylists -> countrylist, descriptionlists1 -> descriptionlist1, countries -> country, persons -> person
+     */
+    public static String resolveEntityTag(String tag) {
+        if (tag == null) return null;
+        String norm = tag.trim().toLowerCase();
+        if (norm.equals("countries")) return "country";
+        if (norm.equals("persons")) return "person";
+        if (norm.equals("entities")) return "entity";
+        if (norm.equals("records")) return "record";
+        if (norm.matches(".*lists\\d+$")) {
+            return norm.replaceFirst("lists(\\d+)$", "list$1");
+        }
+        if (norm.endsWith("lists")) {
+            return norm.substring(0, norm.length() - 1);
+        }
+        return tag.trim();
+    }
+
+    /**
      * Detects all candidate record fragment root element tags from the XML file.
      * Identifies repeating entities such as Person, CountryName, Occupation, Relationship, etc.
      */
     public List<String> detectCandidateRootElements(String sourcePath) {
-        java.util.Set<String> candidates = new java.util.LinkedHashSet<>();
+        Set<String> candidates = new LinkedHashSet<>();
         if (sourcePath == null || sourcePath.trim().isEmpty()) {
             return new ArrayList<>(candidates);
         }
@@ -1005,51 +1068,62 @@ public class XmlSchemaDiscoveryService {
         try (BufferedReader reader = openReaderForSource(sourcePath)) {
             XMLStreamReader streamReader = factory.createXMLStreamReader(reader);
             String docRoot = null;
-            int depth = 0;
-            java.util.Deque<String> tagStack = new java.util.ArrayDeque<>();
-            Map<String, Integer> tagCounts = new LinkedHashMap<>();
-
+            Deque<String> tagStack = new ArrayDeque<>();
+            int entityDepth = 0;
             int events = 0;
-            while (streamReader.hasNext() && events < 50000) {
+
+            while (streamReader.hasNext() && events < 100000) {
                 int event = streamReader.next();
                 events++;
+
                 if (event == XMLStreamConstants.START_ELEMENT) {
                     String localName = streamReader.getLocalName();
-                    if (depth == 0) {
+                    if (tagStack.isEmpty()) {
                         docRoot = localName;
-                    } else {
-                        String parent = tagStack.peek();
-                        boolean parentIsContainer = parent != null && (
-                                parent.toLowerCase().endsWith("list") || parent.toLowerCase().endsWith("lists")
-                                || parent.equalsIgnoreCase("records") || parent.equalsIgnoreCase("items")
-                                || parent.equalsIgnoreCase("data") || parent.equalsIgnoreCase("entries")
-                                || parent.equalsIgnoreCase("dataset")
-                                || (parent.toLowerCase().endsWith("s") && !parent.equalsIgnoreCase(docRoot))
-                        );
-
-                        boolean isSelfContainer = localName.equalsIgnoreCase(parent) || localName.toLowerCase().endsWith("lists");
-                        if (parentIsContainer && !isSelfContainer && (!localName.toLowerCase().endsWith("list") || parent.toLowerCase().endsWith("lists"))) {
-                            candidates.add(localName);
-                        } else if (!isSelfContainer && (!localName.toLowerCase().endsWith("list") || (parent != null && parent.toLowerCase().endsWith("lists")))
-                                && depth >= 1 && depth <= 5) {
-                            tagCounts.put(localName, tagCounts.getOrDefault(localName, 0) + 1);
+                    } else if (entityDepth == 0) {
+                        int attrCount = streamReader.getAttributeCount();
+                        String norm = localName.toLowerCase();
+                        // Container tags are either known wrapper sets, end in 'lists', or end in 'list' with 0 attributes
+                        boolean isContainer = isWrapperContainerTag(localName, docRoot)
+                                || (localName.equalsIgnoreCase("record") && attrCount == 0)
+                                || ((norm.endsWith("list") || norm.matches(".*list\\d+$")) && attrCount == 0);
+                        if (!isContainer) {
+                            String parent = tagStack.peek();
+                            String parentNorm = parent != null ? parent.toLowerCase() : "";
+                            boolean parentIsContainer = (parent != null && (isWrapperContainerTag(parent, docRoot)
+                                    || parent.equalsIgnoreCase("record") || parent.equalsIgnoreCase(docRoot)
+                                    || parentNorm.endsWith("list") || parentNorm.endsWith("lists")
+                                    || parentNorm.matches(".*list\\d*$")));
+                            if (parentIsContainer) {
+                                candidates.add(resolveEntityTag(localName));
+                                entityDepth = 1;
+                            }
                         }
+                    } else {
+                        // Inside an entity record fragment (e.g. inside <person> or <country>)
+                        entityDepth++;
                     }
                     tagStack.push(localName);
-                    depth++;
                 } else if (event == XMLStreamConstants.END_ELEMENT) {
                     if (!tagStack.isEmpty()) {
                         tagStack.pop();
                     }
-                    depth--;
+                    if (entityDepth > 0) {
+                        entityDepth--;
+                    }
                 }
             }
 
-            for (Map.Entry<String, Integer> entry : tagCounts.entrySet()) {
-                if (entry.getValue() > 1 && !entry.getKey().equalsIgnoreCase(docRoot)
-                        && !entry.getKey().toLowerCase().endsWith("lists")) {
-                    candidates.add(entry.getKey());
-                }
+            if (docRoot != null) {
+                candidates.remove(docRoot);
+                candidates.remove(docRoot.toLowerCase());
+                candidates.remove(docRoot.toUpperCase());
+            }
+
+            // If specific entity records were found, remove generic wrapper 'record' or 'records'
+            if (candidates.size() > 1 && (candidates.contains("person") || candidates.contains("entity") || candidates.contains("countrylist") || candidates.contains("country"))) {
+                candidates.remove("record");
+                candidates.remove("records");
             }
         } catch (Exception ex) {
             log.warn("Could not detect candidate root elements from {}: {}", sourcePath, ex.getMessage());

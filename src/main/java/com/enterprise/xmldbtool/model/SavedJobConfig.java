@@ -1,7 +1,6 @@
 package com.enterprise.xmldbtool.model;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 public class SavedJobConfig {
     private Long id;
@@ -19,6 +18,10 @@ public class SavedJobConfig {
     private List<FieldMapping> mappings = new ArrayList<>();
     private String cronExpression;
     private String status = "READY";
+    private String approvalStatus = "PENDING_APPROVAL"; // PENDING_APPROVAL, APPROVED, REJECTED, DRAFT
+    private String reviewedBy;
+    private String reviewedAt;
+    private String rejectionReason;
     private String createdBy;
     private String createdAt;
     private String updatedAt;
@@ -45,16 +48,28 @@ public class SavedJobConfig {
     public void setRecordRootElement(String recordRootElement) { this.recordRootElement = recordRootElement; }
 
     public List<String> getRecordRootElements() {
-        if (recordRootElements != null && !recordRootElements.isEmpty()) {
-            return recordRootElements;
+        Set<String> set = new LinkedHashSet<>();
+        if (recordRootElements != null) {
+            for (String r : recordRootElements) {
+                if (r != null && !r.trim().isEmpty()) {
+                    for (String part : r.split("[,;\\s]+")) {
+                        String s = com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.resolveEntityTag(part);
+                        if (s != null && !s.isEmpty() && !com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.isWrapperContainerTag(s, null)) {
+                            set.add(s);
+                        }
+                    }
+                }
+            }
         }
         if (recordRootElement != null && !recordRootElement.trim().isEmpty()) {
-            return java.util.Arrays.stream(recordRootElement.split(","))
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .toList();
+            for (String part : recordRootElement.split("[,;\\s]+")) {
+                String s = com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.resolveEntityTag(part);
+                if (s != null && !s.isEmpty() && !com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService.isWrapperContainerTag(s, null)) {
+                    set.add(s);
+                }
+            }
         }
-        return List.of("record");
+        return set.isEmpty() ? List.of("record") : new ArrayList<>(set);
     }
 
     public void setRecordRootElements(List<String> recordRootElements) {
@@ -108,4 +123,16 @@ public class SavedJobConfig {
 
     public Boolean getStagedPipeline() { return stagedPipeline; }
     public void setStagedPipeline(Boolean stagedPipeline) { this.stagedPipeline = stagedPipeline; }
+
+    public String getApprovalStatus() { return approvalStatus; }
+    public void setApprovalStatus(String approvalStatus) { this.approvalStatus = approvalStatus; }
+
+    public String getReviewedBy() { return reviewedBy; }
+    public void setReviewedBy(String reviewedBy) { this.reviewedBy = reviewedBy; }
+
+    public String getReviewedAt() { return reviewedAt; }
+    public void setReviewedAt(String reviewedAt) { this.reviewedAt = reviewedAt; }
+
+    public String getRejectionReason() { return rejectionReason; }
+    public void setRejectionReason(String rejectionReason) { this.rejectionReason = rejectionReason; }
 }
