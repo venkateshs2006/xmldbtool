@@ -482,6 +482,13 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         }
     }
 
+    private static final java.util.regex.Pattern DATE_TIME_PREFIX_PATTERN = java.util.regex.Pattern.compile("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}.*");
+    private static final java.util.regex.Pattern DATE_TIME_EXACT_PATTERN = java.util.regex.Pattern.compile("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}(\\.\\d+)?$");
+    private static final java.util.regex.Pattern DATE_ISO_PATTERN = java.util.regex.Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$");
+    private static final java.util.regex.Pattern DATE_WORDS_PATTERN = java.util.regex.Pattern.compile("^\\d{1,2}-[A-Za-z]{3}-\\d{4}$");
+    private static final java.util.regex.Pattern INTEGER_PATTERN = java.util.regex.Pattern.compile("^-?\\d+$");
+    private static final java.util.regex.Pattern DECIMAL_PATTERN = java.util.regex.Pattern.compile("^-?\\d+(\\.\\d+)?$");
+
     /**
      * Converts String values from XML into appropriate Java SQL types
      * (Timestamp, Integer/Long, BigDecimal, Boolean) to prevent SQL type mismatch errors.
@@ -502,20 +509,20 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
 
         // 1. Timestamp / Date conversion (e.g. created_at, "2026-10-01 09:15:00", "21-Feb-2023")
         if (normCol.contains("date") || normCol.contains("time") || normCol.contains("at") || normCol.contains("timestamp")
-                || s.matches("^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}.*") || s.matches("^\\d{4}-\\d{2}-\\d{2}$")
-                || s.matches("^\\d{1,2}-[A-Za-z]{3}-\\d{4}$")) {
+                || DATE_TIME_PREFIX_PATTERN.matcher(s).matches() || DATE_ISO_PATTERN.matcher(s).matches()
+                || DATE_WORDS_PATTERN.matcher(s).matches()) {
             try {
-                if (s.matches("^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}(\\.\\d+)?$")) {
+                if (DATE_TIME_EXACT_PATTERN.matcher(s).matches()) {
                     return java.sql.Timestamp.valueOf(s);
                 }
                 if (s.contains("T")) {
                     java.time.Instant instant = java.time.Instant.parse(s.endsWith("Z") ? s : s + "Z");
                     return java.sql.Timestamp.from(instant);
                 }
-                if (s.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
+                if (DATE_ISO_PATTERN.matcher(s).matches()) {
                     return java.sql.Date.valueOf(s);
                 }
-                if (s.matches("^\\d{1,2}-[A-Za-z]{3}-\\d{4}$")) {
+                if (DATE_WORDS_PATTERN.matcher(s).matches()) {
                     java.time.format.DateTimeFormatter dtf = java.time.format.DateTimeFormatter.ofPattern("d-MMM-yyyy", java.util.Locale.ENGLISH);
                     java.time.LocalDate ld = java.time.LocalDate.parse(s, dtf);
                     return java.sql.Date.valueOf(ld);
@@ -525,7 +532,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
 
         // 2. Integer / Long conversion (e.g. id, quantity)
         if (normCol.contains("id") || normCol.contains("quantity") || normCol.contains("qty") || normCol.contains("count") || normCol.contains("num")) {
-            if (s.matches("^-?\\d+$")) {
+            if (INTEGER_PATTERN.matcher(s).matches()) {
                 try {
                     long l = Long.parseLong(s);
                     if (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) {
@@ -538,7 +545,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
 
         // 3. Numeric / Decimal / Price conversion (e.g. unit_price)
         if (normCol.contains("price") || normCol.contains("cost") || normCol.contains("amount") || normCol.contains("rate") || normCol.contains("total")) {
-            if (s.matches("^-?\\d+(\\.\\d+)?$")) {
+            if (DECIMAL_PATTERN.matcher(s).matches()) {
                 try {
                     return new java.math.BigDecimal(s);
                 } catch (Exception ignored) {}
@@ -621,7 +628,27 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
      * If incoming batch records contain columns that do not yet exist in the target table,
      * dynamically issues ALTER TABLE ... ADD COLUMN DDL statements across PostgreSQL, Oracle, and H2.
      */
-    public synchronized void ensureColumnsExist(String tableName, Set<String> targetColumns) {
+    public void ensureColumnsExist(String tableName, Set<String> targetColumns) {
+        if (dataSource == null || tableName == null || targetColumns == null || targetColumns.isEmpty()) {
+            return;
+        }
+        Map<String, String> cached = tableColumnCaseMapCache.get(tableName.toLowerCase());
+        if (cached != null && !cached.isEmpty()) {
+            boolean allPresent = true;
+            for (String col : targetColumns) {
+                if (col != null && !col.trim().isEmpty() && !cached.containsKey(col.toLowerCase().trim())) {
+                    allPresent = false;
+                    break;
+                }
+            }
+            if (allPresent) {
+                return; // Fast path: all columns verified in cache
+            }
+        }
+        ensureColumnsExistSynchronized(tableName, targetColumns);
+    }
+
+    private synchronized void ensureColumnsExistSynchronized(String tableName, Set<String> targetColumns) {
         if (dataSource == null || tableName == null || targetColumns == null || targetColumns.isEmpty()) {
             return;
         }

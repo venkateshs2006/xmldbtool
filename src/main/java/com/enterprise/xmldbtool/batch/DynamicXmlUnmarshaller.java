@@ -40,12 +40,16 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicXmlUnmarshaller.class);
 
+    private static final int MAX_RAW_XML_BYTES = 5 * 1024 * 1024; // 5MB safety cap per subtag buffer
+
     private static class ElementFrame {
         final String tagName;
         final ElementFrame parent;
+        final String path;
+        final int depth;
         final Map<String, Object> data = new LinkedHashMap<>();
         final StringBuilder text = new StringBuilder();
-        final StringBuilder rawXml = new StringBuilder();
+        final StringBuilder rawXml;
         int childElementCount = 0;
         int childEntityCount = 0;
         boolean hasDirectAttributes = false;
@@ -53,6 +57,16 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
         ElementFrame(String tagName, ElementFrame parent) {
             this.tagName = tagName;
             this.parent = parent;
+            if (parent == null) {
+                this.path = tagName;
+                this.depth = 0;
+            } else {
+                this.path = parent.path + "/" + tagName;
+                this.depth = parent.depth + 1;
+            }
+            // Memory optimization for 10GB / 10-level nested files:
+            // Only buffer rawXml for top levels (where subtag XML extraction is needed for flat staging)
+            this.rawXml = (parent == null || parent.depth <= 2) ? new StringBuilder() : null;
         }
     }
 
@@ -125,16 +139,20 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     currentFrame.childElementCount++;
                 }
 
-                frame.rawXml.append("<").append(localName);
+                if (frame.rawXml != null) {
+                    frame.rawXml.append("<").append(localName);
+                }
 
-                // Extract all attributes and record both qualified (tag/@attr) and unqualified (@attr, attr)
+                // Extract all attributes and record both qualified (tag/@attr, path/@attr) and unqualified (@attr, attr)
                 Iterator<?> attributes = startElement.getAttributes();
                 while (attributes.hasNext()) {
                     Attribute attr = (Attribute) attributes.next();
                     String rawAttrName = attr.getName().getLocalPart();
                     String attrValue = attr.getValue();
 
-                    frame.rawXml.append(" ").append(rawAttrName).append("=\"").append(escapeXmlAttr(attrValue)).append("\"");
+                    if (frame.rawXml != null) {
+                        frame.rawXml.append(" ").append(rawAttrName).append("=\"").append(escapeXmlAttr(attrValue)).append("\"");
+                    }
 
                     frame.hasDirectAttributes = true;
                     frame.data.put("@" + rawAttrName, attrValue);
@@ -142,6 +160,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     frame.data.put(localName + "/@" + rawAttrName, attrValue);
                     frame.data.put(localName + "/" + rawAttrName, attrValue);
 
+                    recordMap.put(frame.path + "/@" + rawAttrName, attrValue);
                     recordMap.put(localName + "/@" + rawAttrName, attrValue);
                     if (depth == 1) {
                         recordMap.put("@" + rawAttrName, attrValue);
@@ -151,9 +170,11 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         recordMap.putIfAbsent(rawAttrName, attrValue);
                     }
                 }
-                frame.rawXml.append(">");
+                if (frame.rawXml != null) {
+                    frame.rawXml.append(">");
+                }
 
-                // Inherit contextual identifiers from ancestor frames (e.g. person_id for nested address)
+                // Inherit contextual identifiers from ancestor frames across up to 10 nesting levels
                 ElementFrame anc = currentFrame;
                 while (anc != null) {
                     String ancTag = anc.tagName.toLowerCase();
@@ -170,14 +191,14 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                             frame.data.putIfAbsent(sAnc + "/@id", ancId);
                         }
                     }
-                    // Inherit contextual attributes from ancestor frames (e.g. NameType, RoleType, DateType, CountryType, IDType)
+                    // Inherit direct contextual attributes from ancestor frames without exponential key duplication
                     for (Map.Entry<String, Object> entry : anc.data.entrySet()) {
                         String key = entry.getKey();
-                        if (key.startsWith("@") || (!key.contains("/") && !key.startsWith("_entities_"))) {
-                            String cleanKey = key.startsWith("@") ? key.substring(1) : key;
+                        if (key.startsWith("@") && !key.contains("/")) {
+                            String cleanKey = key.substring(1);
                             frame.data.putIfAbsent(cleanKey, entry.getValue());
                             frame.data.putIfAbsent("@" + cleanKey, entry.getValue());
-                            frame.data.putIfAbsent(anc.tagName + "/" + key, entry.getValue());
+                            frame.data.putIfAbsent(anc.tagName + "/" + cleanKey, entry.getValue());
                             frame.data.putIfAbsent(anc.tagName + "/@" + cleanKey, entry.getValue());
                         }
                     }
@@ -192,7 +213,9 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     if (!characters.isWhiteSpace()) {
                         currentFrame.text.append(chunk);
                     }
-                    currentFrame.rawXml.append(escapeXmlText(chunk));
+                    if (currentFrame.rawXml != null) {
+                        currentFrame.rawXml.append(escapeXmlText(chunk));
+                    }
                 }
             } else if (event.isEndElement()) {
                 EndElement endElement = event.asEndElement();
@@ -202,16 +225,21 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 if (currentFrame != null) {
                     ElementFrame finishedFrame = currentFrame;
                     currentFrame = finishedFrame.parent;
-                    finishedFrame.rawXml.append("</").append(closedTag).append(">");
+                    if (finishedFrame.rawXml != null) {
+                        finishedFrame.rawXml.append("</").append(closedTag).append(">");
+                    }
                     String trimmedText = finishedFrame.text.toString().trim();
 
                     if (!trimmedText.isEmpty()) {
                         finishedFrame.data.put(closedTag, trimmedText);
                         finishedFrame.data.put("value", trimmedText);
+                        if (depth > 1) {
+                            recordMap.put(finishedFrame.path, trimmedText);
+                        }
                         recordMap.put(closedTag, trimmedText);
                     }
 
-                    if (depth == 1 && finishedFrame.childElementCount > 0) {
+                    if (depth == 1 && finishedFrame.childElementCount > 0 && finishedFrame.rawXml != null) {
                         String rawXmlContent = finishedFrame.rawXml.toString().trim();
                         recordMap.put(closedTag, rawXmlContent);
                         recordMap.put(closedTag.toLowerCase(), rawXmlContent);
@@ -224,7 +252,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                             finishedFrame.parent.data.put(closedTag, trimmedText);
                             finishedFrame.parent.data.put(closedTag + "/value", trimmedText);
                         }
-                        if (depth == 1 && finishedFrame.childElementCount > 0) {
+                        if (depth == 1 && finishedFrame.childElementCount > 0 && finishedFrame.rawXml != null) {
                             String rawXmlContent = finishedFrame.rawXml.toString().trim();
                             finishedFrame.parent.data.put(closedTag, rawXmlContent);
                             finishedFrame.parent.data.put(closedTag.toLowerCase(), rawXmlContent);
@@ -236,7 +264,11 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                                 finishedFrame.parent.data.putIfAbsent(closedTag + "/" + entry.getKey(), entry.getValue());
                             }
                         }
-                        finishedFrame.parent.rawXml.append(finishedFrame.rawXml);
+                        if (finishedFrame.parent.rawXml != null && finishedFrame.rawXml != null) {
+                            if (finishedFrame.parent.rawXml.length() + finishedFrame.rawXml.length() < MAX_RAW_XML_BYTES) {
+                                finishedFrame.parent.rawXml.append(finishedFrame.rawXml);
+                            }
+                        }
                     }
 
                     // Determine if this is an entity record (and not a container wrapper of child entities)
@@ -256,6 +288,11 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         String p = pluralize(tagLower);
                         if (!p.equals(tagLower) && !p.equals(s)) {
                             recordEntity(recordMap, p, finishedFrame.data);
+                        }
+                        if (finishedFrame.parent != null && finishedFrame.parent.parent != null) {
+                            String parentTagLower = finishedFrame.parent.tagName.toLowerCase();
+                            String parentSingular = singularize(parentTagLower);
+                            recordEntity(recordMap, parentSingular + "_" + tagLower, finishedFrame.data);
                         }
                     }
 
@@ -302,7 +339,9 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     currentFrame.childElementCount++;
                 }
 
-                frame.rawXml.append("<").append(localName);
+                if (frame.rawXml != null) {
+                    frame.rawXml.append("<").append(localName);
+                }
                 int attrCount = reader.getAttributeCount();
                 if (attrCount > 0) {
                     frame.hasDirectAttributes = true;
@@ -311,13 +350,16 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     String rawAttrName = reader.getAttributeLocalName(i);
                     String attrValue = reader.getAttributeValue(i);
 
-                    frame.rawXml.append(" ").append(rawAttrName).append("=\"").append(escapeXmlAttr(attrValue)).append("\"");
+                    if (frame.rawXml != null) {
+                        frame.rawXml.append(" ").append(rawAttrName).append("=\"").append(escapeXmlAttr(attrValue)).append("\"");
+                    }
 
                     frame.data.put("@" + rawAttrName, attrValue);
                     frame.data.put(rawAttrName, attrValue);
                     frame.data.put(localName + "/@" + rawAttrName, attrValue);
                     frame.data.put(localName + "/" + rawAttrName, attrValue);
 
+                    recordMap.put(frame.path + "/@" + rawAttrName, attrValue);
                     recordMap.put(localName + "/@" + rawAttrName, attrValue);
                     if (depth == 1) {
                         recordMap.put("@" + rawAttrName, attrValue);
@@ -327,8 +369,11 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         recordMap.putIfAbsent(rawAttrName, attrValue);
                     }
                 }
-                frame.rawXml.append(">");
+                if (frame.rawXml != null) {
+                    frame.rawXml.append(">");
+                }
 
+                // Inherit contextual identifiers from ancestor frames across up to 10 nesting levels
                 ElementFrame anc = currentFrame;
                 while (anc != null) {
                     String ancTag = anc.tagName.toLowerCase();
@@ -345,14 +390,14 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                             frame.data.putIfAbsent(sAnc + "/@id", ancId);
                         }
                     }
-                    // Inherit contextual attributes from ancestor frames (e.g. NameType, RoleType, DateType, CountryType, IDType)
+                    // Inherit direct contextual attributes from ancestor frames without exponential key duplication
                     for (Map.Entry<String, Object> entry : anc.data.entrySet()) {
                         String key = entry.getKey();
-                        if (key.startsWith("@") || (!key.contains("/") && !key.startsWith("_entities_"))) {
-                            String cleanKey = key.startsWith("@") ? key.substring(1) : key;
+                        if (key.startsWith("@") && !key.contains("/")) {
+                            String cleanKey = key.substring(1);
                             frame.data.putIfAbsent(cleanKey, entry.getValue());
                             frame.data.putIfAbsent("@" + cleanKey, entry.getValue());
-                            frame.data.putIfAbsent(anc.tagName + "/" + key, entry.getValue());
+                            frame.data.putIfAbsent(anc.tagName + "/" + cleanKey, entry.getValue());
                             frame.data.putIfAbsent(anc.tagName + "/@" + cleanKey, entry.getValue());
                         }
                     }
@@ -366,7 +411,9 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                     if (!reader.isWhiteSpace()) {
                         currentFrame.text.append(chunk);
                     }
-                    currentFrame.rawXml.append(escapeXmlText(chunk));
+                    if (currentFrame.rawXml != null) {
+                        currentFrame.rawXml.append(escapeXmlText(chunk));
+                    }
                 }
             } else if (event == XMLStreamConstants.END_ELEMENT) {
                 String closedTag = reader.getLocalName();
@@ -375,16 +422,21 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                 if (currentFrame != null) {
                     ElementFrame finishedFrame = currentFrame;
                     currentFrame = finishedFrame.parent;
-                    finishedFrame.rawXml.append("</").append(closedTag).append(">");
+                    if (finishedFrame.rawXml != null) {
+                        finishedFrame.rawXml.append("</").append(closedTag).append(">");
+                    }
                     String text = finishedFrame.text.toString().trim();
 
                     if (!text.isEmpty()) {
                         finishedFrame.data.put(closedTag, text);
                         finishedFrame.data.put("value", text);
+                        if (depth > 1) {
+                            recordMap.put(finishedFrame.path, text);
+                        }
                         recordMap.put(closedTag, text);
                     }
 
-                    if (depth == 1 && finishedFrame.childElementCount > 0) {
+                    if (depth == 1 && finishedFrame.childElementCount > 0 && finishedFrame.rawXml != null) {
                         String rawXmlContent = finishedFrame.rawXml.toString().trim();
                         recordMap.put(closedTag, rawXmlContent);
                         recordMap.put(closedTag.toLowerCase(), rawXmlContent);
@@ -396,7 +448,7 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                             finishedFrame.parent.data.put(closedTag, text);
                             finishedFrame.parent.data.put(closedTag + "/value", text);
                         }
-                        if (depth == 1 && finishedFrame.childElementCount > 0) {
+                        if (depth == 1 && finishedFrame.childElementCount > 0 && finishedFrame.rawXml != null) {
                             String rawXmlContent = finishedFrame.rawXml.toString().trim();
                             finishedFrame.parent.data.put(closedTag, rawXmlContent);
                             finishedFrame.parent.data.put(closedTag.toLowerCase(), rawXmlContent);
@@ -408,9 +460,14 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                                 finishedFrame.parent.data.putIfAbsent(closedTag + "/" + entry.getKey(), entry.getValue());
                             }
                         }
-                        finishedFrame.parent.rawXml.append(finishedFrame.rawXml);
+                        if (finishedFrame.parent.rawXml != null && finishedFrame.rawXml != null) {
+                            if (finishedFrame.parent.rawXml.length() + finishedFrame.rawXml.length() < MAX_RAW_XML_BYTES) {
+                                finishedFrame.parent.rawXml.append(finishedFrame.rawXml);
+                            }
+                        }
                     }
 
+                    // Determine if this is an entity record (and not a container wrapper of child entities)
                     boolean isEntityRecord = (finishedFrame.hasDirectAttributes || (finishedFrame.childElementCount > 0 && finishedFrame.childEntityCount == 0))
                             && depth > 0;
 
@@ -427,6 +484,11 @@ public class DynamicXmlUnmarshaller implements Unmarshaller {
                         String p = pluralize(tagLower);
                         if (!p.equals(tagLower) && !p.equals(s)) {
                             recordEntity(recordMap, p, finishedFrame.data);
+                        }
+                        if (finishedFrame.parent != null && finishedFrame.parent.parent != null) {
+                            String parentTagLower = finishedFrame.parent.tagName.toLowerCase();
+                            String parentSingular = singularize(parentTagLower);
+                            recordEntity(recordMap, parentSingular + "_" + tagLower, finishedFrame.data);
                         }
                     }
 

@@ -539,6 +539,14 @@ public class SchemaProvisioningService {
                             childGroups.computeIfAbsent(containerBase, k -> new LinkedHashSet<>()).add(col);
                         }
                     }
+
+                    // For deep nesting (up to 10 levels): also register the immediate enclosing leaf entity
+                    if (parts.length >= 4) {
+                        String leafEntity = parts[parts.length - 2].replaceAll("[^a-zA-Z0-9_]", "_");
+                        if (!leafEntity.equalsIgnoreCase(safeRootTable) && !leafEntity.equalsIgnoreCase(childEntity) && !col.isEmpty()) {
+                            childGroups.computeIfAbsent(leafEntity, k -> new LinkedHashSet<>()).add(col);
+                        }
+                    }
                 }
             }
         }
@@ -995,11 +1003,14 @@ public class SchemaProvisioningService {
         try {
             if (!isOracle) {
                 stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_rec_id ON " + flatTable + "(record_identifier)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_hash ON " + flatTable + "(record_identifier, payload_hash)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_status_id ON " + flatTable + "(status, id)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_status ON " + flatTable + "(status)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_version ON " + flatTable + "(xml_version, schema_version)");
             } else {
                 try { stmt.execute("CREATE UNIQUE INDEX idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)"); } catch (Exception ignored) {}
+                try { stmt.execute("CREATE INDEX idx_" + flatTable + "_rec_id ON " + flatTable + "(record_identifier)"); } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
 
@@ -1120,6 +1131,7 @@ public class SchemaProvisioningService {
                 while ((line = reader.readLine()) != null && count < maxLines) {
                     sample.append(line).append("\n");
                     count++;
+                    if (sample.length() > 10 * 1024 * 1024) break;
                 }
             }
             XMLInputFactory factory = XMLInputFactory.newInstance();

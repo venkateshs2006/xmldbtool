@@ -3092,6 +3092,128 @@ class DynamicXmlIngestionTest {
         assertNotNull(p1.get("tag_name"));
     }
 
+    @Test
+    @DisplayName("Verify 10GB Optimization: Preview threshold is at least 10GB and PostgreSQL Hikari config enables reWriteBatchedInserts")
+    void testLargeFile10GbOptimizations() {
+        // 1. Verify preview service allows files over 100MB and up to 10GB+ without skipping preview
+        assertEquals(20L * 1024 * 1024 * 1024, com.enterprise.xmldbtool.service.XmlPreviewService.DEFAULT_MAX_PREVIEW_FILE_SIZE_BYTES);
+        assertTrue(previewService.getMaxPreviewSizeLimit() >= 10L * 1024 * 1024 * 1024, "Preview limit must accommodate 10GB files");
+
+        // 2. Verify PostgreSQL dynamic DataSource builds with high-throughput batching properties
+        DbConnectionConfig pgConfig = new DbConnectionConfig();
+        pgConfig.setEngine("POSTGRESQL");
+        pgConfig.setUrl("jdbc:postgresql://localhost:5432/testdb");
+        pgConfig.setUsername("testuser");
+        pgConfig.setPassword("testpass");
+        com.zaxxer.hikari.HikariConfig hikariConfig = dataSourceService.buildHikariConfig(pgConfig);
+
+        assertEquals("true", hikariConfig.getDataSourceProperties().getProperty("reWriteBatchedInserts"),
+                "PostgreSQL Hikari config must enable reWriteBatchedInserts for 10GB high-throughput batch writing");
+        assertEquals("unspecified", hikariConfig.getDataSourceProperties().getProperty("stringtype"));
+
+        // 3. Verify fast precompiled regex autoConvertType
+        Object ts = com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter.autoConvertType("2026-10-01 09:15:00", "created_at");
+        assertInstanceOf(java.sql.Timestamp.class, ts);
+
+        Object num = com.enterprise.xmldbtool.batch.DynamicJdbcBatchWriter.autoConvertType("12345", "person_id");
+        assertInstanceOf(Integer.class, num);
+
+        // 4. Verify thread-safe SHA-256 computation
+        String hash1 = com.enterprise.xmldbtool.service.StagingXmlStreamingService.computeSha256("test-payload-data");
+        assertNotNull(hash1);
+        assertEquals(64, hash1.length(), "SHA-256 hash must be 64 hexadecimal characters");
+    }
+
+    @Test
+    @DisplayName("Verify Deeply Nested XML up to 10 Levels: unmarshalling, foreign key inheritance, and item processor mapping")
+    void testDeeplyNestedXmlUpTo10LevelsStreamingAndExtraction() throws Exception {
+        // Construct 10-level deeply nested XML fragment
+        String nestedXml = """
+                <Enterprise>
+                    <Organization id="ORG-100" region="APAC">
+                        <Division id="DIV-200">
+                            <Department id="DEP-300">
+                                <Group id="GRP-400">
+                                    <Team id="TEA-500">
+                                        <Project id="PRJ-600">
+                                            <Task id="TSK-700">
+                                                <Subtask id="SUB-800">
+                                                    <Detail id="DET-900" status="COMPLETED">
+                                                        <DetailName>Deep Level 10 Task</DetailName>
+                                                        <EstimatedHours>42</EstimatedHours>
+                                                    </Detail>
+                                                </Subtask>
+                                            </Task>
+                                        </Project>
+                                    </Team>
+                                </Group>
+                            </Department>
+                        </Division>
+                    </Organization>
+                </Enterprise>
+                """;
+
+        XMLInputFactory factory = XMLInputFactory.newInstance();
+        factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+        factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+
+        javax.xml.stream.XMLEventReader reader = factory.createXMLEventReader(new java.io.StringReader(nestedXml));
+        Map<String, Object> recordMap = unmarshaller.parseFragmentFromEventReader(reader);
+
+        assertNotNull(recordMap);
+
+        // 1. Verify exact 10-level full path resolution
+        String deepPath = "Enterprise/Organization/Division/Department/Group/Team/Project/Task/Subtask/Detail/DetailName";
+        assertEquals("Deep Level 10 Task", recordMap.get(deepPath), "Full 10-level path must resolve directly in recordMap");
+
+        // 2. Verify leaf element resolution
+        assertEquals("Deep Level 10 Task", recordMap.get("DetailName"));
+        assertEquals("42", recordMap.get("EstimatedHours"));
+
+        // 3. Verify leaf entity captured in _entities_detail
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> details = (List<Map<String, Object>>) recordMap.get("_entities_detail");
+        assertNotNull(details, "_entities_detail must be populated for level 10 entity");
+        assertEquals(1, details.size());
+
+        Map<String, Object> detailEntity = details.get(0);
+        assertEquals("DET-900", detailEntity.get("id"));
+        assertEquals("COMPLETED", detailEntity.get("status"));
+        assertEquals("Deep Level 10 Task", detailEntity.get("DetailName"));
+
+        // 4. Verify ancestor foreign keys inherited down through all 10 nesting levels
+        assertEquals("SUB-800", detailEntity.get("subtask_id"), "Level 9 parent ID must be inherited");
+        assertEquals("TSK-700", detailEntity.get("task_id"), "Level 8 ancestor ID must be inherited");
+        assertEquals("PRJ-600", detailEntity.get("project_id"), "Level 7 ancestor ID must be inherited");
+        assertEquals("TEA-500", detailEntity.get("team_id"), "Level 6 ancestor ID must be inherited");
+        assertEquals("GRP-400", detailEntity.get("group_id"), "Level 5 ancestor ID must be inherited");
+        assertEquals("DEP-300", detailEntity.get("department_id"), "Level 4 ancestor ID must be inherited");
+        assertEquals("DIV-200", detailEntity.get("division_id"), "Level 3 ancestor ID must be inherited");
+        assertEquals("ORG-100", detailEntity.get("organization_id"), "Level 2 ancestor ID must be inherited");
+
+        // 5. Verify DynamicXmlItemProcessor transforms deep 10th-level entity into database table row
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("Enterprise/Organization/Division/Department/Group/Team/Project/Task/Subtask/Detail/DetailName", "detail", "detail_name", "NONE", "NONE"),
+                new FieldMapping("Detail/@status", "detail", "status_code", "NONE", "NONE"),
+                new FieldMapping("subtask_id", "detail", "subtask_id", "NONE", "FK"),
+                new FieldMapping("organization_id", "detail", "org_id", "NONE", "FK")
+        );
+
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor("Enterprise", mappings);
+        DatabaseRowPayload payload = processor.process(recordMap);
+
+        assertNotNull(payload);
+        List<Map<String, Object>> detailRows = payload.getMultiTableRecords().get("detail");
+        assertNotNull(detailRows, "Must produce routed rows for 'detail' table");
+        assertEquals(1, detailRows.size());
+
+        Map<String, Object> row = detailRows.get(0);
+        assertEquals("Deep Level 10 Task", row.get("detail_name"));
+        assertEquals("COMPLETED", row.get("status_code"));
+        assertEquals("SUB-800", row.get("subtask_id"));
+        assertEquals("ORG-100", row.get("org_id"));
+    }
+
     private boolean isValidUuid(String val) {
         if (val == null) return false;
         try {

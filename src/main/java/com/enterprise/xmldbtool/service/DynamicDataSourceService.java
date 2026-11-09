@@ -232,8 +232,14 @@ public class DynamicDataSourceService {
             hikariConfig.setDriverClassName("org.postgresql.Driver");
             // Allows PostgreSQL to infer parameter types without casting errors (e.g. timestamps, uuids, ints)
             hikariConfig.addDataSourceProperty("stringtype", "unspecified");
+            // Crucial for 10GB multi-million-record batch ingestion: rewrites batched inserts into multi-row statements
+            hikariConfig.addDataSourceProperty("reWriteBatchedInserts", "true");
+            hikariConfig.addDataSourceProperty("preparedStatementCacheQueries", "256");
+            hikariConfig.addDataSourceProperty("preparedStatementCacheSizeMiB", "10");
+            hikariConfig.addDataSourceProperty("defaultRowFetchSize", "1000");
         } else if (url.contains(":oracle:")) {
             hikariConfig.setDriverClassName("oracle.jdbc.OracleDriver");
+            hikariConfig.addDataSourceProperty("oracle.jdbc.defaultBatchValue", "1000");
         } else if (url.contains(":h2:")) {
             hikariConfig.setDriverClassName("org.h2.Driver");
         }
@@ -264,8 +270,8 @@ public class DynamicDataSourceService {
         try {
             HikariDataSource ds = poolCache.computeIfAbsent(cacheKey, k -> {
                 HikariConfig hikariConfig = buildHikariConfig(config);
-                hikariConfig.setMaximumPoolSize(10);
-                hikariConfig.setMinimumIdle(2);
+                hikariConfig.setMaximumPoolSize(20);
+                hikariConfig.setMinimumIdle(5);
                 hikariConfig.setConnectionTimeout(10000);
                 hikariConfig.setIdleTimeout(30000);
                 hikariConfig.setPoolName("TargetDB-Pool-" + System.currentTimeMillis());

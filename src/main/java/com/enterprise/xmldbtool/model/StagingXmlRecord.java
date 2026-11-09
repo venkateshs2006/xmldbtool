@@ -26,6 +26,7 @@ public class StagingXmlRecord {
     private String errorMessage;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    private transient java.util.Map<String, Object> cachedMap;
 
     public StagingXmlRecord() {}
 
@@ -93,5 +94,8 @@ public class StagingXmlRecord {
 
     public LocalDateTime getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
+
+    public java.util.Map<String, Object> getCachedMap() { return cachedMap; }
+    public void setCachedMap(java.util.Map<String, Object> cachedMap) { this.cachedMap = cachedMap; }
 }
 

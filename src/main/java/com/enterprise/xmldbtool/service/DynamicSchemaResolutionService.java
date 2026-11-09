@@ -311,6 +311,7 @@ public class DynamicSchemaResolutionService {
         List<DatabaseRowPayload> chunkPayloads = new ArrayList<>(stagedBatch.size());
         Map<StagingXmlRecord, DatabaseRowPayload> recordToPayload = new LinkedHashMap<>();
         List<StagingXmlRecord> validCandidateRecords = new ArrayList<>();
+        Set<String> mappedXmlFields = getOrBuildMappedFields(mappings);
 
         for (StagingXmlRecord record : stagedBatch) {
             processed++;
@@ -323,7 +324,7 @@ public class DynamicSchemaResolutionService {
                 }
 
                 // Capture unmapped delta XML fields into unmapped_attributes JSON
-                enrichWithSchemaEvolutionAttributes(rawMap, mappings);
+                enrichWithSchemaEvolutionAttributes(rawMap, mappedXmlFields);
 
                 DatabaseRowPayload payload = processor.process(rawMap);
                 if (payload != null) {
@@ -707,10 +708,9 @@ public class DynamicSchemaResolutionService {
      * Handles schema evolution by identifying newly added or unmapped XML fields
      * and aggregating them into a canonical 'unmapped_attributes' JSON payload.
      */
-    public void enrichWithSchemaEvolutionAttributes(Map<String, Object> rawMap, List<FieldMapping> mappings) {
-        if (rawMap == null || mappings == null) return;
-
-        Set<String> mappedXmlFields = new HashSet<>();
+    public static Set<String> getOrBuildMappedFields(List<FieldMapping> mappings) {
+        if (mappings == null) return Collections.emptySet();
+        Set<String> mappedXmlFields = new HashSet<>(mappings.size() * 2);
         for (FieldMapping m : mappings) {
             if (m.getXmlField() != null) {
                 mappedXmlFields.add(m.getXmlField().toLowerCase());
@@ -721,6 +721,15 @@ public class DynamicSchemaResolutionService {
                 mappedXmlFields.add(simple);
             }
         }
+        return mappedXmlFields;
+    }
+
+    public void enrichWithSchemaEvolutionAttributes(Map<String, Object> rawMap, List<FieldMapping> mappings) {
+        enrichWithSchemaEvolutionAttributes(rawMap, getOrBuildMappedFields(mappings));
+    }
+
+    public void enrichWithSchemaEvolutionAttributes(Map<String, Object> rawMap, Set<String> mappedXmlFields) {
+        if (rawMap == null || mappedXmlFields == null) return;
 
         Map<String, Object> unmappedFields = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : rawMap.entrySet()) {
@@ -823,27 +832,32 @@ public class DynamicSchemaResolutionService {
 
     private void updateStagingStatus(JdbcTemplate jdbcTemplate, List<StagingXmlRecord> records, String status, String errorMessage) {
         if (records == null || records.isEmpty()) return;
-        List<Long> ids = records.stream().map(StagingXmlRecord::getId).filter(Objects::nonNull).toList();
-        if (!ids.isEmpty()) {
+        List<StagingXmlRecord> withBnpp = records.stream()
+                .filter(r -> r.getBnppId() != null && !r.getBnppId().trim().isEmpty())
+                .toList();
+        if (!withBnpp.isEmpty()) {
             try {
-                String updateSql = "UPDATE staging_xml_records SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
-                jdbcTemplate.batchUpdate(updateSql, ids, ids.size(), (ps, id) -> {
+                String updateSql = "UPDATE staging_xml_records SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE bnpp_id = ?";
+                jdbcTemplate.batchUpdate(updateSql, withBnpp, withBnpp.size(), (ps, r) -> {
                     ps.setString(1, status);
                     ps.setString(2, errorMessage);
-                    ps.setLong(3, id);
+                    ps.setString(3, r.getBnppId());
                 });
             } catch (Exception ignored) {}
         }
-        try {
-            String updateByIdentifier = "UPDATE staging_xml_records SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE (record_identifier = ? AND payload_hash = ?) OR bnpp_id = ?";
-            jdbcTemplate.batchUpdate(updateByIdentifier, records, records.size(), (ps, r) -> {
-                ps.setString(1, status);
-                ps.setString(2, errorMessage);
-                ps.setString(3, r.getRecordIdentifier());
-                ps.setString(4, r.getPayloadHash());
-                ps.setString(5, r.getBnppId());
-            });
-        } catch (Exception ignored) {}
+        List<StagingXmlRecord> withoutBnpp = records.stream()
+                .filter(r -> (r.getBnppId() == null || r.getBnppId().trim().isEmpty()) && r.getId() != null)
+                .toList();
+        if (!withoutBnpp.isEmpty()) {
+            try {
+                String updateSql = "UPDATE staging_xml_records SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
+                jdbcTemplate.batchUpdate(updateSql, withoutBnpp, withoutBnpp.size(), (ps, r) -> {
+                    ps.setString(1, status);
+                    ps.setString(2, errorMessage);
+                    ps.setLong(3, r.getId());
+                });
+            } catch (Exception ignored) {}
+        }
     }
 
     private List<FieldMapping> autoDeriveMappingsFromTargetTables(JdbcTemplate jdbcTemplate, List<String> tableOrder, String masterTable) {

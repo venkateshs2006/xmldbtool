@@ -77,5 +77,6 @@ com/enterprise/xmldbtool/batch/DynamicXmlUnmarshaller$ElementFrame.class
 com/enterprise/xmldbtool/model/User.class
 com/enterprise/xmldbtool/model/SystemMetrics.class
 com/enterprise/xmldbtool/model/DiscoveredElement.class
+com/enterprise/xmldbtool/service/StagingXmlStreamingService$ExistingDeltaInfo.class
 com/enterprise/xmldbtool/model/StagingXmlRecord.class
 com/enterprise/xmldbtool/service/JobConfigService$1$2.class

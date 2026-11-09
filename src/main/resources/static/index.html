@@ -939,7 +939,7 @@
                         <p class="text-xs text-gray-500 mt-1.5">Supports local filesystem paths, S3/COS URIs, or standard URLs. StAX streaming guarantees constant memory consumption.</p>
                         <div class="mt-2 p-2.5 rounded-lg bg-blue-50/70 border border-blue-200 text-blue-900 text-xs flex items-center gap-2">
                             <i class="fas fa-info-circle text-blue-600 shrink-0"></i>
-                            <span><strong>Note:</strong> Files over 100 MB automatically enable <em>Large File Mode</em>: Step 5 preview synthesizes dummy records from discovered tags without reading the physical file, preventing high I/O and latency.</span>
+                            <span><strong>Note:</strong> Enterprise Streaming Architecture handles files up to <strong>10 GB+</strong> seamlessly with constant O(1) heap memory, multi-row batched writes, and live preview without memory exhaustion.</span>
                         </div>
                     </div>
 

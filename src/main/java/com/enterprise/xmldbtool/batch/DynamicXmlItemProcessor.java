@@ -25,6 +25,13 @@ import java.util.Map;
 public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object>, DatabaseRowPayload>, org.springframework.batch.core.StepExecutionListener {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicXmlItemProcessor.class);
+    private static final com.fasterxml.jackson.databind.ObjectMapper SHARED_MAPPER = new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final XMLInputFactory SHARED_XML_FACTORY;
+    static {
+        SHARED_XML_FACTORY = XMLInputFactory.newInstance();
+        SHARED_XML_FACTORY.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+        SHARED_XML_FACTORY.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+    }
 
     private final String defaultTargetTable;
     private final List<FieldMapping> mappings;
@@ -316,12 +323,11 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                     if (!parsed.isEmpty()) return parsed;
                 } else if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
                     try {
-                        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
                         if (trimmed.startsWith("[")) {
-                            List<Map<String, Object>> parsed = mapper.readValue(trimmed, new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
+                            List<Map<String, Object>> parsed = SHARED_MAPPER.readValue(trimmed, new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
                             if (!parsed.isEmpty()) return parsed;
                         } else {
-                            Map<String, Object> parsed = mapper.readValue(trimmed, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                            Map<String, Object> parsed = SHARED_MAPPER.readValue(trimmed, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
                             if (!parsed.isEmpty()) return List.of(parsed);
                         }
                     } catch (Exception ignored) {}
@@ -401,11 +407,7 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         }
         List<Map<String, Object>> results = new ArrayList<>();
         try {
-            XMLInputFactory factory = XMLInputFactory.newInstance();
-            factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
-            factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
-
-            XMLStreamReader reader = factory.createXMLStreamReader(new StringReader(rawXml));
+            XMLStreamReader reader = SHARED_XML_FACTORY.createXMLStreamReader(new StringReader(rawXml));
             int depth = 0;
             Map<String, Object> currentEntity = null;
             int entityDepth = -1;
@@ -423,7 +425,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                         String norm = localName.toLowerCase();
                         String normExpected = expectedEntityTag != null ? expectedEntityTag.toLowerCase() : "";
                         String singExpected = DynamicXmlUnmarshaller.singularize(normExpected);
-                        if (depth == 2 || (depth == 1 && (norm.equals(normExpected) || norm.equals(singExpected)))) {
+                        String plurExpected = DynamicXmlUnmarshaller.pluralize(normExpected);
+                        boolean matchesExpected = !normExpected.isEmpty() && (norm.equals(normExpected) || norm.equals(singExpected) || norm.equals(plurExpected));
+                        if (matchesExpected || (expectedEntityTag == null && depth == 2) || (depth == 2 && normExpected.isEmpty())) {
                             isStartOfEntity = true;
                         }
                     }
@@ -512,8 +516,53 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
         }
 
-        // 3. If xmlField is qualified with enclosing tag (e.g. "record/@id", "catalog/@exportId", "person/name")
+        // 3. If xmlField is qualified with enclosing tag (e.g. "record/@id", "catalog/@exportId", "person/name", or deep 10-level paths)
         if (xmlField.contains("/")) {
+            String entityTag = (String) xmlRecord.get("_entity_tag");
+            if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
+
+            // Check if entity matches any tag in the multi-level hierarchy path (e.g. "Detail" in "Enterprise/.../Detail/DetailName")
+            if (entityTag != null) {
+                String normEnt = entityTag.toLowerCase();
+                String singEnt = DynamicXmlUnmarshaller.singularize(normEnt);
+                String plurEnt = DynamicXmlUnmarshaller.pluralize(normEnt);
+                String[] segments = xmlField.split("/");
+
+                for (int i = 0; i < segments.length; i++) {
+                    String segNorm = segments[i].replace("@", "").toLowerCase();
+                    if (segNorm.equals(normEnt) || segNorm.equals(singEnt) || segNorm.equals(plurEnt)) {
+                        // Found matching entity segment in path: resolve relative path under this entity
+                        if (i < segments.length - 1) {
+                            StringBuilder rel = new StringBuilder();
+                            for (int j = i + 1; j < segments.length; j++) {
+                                if (rel.length() > 0) rel.append("/");
+                                rel.append(segments[j]);
+                            }
+                            String relPath = rel.toString();
+                            Object relVal = xmlRecord.get(relPath);
+                            if (relVal != null) return relVal;
+                            for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                                if (entry.getKey().equalsIgnoreCase(relPath)) {
+                                    return entry.getValue();
+                                }
+                            }
+                            // Also check leaf element
+                            String leaf = segments[segments.length - 1].replace("@", "");
+                            Object leafVal = xmlRecord.get(leaf);
+                            if (leafVal != null) return leafVal;
+                            for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                                if (entry.getKey().equalsIgnoreCase(leaf)) {
+                                    return entry.getValue();
+                                }
+                            }
+                        } else {
+                            val = xmlRecord.get(segments[i]);
+                            if (val != null) return val;
+                        }
+                    }
+                }
+            }
+
             String tagPrefix = xmlField.substring(0, xmlField.indexOf("/"));
             String rawAttr = xmlField.contains("/@")
                     ? xmlField.substring(xmlField.indexOf("/@") + 2)
@@ -526,9 +575,6 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                     return entry.getValue();
                 }
             }
-
-            String entityTag = (String) xmlRecord.get("_entity_tag");
-            if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
 
             boolean tagMatches = (entityTag == null) || entityTag.equalsIgnoreCase(tagPrefix)
                     || DynamicXmlUnmarshaller.singularize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.singularize(tagPrefix))

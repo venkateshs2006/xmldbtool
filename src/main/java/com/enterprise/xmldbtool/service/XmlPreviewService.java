@@ -45,7 +45,7 @@ public class XmlPreviewService {
         this.discoveryService = discoveryService;
     }
 
-    public static final long DEFAULT_MAX_PREVIEW_FILE_SIZE_BYTES = 100L * 1024 * 1024; // 100 MB
+    public static final long DEFAULT_MAX_PREVIEW_FILE_SIZE_BYTES = 20L * 1024 * 1024 * 1024; // 20 GB (stream live preview for files up to 10GB+)
     private long maxPreviewSizeLimit = DEFAULT_MAX_PREVIEW_FILE_SIZE_BYTES;
 
     public void setMaxPreviewSizeLimit(long maxPreviewSizeLimit) {
@@ -113,20 +113,20 @@ public class XmlPreviewService {
             }
         }
 
-        // If file size exceeds 100MB threshold, do NOT read the actual XML file.
+        // If file size exceeds max preview size limit (20GB), do NOT read the actual XML file.
         // Instead, generate simulated dummy data based on the tags.
         if (fileSize > this.maxPreviewSizeLimit) {
             String sizeStr = response.getFileSizeFormatted();
-            log.info("XML file size is {} (> 100 MB threshold). Generating dummy data based on tags without reading actual file.", sizeStr);
+            log.info("XML file size is {} (> threshold). Generating dummy data based on tags without reading actual file.", sizeStr);
             response.setPreviewSkipped(true);
             response.setDummyData(true);
-            response.setSkipReason("XML file size is " + sizeStr + " (> 100 MB threshold). Displaying tag-generated dummy preview data without reading the actual file.");
+            response.setSkipReason("XML file size is " + sizeStr + " (> threshold). Displaying tag-generated dummy preview data without reading the actual file.");
 
             int dummyCount = limit > 0 ? limit : 5;
             Map<String, TablePreviewData> tablePreviews = generateSimulatedMultiTablePreviews(tableOrder, request.getMappings(), processor, dummyCount);
 
             response.setSuccess(true);
-            response.setMessage("XML file size is " + sizeStr + " (> 100 MB). Displaying tag-generated dummy preview data (5 records) without reading the actual file.");
+            response.setMessage("XML file size is " + sizeStr + ". Displaying tag-generated dummy preview data (5 records) without reading the actual file.");
             response.setTablePreviews(tablePreviews);
             response.setTableOrder(new ArrayList<>(tablePreviews.keySet()));
 
@@ -349,15 +349,15 @@ public class XmlPreviewService {
     private InputStream openStreamForSource(String sourcePath) throws Exception {
         Path directPath = Paths.get(sourcePath);
         if (Files.exists(directPath)) {
-            return Files.newInputStream(directPath);
+            return new java.io.BufferedInputStream(Files.newInputStream(directPath), 128 * 1024);
         }
         Resource res = resourceLoader.getResource(sourcePath);
         if (res.exists()) {
-            return res.getInputStream();
+            return new java.io.BufferedInputStream(res.getInputStream(), 128 * 1024);
         }
         Path relativePath = Paths.get("/home/sv/Projects/xmldbtool", sourcePath);
         if (Files.exists(relativePath)) {
-            return Files.newInputStream(relativePath);
+            return new java.io.BufferedInputStream(Files.newInputStream(relativePath), 128 * 1024);
         }
         throw new IllegalArgumentException("Unable to open source XML: " + sourcePath);
     }

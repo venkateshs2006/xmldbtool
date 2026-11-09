@@ -45,6 +45,16 @@ public class StagingXmlStreamingService {
     private final ObjectMapper objectMapper;
     private final ResourceLoader resourceLoader = new DefaultResourceLoader();
 
+    private static final ThreadLocal<MessageDigest> SHA256_DIGEST = ThreadLocal.withInitial(() -> {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    });
+
+    public record ExistingDeltaInfo(String payloadHash, int latestVersion) {}
+
     public record StagingSummary(
             long totalRead,
             long stagedCount,
@@ -277,28 +287,18 @@ public class StagingXmlStreamingService {
                                 record.setVersionNumber(batchVer);
                                 record.setXmlVersion(recXmlVersion);
                                 record.setSchemaVersion(recSchemaVersion);
-
-                                // Delta Detection: check if previous identical hash exists
-                                boolean isUnchanged = isRecordUnchanged(jdbcTemplate, matchedRoot, identifier, payloadHash);
-                                if (isUnchanged) {
-                                    record.setStatus("SKIPPED_UNCHANGED");
-                                    skippedUnchanged++;
-                                } else {
-                                    Integer prevVer = getLatestRecordVersion(jdbcTemplate, matchedRoot, identifier);
-                                    if (prevVer != null && prevVer >= batchVer) {
-                                        batchVer = prevVer + 1;
-                                    }
-                                    record.setStatus("STAGED");
-                                    stagedCount++;
-                                    String normRoot = matchedRoot.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
-                                    String flatName = normRoot.endsWith("_flat") ? normRoot : normRoot + "_flat";
-                                    tableCounts.merge(flatName, 1L, Long::sum);
-                                }
-                                record.setVersionNumber(batchVer);
+                                record.setCachedMap(recordMap);
 
                                 buffer.add(record);
                                 if (buffer.size() >= batchSize) {
+                                    long[] deltaCounts = processBatchDeltas(jdbcTemplate, buffer, matchedRoot, tableCounts);
+                                    stagedCount += deltaCounts[0];
+                                    skippedUnchanged += deltaCounts[1];
+
                                     flushStagingBatchFaultTolerant(jdbcTemplate, buffer, jobExecutionId);
+                                    for (StagingXmlRecord r : buffer) {
+                                        r.setCachedMap(null);
+                                    }
                                     buffer.clear();
                                     saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
                                             "STAGE_1_STREAMING", stagedCount, 0, identifier, matchedRoot, "STREAMING");
@@ -322,7 +322,15 @@ public class StagingXmlStreamingService {
             }
 
             if (!buffer.isEmpty()) {
+                String lastRoot = buffer.get(buffer.size() - 1).getEntityType();
+                long[] deltaCounts = processBatchDeltas(jdbcTemplate, buffer, lastRoot, tableCounts);
+                stagedCount += deltaCounts[0];
+                skippedUnchanged += deltaCounts[1];
+
                 flushStagingBatchFaultTolerant(jdbcTemplate, buffer, jobExecutionId);
+                for (StagingXmlRecord r : buffer) {
+                    r.setCachedMap(null);
+                }
                 buffer.clear();
             }
             saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
@@ -656,12 +664,15 @@ public class StagingXmlStreamingService {
 
                 // Delta handling: if record_identifier already exists in flat table, replace it with the new version
                 if (effectiveCols.contains("record_identifier")) {
-                    for (StagingXmlRecord r : activeRecords) {
-                        if (r.getRecordIdentifier() != null && !r.getRecordIdentifier().trim().isEmpty()) {
-                            try {
-                                jdbcTemplate.update("DELETE FROM " + flatTable + " WHERE record_identifier = ?", r.getRecordIdentifier());
-                            } catch (Exception ignored) {}
-                        }
+                    List<Object[]> deleteParams = activeRecords.stream()
+                            .map(StagingXmlRecord::getRecordIdentifier)
+                            .filter(id -> id != null && !id.trim().isEmpty())
+                            .map(id -> new Object[]{id.trim()})
+                            .toList();
+                    if (!deleteParams.isEmpty()) {
+                        try {
+                            jdbcTemplate.batchUpdate("DELETE FROM " + flatTable + " WHERE record_identifier = ?", deleteParams);
+                        } catch (Exception ignored) {}
                     }
                 }
 
@@ -677,10 +688,12 @@ public class StagingXmlStreamingService {
                 String sql = "INSERT INTO " + flatTable + " (" + colList + ") VALUES (" + placeholders + ")";
 
                 jdbcTemplate.batchUpdate(sql, activeRecords, activeRecords.size(), (ps, r) -> {
-                    Map<String, Object> map = null;
-                    try {
-                        map = objectMapper.readValue(r.getRawPayload(), new TypeReference<Map<String, Object>>() {});
-                    } catch (Exception ignored) {}
+                    Map<String, Object> map = r.getCachedMap();
+                    if (map == null && r.getRawPayload() != null) {
+                        try {
+                            map = objectMapper.readValue(r.getRawPayload(), new TypeReference<Map<String, Object>>() {});
+                        } catch (Exception ignored) {}
+                    }
 
                     int idx = 1;
                     for (String col : insertCols) {
@@ -783,10 +796,12 @@ public class StagingXmlStreamingService {
                 String sql = "INSERT INTO " + stageTable + " (" + colList + ") VALUES (" + placeholders + ")";
 
                 jdbcTemplate.batchUpdate(sql, group, group.size(), (ps, r) -> {
-                    Map<String, Object> map = null;
-                    try {
-                        map = objectMapper.readValue(r.getRawPayload(), new TypeReference<Map<String, Object>>() {});
-                    } catch (Exception ignored) {}
+                    Map<String, Object> map = r.getCachedMap();
+                    if (map == null && r.getRawPayload() != null) {
+                        try {
+                            map = objectMapper.readValue(r.getRawPayload(), new TypeReference<Map<String, Object>>() {});
+                        } catch (Exception ignored) {}
+                    }
 
                     int idx = 1;
                     for (String col : insertCols) {
@@ -914,18 +929,96 @@ public class StagingXmlStreamingService {
         }
     }
 
+    public long[] processBatchDeltas(JdbcTemplate jdbcTemplate, List<StagingXmlRecord> records, String entityType, Map<String, Long> tableCounts) {
+        long staged = 0;
+        long skipped = 0;
+        if (records == null || records.isEmpty()) return new long[]{0, 0};
+
+        // Group identifiers by entityType if buffer contains multi-root tags
+        Map<String, Set<String>> idsByEntity = new HashMap<>();
+        for (StagingXmlRecord r : records) {
+            String ent = r.getEntityType() != null ? r.getEntityType() : entityType;
+            if (r.getRecordIdentifier() != null && !r.getRecordIdentifier().trim().isEmpty()) {
+                idsByEntity.computeIfAbsent(ent, k -> new HashSet<>()).add(r.getRecordIdentifier().trim());
+            }
+        }
+
+        Map<String, ExistingDeltaInfo> existingMap = new HashMap<>();
+        for (Map.Entry<String, Set<String>> entry : idsByEntity.entrySet()) {
+            String ent = entry.getKey();
+            List<String> idList = new ArrayList<>(entry.getValue());
+            int batchChunk = 500;
+            for (int i = 0; i < idList.size(); i += batchChunk) {
+                List<String> subList = idList.subList(i, Math.min(idList.size(), i + batchChunk));
+                String placeholders = String.join(",", Collections.nCopies(subList.size(), "?"));
+                List<Object> params = new ArrayList<>();
+                params.add(ent);
+                params.addAll(subList);
+
+                String query = "SELECT record_identifier, payload_hash, MAX(version_number) AS max_ver " +
+                        "FROM staging_xml_records WHERE entity_type = ? AND record_identifier IN (" + placeholders + ") " +
+                        "GROUP BY record_identifier, payload_hash";
+                try {
+                    jdbcTemplate.query(query, rs -> {
+                        String id = rs.getString("record_identifier");
+                        String hash = rs.getString("payload_hash");
+                        int ver = rs.getInt("max_ver");
+                        if (id != null) {
+                            existingMap.put(ent + ":" + id, new ExistingDeltaInfo(hash, ver));
+                        }
+                    }, params.toArray());
+                } catch (Exception ex) {
+                    log.debug("Batch delta lookup notice: {}", ex.getMessage());
+                }
+            }
+        }
+
+        for (StagingXmlRecord r : records) {
+            String ent = r.getEntityType() != null ? r.getEntityType() : entityType;
+            String id = r.getRecordIdentifier();
+            String lookupKey = (id != null) ? ent + ":" + id : null;
+            ExistingDeltaInfo existing = (lookupKey != null) ? existingMap.get(lookupKey) : null;
+            int currentVer = r.getVersionNumber() != null ? r.getVersionNumber() : 1;
+
+            if (existing != null) {
+                if (existing.payloadHash != null && existing.payloadHash.equals(r.getPayloadHash())) {
+                    r.setStatus("SKIPPED_UNCHANGED");
+                    skipped++;
+                } else {
+                    if (existing.latestVersion >= currentVer) {
+                        currentVer = existing.latestVersion + 1;
+                    }
+                    r.setStatus("STAGED");
+                    r.setVersionNumber(currentVer);
+                    staged++;
+                    String normRoot = ent.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                    String flatName = normRoot.endsWith("_flat") ? normRoot : normRoot + "_flat";
+                    tableCounts.merge(flatName, 1L, Long::sum);
+                    existingMap.put(lookupKey, new ExistingDeltaInfo(r.getPayloadHash(), currentVer));
+                }
+            } else {
+                r.setStatus("STAGED");
+                r.setVersionNumber(currentVer);
+                staged++;
+                String normRoot = ent.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                String flatName = normRoot.endsWith("_flat") ? normRoot : normRoot + "_flat";
+                tableCounts.merge(flatName, 1L, Long::sum);
+                if (lookupKey != null) {
+                    existingMap.put(lookupKey, new ExistingDeltaInfo(r.getPayloadHash(), currentVer));
+                }
+            }
+        }
+
+        return new long[]{staged, skipped};
+    }
+
     public static String computeSha256(String data) {
         if (data == null) return "";
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            MessageDigest digest = SHA256_DIGEST.get();
+            digest.reset();
             byte[] hash = digest.digest(data.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hexString = new StringBuilder();
-            for (byte b : hash) {
-                String hex = Integer.toHexString(0xff & b);
-                if (hex.length() == 1) hexString.append('0');
-                hexString.append(hex);
-            }
-            return hexString.toString();
+            return java.util.HexFormat.of().formatHex(hash);
         } catch (Exception e) {
             return String.valueOf(data.hashCode());
         }
@@ -1018,6 +1111,8 @@ public class StagingXmlStreamingService {
                 jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS schema_version VARCHAR(50)");
                 jdbcTemplate.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
                 jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)");
+                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_rec_id ON staging_xml_records(record_identifier)");
+                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_status_id ON staging_xml_records(status, id)");
             } catch (Exception ignored) {}
         } catch (Exception ex) {
             log.debug("Staging table creation check: {}", ex.getMessage());
@@ -1027,15 +1122,15 @@ public class StagingXmlStreamingService {
     private BufferedReader openReader(String path) throws Exception {
         Path direct = Paths.get(path);
         if (Files.exists(direct)) {
-            return Files.newBufferedReader(direct, StandardCharsets.UTF_8);
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(direct), StandardCharsets.UTF_8), 128 * 1024);
         }
         Resource res = resourceLoader.getResource(path);
         if (res.exists()) {
-            return new BufferedReader(new InputStreamReader(res.getInputStream(), StandardCharsets.UTF_8));
+            return new BufferedReader(new InputStreamReader(res.getInputStream(), StandardCharsets.UTF_8), 128 * 1024);
         }
         Path relative = Paths.get("/home/sv/Projects/xmldbtool", path);
         if (Files.exists(relative)) {
-            return Files.newBufferedReader(relative, StandardCharsets.UTF_8);
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(relative), StandardCharsets.UTF_8), 128 * 1024);
         }
         throw new IllegalArgumentException("Unable to find XML source file: " + path);
     }

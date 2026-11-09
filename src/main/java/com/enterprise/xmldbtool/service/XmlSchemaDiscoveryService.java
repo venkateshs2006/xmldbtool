@@ -256,7 +256,7 @@ public class XmlSchemaDiscoveryService {
             if (c != null) candidateSet.add(c.toLowerCase());
         }
 
-        // Read up to sampleLinesLimit into a memory buffer
+        // Read up to sampleLinesLimit into a memory buffer with a 10MB safety cap
         StringBuilder xmlSampleBuffer = new StringBuilder();
         try (BufferedReader reader = openReaderForSource(sourcePath)) {
             String line;
@@ -264,6 +264,9 @@ public class XmlSchemaDiscoveryService {
             while ((line = reader.readLine()) != null && count < sampleLinesLimit) {
                 xmlSampleBuffer.append(line).append("\n");
                 count++;
+                if (xmlSampleBuffer.length() > 10 * 1024 * 1024) {
+                    break;
+                }
             }
         }
 
@@ -426,8 +429,7 @@ public class XmlSchemaDiscoveryService {
                         textBuffer.setLength(0);
                     }
                 } catch (Exception streamEx) {
-                    // Reached end of truncated 1,000 lines buffer cleanly
-                    log.debug("Reached end of 1000 lines sample stream: {}", streamEx.getMessage());
+                    log.debug("Reached end of sample stream: {}", streamEx.getMessage());
                     break;
                 }
             }
@@ -1244,18 +1246,18 @@ public class XmlSchemaDiscoveryService {
 
         Path directPath = Paths.get(sourcePath);
         if (Files.exists(directPath)) {
-            return Files.newBufferedReader(directPath, StandardCharsets.UTF_8);
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(directPath), StandardCharsets.UTF_8), 128 * 1024);
         }
 
         Resource res = resourceLoader.getResource(sourcePath);
         if (res.exists()) {
-            return new BufferedReader(new InputStreamReader(res.getInputStream(), StandardCharsets.UTF_8));
+            return new BufferedReader(new InputStreamReader(res.getInputStream(), StandardCharsets.UTF_8), 128 * 1024);
         }
 
         // Try relative to workspace
         Path relativePath = Paths.get("/home/sv/Projects/xmldbtool", sourcePath);
         if (Files.exists(relativePath)) {
-            return Files.newBufferedReader(relativePath, StandardCharsets.UTF_8);
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(relativePath), StandardCharsets.UTF_8), 128 * 1024);
         }
 
         throw new IllegalArgumentException("Unable to locate XML source file: " + sourcePath);
