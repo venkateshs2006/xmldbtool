@@ -28,7 +28,7 @@ public class SavedJobConfig {
     private String lastRunAt;
     private String lastRunStatus;
     private Long lastJobExecutionId;
-    private Boolean stagedPipeline = false;
+    private Boolean stagedPipeline = true;
 
     public SavedJobConfig() {}
 

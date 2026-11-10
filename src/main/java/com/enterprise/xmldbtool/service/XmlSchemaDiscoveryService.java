@@ -1,6 +1,7 @@
 package com.enterprise.xmldbtool.service;
 
 import com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller;
+import com.enterprise.xmldbtool.model.DbConnectionConfig;
 import com.enterprise.xmldbtool.model.DiscoveredElement;
 import com.enterprise.xmldbtool.model.FieldMapping;
 import com.enterprise.xmldbtool.model.SchemaDiscoveryRequest;
@@ -80,6 +81,18 @@ public class XmlSchemaDiscoveryService {
                     ? resolveEffectiveMappings(request, rawXmlElements)
                     : Collections.emptyList();
 
+            if (request.isIngestionJsonMandatory() && (effectiveMappings == null || effectiveMappings.isEmpty())) {
+                response.setSuccess(false);
+                response.setMappingsValidated(false);
+                response.setMessage("Ingestion JSON file is mandatory. Automatic table creation based on raw XML tags is disabled to prevent schema confusion. Please provide ingestion.json (or specify ingestionJsonPath / mappingJson).");
+                return response;
+            }
+
+            // Validate all mapped columns against XML tags
+            if (effectiveMappings != null && !effectiveMappings.isEmpty()) {
+                validateMappingsAgainstXml(effectiveMappings, rawXmlElements, response);
+            }
+
             // 3. Filter discovered XML elements:
             // Show only the root tag, related attributes, child tag, child of child tag, grandchild of tags.
             // Also if user mentions any tags in mapping file, show those too, and ignore other tags!
@@ -92,7 +105,7 @@ public class XmlSchemaDiscoveryService {
             response.setDiscoveredXmlElements(filteredElements);
 
             // Re-generate dynamic mappings from filtered elements if no explicit user JSON mapping was provided
-            if (!hasUserMappings) {
+            if (!hasUserMappings && !request.isIngestionJsonMandatory()) {
                 effectiveMappings = generateDynamicMappings(request.getSourceXmlPath(), request.getRecordRootElements(), filteredElements);
             }
 
@@ -109,14 +122,15 @@ public class XmlSchemaDiscoveryService {
                                 request.getSourceXmlPath(),
                                 request.getRecordRootElements(),
                                 hasUserMappings ? filteredElements : rawXmlElements,
-                                hasUserMappings ? effectiveMappings : Collections.emptyList()
+                                hasUserMappings ? effectiveMappings : Collections.emptyList(),
+                                request.isIngestionJsonMandatory()
                         );
                         response.setCreatedTables(created);
                         response.setStagingTables(created.stream()
                                 .filter(t -> t.toLowerCase().endsWith("_stage") || t.equalsIgnoreCase("staging_xml_records"))
                                 .toList());
                         response.setCreatedFlatTables(created.stream()
-                                .filter(t -> t.toLowerCase().endsWith("_flat") || t.equalsIgnoreCase("staging_xml_records"))
+                                .filter(t -> t.toLowerCase().endsWith("_gs") || t.toLowerCase().endsWith("_flat") || t.equalsIgnoreCase("staging_xml_records"))
                                 .toList());
                     } else {
                         List<String> staging = provisioningService.ensureStagingTable(request.getDbConfig());
@@ -177,6 +191,17 @@ public class XmlSchemaDiscoveryService {
                     ? resolveEffectiveMappings(request, rawXmlElements)
                     : Collections.emptyList();
 
+            if (request.isIngestionJsonMandatory() && (effectiveMappings == null || effectiveMappings.isEmpty())) {
+                response.setSuccess(false);
+                response.setMappingsValidated(false);
+                response.setMessage("Ingestion JSON file is mandatory. Automatic table creation based on raw XML tags is disabled to prevent schema confusion. Please provide ingestion.json (or specify ingestionJsonPath / mappingJson).");
+                return response;
+            }
+
+            if (effectiveMappings != null && !effectiveMappings.isEmpty()) {
+                validateMappingsAgainstXml(effectiveMappings, rawXmlElements, response);
+            }
+
             List<DiscoveredElement> filteredElements = filterRelevantElements(
                     rawXmlElements,
                     request.getSourceXmlPath(),
@@ -185,7 +210,7 @@ public class XmlSchemaDiscoveryService {
             );
             response.setDiscoveredXmlElements(filteredElements);
 
-            if (!hasUserMappings) {
+            if (!hasUserMappings && !request.isIngestionJsonMandatory()) {
                 effectiveMappings = generateDynamicMappings(request.getSourceXmlPath(), request.getRecordRootElements(), filteredElements);
             }
 
@@ -200,14 +225,17 @@ public class XmlSchemaDiscoveryService {
                             request.getSourceXmlPath(),
                             request.getRecordRootElements(),
                             hasUserMappings ? filteredElements : rawXmlElements,
-                            hasUserMappings ? effectiveMappings : Collections.emptyList()
+                            hasUserMappings ? effectiveMappings : Collections.emptyList(),
+                            request.isIngestionJsonMandatory()
                     );
                     response.setCreatedTables(created);
                     response.setStagingTables(created.stream()
-                            .filter(t -> t.toLowerCase().endsWith("_stage") || t.equalsIgnoreCase("staging_xml_records"))
+                            .filter(t -> t.equalsIgnoreCase("gs_error_records") || t.equalsIgnoreCase("migration_errors"))
+                            .distinct()
                             .toList());
                     response.setCreatedFlatTables(created.stream()
-                            .filter(t -> t.toLowerCase().endsWith("_flat") || t.equalsIgnoreCase("staging_xml_records"))
+                            .filter(t -> (t.toLowerCase().startsWith("gs_") || t.toLowerCase().endsWith("_gs") || t.toLowerCase().endsWith("_flat")) && !t.equalsIgnoreCase("gs_error_records"))
+                            .distinct()
                             .toList());
                 }
                 List<TableMetadata> allTables = dataSourceService.retrieveDatabaseSchema(request.getDbConfig());
@@ -235,6 +263,13 @@ public class XmlSchemaDiscoveryService {
             response.setMessage("Table provisioning error: " + ex.getMessage());
         }
         return response;
+    }
+
+    /**
+     * Provisions a flat staging table like gs_<entityname> (prefix gs_, no suffix).
+     */
+    public List<String> createFlatTableForEntity(DbConnectionConfig config, String entityName, String sourceXmlPath) {
+        return provisioningService.createFlatTableForEntity(config, entityName, sourceXmlPath);
     }
 
     public static boolean isStagingTableName(String tableName) {
@@ -445,6 +480,15 @@ public class XmlSchemaDiscoveryService {
                 || (request.getIngestionJsonPath() != null && !request.getIngestionJsonPath().trim().isEmpty());
     }
 
+    public static String resolveDefaultIngestionJsonPath() {
+        for (String candidate : List.of("sample-data/ingestion.json", "ingestion.json")) {
+            if (Files.exists(Paths.get(candidate))) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
     /**
      * Resolves effective field mappings:
      * - Uses user ingest JSON file / mappings if provided.
@@ -472,10 +516,106 @@ public class XmlSchemaDiscoveryService {
             if (parsed != null && !parsed.isEmpty()) {
                 return parsed;
             }
+            // If explicit path was provided and failed, do not mask with default fallback
+            return Collections.emptyList();
         }
 
-        // 4. Fallback: Dynamically generate mappings by reading tags and attributes from XML
+        // 4. If mandatory and no explicit user mappings provided, return empty
+        if (request.isIngestionJsonMandatory()) {
+            return Collections.emptyList();
+        }
+
+        // 5. Default ingestion.json lookup if available (when not strictly mandatory)
+        String defaultJsonPath = resolveDefaultIngestionJsonPath();
+        if (defaultJsonPath != null) {
+            List<FieldMapping> parsed = loadMappingsFromFile(defaultJsonPath);
+            if (parsed != null && !parsed.isEmpty()) {
+                return parsed;
+            }
+        }
+
+        // 5. Fallback: Dynamically generate mappings by reading tags and attributes from XML
         return generateDynamicMappings(request.getSourceXmlPath(), request.getRecordRootElements(), xmlElements);
+    }
+
+    /**
+     * Validates that all mapped columns and XPaths in ingestion.json are present in the XML elements.
+     */
+    public void validateMappingsAgainstXml(List<FieldMapping> mappings, List<DiscoveredElement> xmlElements, SchemaDiscoveryResponse response) {
+        if (response == null) return;
+        if (mappings == null || mappings.isEmpty()) {
+            response.setMappingsValidated(false);
+            response.setValidationMessage("No mappings provided to validate against XML.");
+            return;
+        }
+
+        Set<String> discoveredTags = new HashSet<>();
+        Set<String> discoveredAttrs = new HashSet<>();
+        if (xmlElements != null) {
+            for (DiscoveredElement el : xmlElements) {
+                String name = el.getName();
+                if (name != null) {
+                    String norm = name.trim().toLowerCase();
+                    discoveredTags.add(norm);
+                    if (norm.startsWith("/")) discoveredTags.add(norm.substring(1));
+                    int lastSlash = norm.lastIndexOf('/');
+                    if (lastSlash >= 0) {
+                        discoveredTags.add(norm.substring(lastSlash + 1));
+                    }
+                    if (el.isAttribute()) {
+                        String attrOnly = norm.replaceFirst(".*@", "@");
+                        discoveredAttrs.add(attrOnly);
+                    }
+                }
+            }
+        }
+
+        List<String> validated = new ArrayList<>();
+        List<String> missing = new ArrayList<>();
+
+        for (FieldMapping m : mappings) {
+            String field = m.getXmlField();
+            if (field == null || field.trim().isEmpty()) continue;
+            String normField = field.trim().toLowerCase();
+            if (normField.startsWith("/")) normField = normField.substring(1);
+
+            boolean matchFound = discoveredTags.contains(normField);
+
+            if (!matchFound) {
+                int lastSlash = normField.lastIndexOf('/');
+                String leaf = (lastSlash >= 0) ? normField.substring(lastSlash + 1) : normField;
+                if (leaf.startsWith("@") && (discoveredAttrs.contains(leaf) || discoveredTags.contains(leaf))) {
+                    matchFound = true;
+                } else if (discoveredTags.contains(leaf)) {
+                    matchFound = true;
+                } else {
+                    for (String d : discoveredTags) {
+                        if (d.endsWith("/" + leaf) || d.equals(normField) || d.endsWith(normField)) {
+                            matchFound = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            String fieldDesc = m.getXmlField() + " -> " + m.getTargetTable() + "." + m.getTargetColumn();
+            if (matchFound) {
+                validated.add(fieldDesc);
+            } else {
+                missing.add(fieldDesc);
+            }
+        }
+
+        response.setValidatedXmlFields(validated);
+        response.setMissingXmlFields(missing);
+
+        if (missing.isEmpty()) {
+            response.setMappingsValidated(true);
+            response.setValidationMessage("Validation successful: All " + validated.size() + " mapping column(s) are present in XML tags.");
+        } else {
+            response.setMappingsValidated(false);
+            response.setValidationMessage("Validation failed: " + missing.size() + " mapping column(s) not found in XML tags: " + missing);
+        }
     }
 
     /**

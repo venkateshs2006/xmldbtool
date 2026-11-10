@@ -10,6 +10,8 @@ import com.enterprise.xmldbtool.model.DiscoveredElement;
 import com.enterprise.xmldbtool.model.FieldMapping;
 import com.enterprise.xmldbtool.model.DbConnectionConfig;
 import com.enterprise.xmldbtool.model.DbTestResponse;
+import com.enterprise.xmldbtool.model.JobLaunchRequest;
+import com.enterprise.xmldbtool.model.JobLaunchResponse;
 import com.enterprise.xmldbtool.service.DynamicBatchJobService;
 import com.enterprise.xmldbtool.service.DynamicDataSourceService;
 import com.enterprise.xmldbtool.service.DynamicSchemaResolutionService;
@@ -1950,9 +1952,9 @@ class DynamicXmlIngestionTest {
 
         // Clean staging and flat tables for isolated test verification
         jdbc.execute("DELETE FROM staging_xml_records");
-        try { jdbc.execute("DELETE FROM person_flat"); } catch (Exception ignored) {}
-        try { jdbc.execute("DELETE FROM countryname_flat"); } catch (Exception ignored) {}
-        try { jdbc.execute("DELETE FROM occupation_flat"); } catch (Exception ignored) {}
+        for (String tbl : List.of("gs_person", "person_gs", "person_flat", "gs_countryname", "countryname_gs", "countryname_flat", "gs_occupation", "occupation_gs", "occupation_flat")) {
+            try { jdbc.execute("DELETE FROM " + tbl); } catch (Exception ignored) {}
+        }
 
         // Stream XML with XML version and Schema version
         String xmlVersion = "202206192200";
@@ -2014,9 +2016,9 @@ class DynamicXmlIngestionTest {
 
         // Clean tables for isolated delta test
         jdbc.execute("DELETE FROM staging_xml_records");
-        try { jdbc.execute("DELETE FROM person_flat"); } catch (Exception ignored) {}
-        try { jdbc.execute("DELETE FROM Person"); } catch (Exception ignored) {}
-        try { jdbc.execute("DELETE FROM PersonName"); } catch (Exception ignored) {}
+        for (String tbl : List.of("gs_person", "person_gs", "person_flat", "Person", "PersonName")) {
+            try { jdbc.execute("DELETE FROM " + tbl); } catch (Exception ignored) {}
+        }
 
         // Stream initial feed
         stagingStreamingService.streamXmlToStaging(
@@ -3221,6 +3223,751 @@ class DynamicXmlIngestionTest {
             return true;
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    @Test
+    void testJava21VirtualMultiThreadingDataLoad() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:vthread_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(ds);
+
+        // Stream XML using Java 21 Virtual Threads
+        com.enterprise.xmldbtool.service.StagingXmlStreamingService.StagingSummary summary =
+                stagingStreamingService.streamXmlToStaging(
+                        "sample-data/pfa-sample.xml",
+                        List.of("Person"),
+                        "v1.0",
+                        "v1.0.0",
+                        77701L,
+                        ds,
+                        10
+                );
+
+        assertNotNull(summary);
+        assertTrue(summary.stagedCount() > 0, "Virtual threading streaming must stage records");
+        assertEquals(0, summary.failedCount(), "Zero failures expected with virtual thread ingestion");
+
+        Integer stagedInDb = jt.queryForObject("SELECT COUNT(*) FROM staging_xml_records WHERE job_execution_id = 77701", Integer.class);
+        assertEquals(summary.stagedCount(), stagedInDb.longValue());
+    }
+
+    @Test
+    void testMandatoryIngestionJsonEnforcementAndNoXmlTableGuessing() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:mand_json_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        // 1. Without ingestion.json and ingestionJsonMandatory = true, discovery must fail and not guess tables
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest req = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        req.setDbConfig(config);
+        req.setSourceXmlPath("sample-data/large-sample.xml");
+        req.setIngestionJsonMandatory(true);
+        req.setMappings(Collections.emptyList());
+        req.setMappingJson("");
+        req.setIngestionJsonPath("non-existent-ingestion.json");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse resp = discoveryService.discoverSchema(req);
+        assertFalse(resp.isSuccess(), "Schema discovery must fail when mandatory ingestion.json is missing");
+        assertFalse(resp.isMappingsValidated());
+        assertTrue(resp.getMessage().contains("mandatory"), "Error message must declare ingestion.json is mandatory");
+
+        // Verify no canonical tables were provisioned based on raw XML guessing
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(dataSourceService.getOrCreateDataSource(config));
+        Integer tableCount = jt.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'PUBLIC' AND table_name NOT IN ('STAGING_XML_RECORDS')",
+                Integer.class
+        );
+        assertEquals(0, tableCount != null ? tableCount : 0, "No tables should be created based on raw XML heuristics");
+    }
+
+    @Test
+    void testIngestionJsonColumnValidationAgainstXmlTags() throws Exception {
+        // 1. Valid mappings: columns exist in XML
+        List<FieldMapping> validMappings = List.of(
+                new FieldMapping("person/@id", "Person", "person_id", "PK", "NONE"),
+                new FieldMapping("person/name", "Person", "name", "NONE", "NONE"),
+                new FieldMapping("person/age", "Person", "age", "NONE", "NONE")
+        );
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest validReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        validReq.setSourceXmlPath("sample-data/test.xml");
+        validReq.setRecordRootElement("person");
+        validReq.setMappings(validMappings);
+        validReq.setAutoCreateTables(false);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse validResp = discoveryService.discoverSchema(validReq);
+        assertTrue(validResp.isSuccess());
+        assertTrue(validResp.isMappingsValidated(), "Mappings should validate successfully against XML elements");
+        assertTrue(validResp.getMissingXmlFields().isEmpty(), "No missing XML fields expected");
+        assertEquals(3, validResp.getValidatedXmlFields().size());
+
+        // 2. Invalid mappings: unmapped bogus tag not in XML
+        List<FieldMapping> invalidMappings = List.of(
+                new FieldMapping("person/@id", "Person", "person_id", "PK", "NONE"),
+                new FieldMapping("person/non_existent_xml_tag", "Person", "bogus_col", "NONE", "NONE")
+        );
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest invalidReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        invalidReq.setSourceXmlPath("sample-data/test.xml");
+        invalidReq.setRecordRootElement("person");
+        invalidReq.setMappings(invalidMappings);
+        invalidReq.setAutoCreateTables(false);
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse invalidResp = discoveryService.discoverSchema(invalidReq);
+        assertFalse(invalidResp.isMappingsValidated(), "Validation must fail when mapping column is missing in XML tags");
+        assertFalse(invalidResp.getMissingXmlFields().isEmpty(), "Missing fields must capture the invalid column");
+        assertTrue(invalidResp.getMissingXmlFields().get(0).contains("non_existent_xml_tag"));
+        assertTrue(invalidResp.getValidationMessage().contains("Validation failed"));
+    }
+
+    @Test
+    void testFlattenedTablesUseGsSuffixGoingForward() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:gs_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        // Discovery & Provisioning
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest req = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        req.setDbConfig(config);
+        req.setSourceXmlPath("sample-data/test.xml");
+        req.setRecordRootElement("person");
+        req.setAutoCreateTables(true);
+        req.setMappings(List.of(
+                new FieldMapping("person/@id", "Person", "id", "PK", "NONE"),
+                new FieldMapping("person/name", "Person", "name", "NONE", "NONE")
+        ));
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryResponse resp = discoveryService.discoverSchema(req);
+        assertTrue(resp.isSuccess());
+
+        // Verify _gs flattened table is created
+        assertTrue(resp.getCreatedTables().stream().anyMatch(t -> t.equalsIgnoreCase("person_gs")),
+                "Must create flattened table with _gs suffix: person_gs");
+        assertTrue(resp.getCreatedFlatTables().stream().anyMatch(t -> t.equalsIgnoreCase("person_gs")),
+                "Created flat tables list must include person_gs");
+
+        javax.sql.DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(ds);
+
+        // Verify person_gs table columns in H2
+        List<Map<String, Object>> cols = jt.queryForList(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'PERSON_GS'"
+        );
+        assertFalse(cols.isEmpty(), "person_gs columns must exist in database");
+        Set<String> colNames = cols.stream().map(c -> String.valueOf(c.get("COLUMN_NAME")).toLowerCase()).collect(java.util.stream.Collectors.toSet());
+        assertTrue(colNames.contains("id"));
+        assertTrue(colNames.contains("bnpp_id"));
+        assertTrue(colNames.contains("tag_name"));
+        assertTrue(colNames.contains("payload_hash"));
+        assertTrue(colNames.contains("raw_payload"));
+
+        // Stream records and verify person_gs gets populated
+        stagingStreamingService.streamXmlToStaging(
+                "sample-data/test.xml",
+                List.of("person"),
+                "v1.0",
+                "v1.0.0",
+                88801L,
+                ds,
+                50
+        );
+
+        Integer gsCount = jt.queryForObject("SELECT COUNT(*) FROM person_gs", Integer.class);
+        assertNotNull(gsCount);
+        assertTrue(gsCount > 0, "person_gs flattened table must be populated with streamed records");
+
+        // Stage 2 Normalization: verify normalization reads from person_gs
+        com.enterprise.xmldbtool.service.DynamicSchemaResolutionService.NormalizationSummary norm =
+                schemaResolutionService.normalizeStagingToCanonical(
+                        88801L,
+                        ds,
+                        req.getMappings(),
+                        List.of("Person"),
+                        "Person",
+                        50
+                );
+        assertNotNull(norm);
+        assertTrue(norm.normalizedCount() > 0, "Normalization must project from person_gs into Person table");
+
+        Integer canonicalCount = jt.queryForObject("SELECT COUNT(*) FROM Person", Integer.class);
+        assertEquals(gsCount, canonicalCount, "Canonical Person count must match person_gs record count");
+    }
+
+    @Test
+    @DisplayName("Verify job start verifies DB connection and tables, provisioning strictly from job config")
+    void testJobLaunchVerifiesDbConnectionAndTablesPresentAndAutoProvisionsFromJobConfig() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:jobstart_test_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(ds);
+
+        // Ensure clean state: drop gs_person and canonical table
+        try { jt.execute("DROP TABLE IF EXISTS gs_person CASCADE"); } catch (Exception ignored) {}
+        try { jt.execute("DROP TABLE IF EXISTS PersonJobConfigTest CASCADE"); } catch (Exception ignored) {}
+
+        // Build JobLaunchRequest with mappings from job config
+        JobLaunchRequest request = new JobLaunchRequest();
+        request.setDbConfig(config);
+        request.setSourceXmlPath("sample-data/test.xml");
+        request.setRecordRootElement("person");
+        request.setRecordRootElements(List.of("person"));
+        request.setMappings(List.of(
+                new FieldMapping("person/@id", "PersonJobConfigTest", "person_id", "NONE", "PK"),
+                new FieldMapping("person/name", "PersonJobConfigTest", "name", "NONE", "NONE"),
+                new FieldMapping("person/age", "PersonJobConfigTest", "age", "NONE", "NONE")
+        ));
+
+        // Call verifyAndEnsureDatabaseAndTables on job start
+        javax.sql.DataSource verifiedDs = batchJobService.verifyAndEnsureDatabaseAndTables(request, List.of("person"));
+        assertNotNull(verifiedDs, "Verified DataSource must not be null");
+
+        try (java.sql.Connection conn = verifiedDs.getConnection()) {
+            assertTrue(conn.isValid(5), "Target DB connection must be verified and active");
+        }
+
+        // Verify flat table with gs_ prefix and no suffix was auto-provisioned
+        Integer gsPersonCount = jt.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'GS_PERSON'", Integer.class
+        );
+        assertEquals(1, gsPersonCount, "Flat table gs_person must be created on job start");
+
+        // Verify canonical table from job config was auto-provisioned
+        Integer canonicalTblCount = jt.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'PERSONJOBCONFIGTEST'", Integer.class
+        );
+        assertEquals(1, canonicalTblCount, "Canonical table from job config must be created on job start");
+
+        // Verify NO heuristic canonical tables dynamically guessed from XML tags (e.g. unmapped sub-elements) were created
+        Integer unmappedGuessCount = jt.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'TEST_XML_UNMAPPED'", Integer.class
+        );
+        assertEquals(0, unmappedGuessCount, "No tables should be created based on raw XML heuristics");
+    }
+
+    @Test
+    @DisplayName("Verify flat tables use prefix gs_ without suffix and store raw XML payload")
+    void testFlatTablesPrefixGsWithoutSuffixAndStoreRawXml() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:gsprefix_test_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(ds);
+
+        // Provision schema for person and country
+        provisioningService.provisionDiscoveredTables(config, "sample-data/test.xml", List.of("person", "country"), Collections.emptyList());
+
+        // Verify flat table names start with gs_ and have NO suffix (no _flat, no _gs)
+        List<Map<String, Object>> gsTables = jt.queryForList(
+                "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'GS_%'"
+        );
+        Set<String> tableNames = gsTables.stream()
+                .map(m -> String.valueOf(m.get("TABLE_NAME")).toLowerCase())
+                .collect(java.util.stream.Collectors.toSet());
+
+        assertTrue(tableNames.contains("gs_person"), "Flat table must have prefix gs_ and no suffix: gs_person");
+        assertTrue(tableNames.contains("gs_country"), "Flat table must have prefix gs_ and no suffix: gs_country");
+
+        // Stream records and verify raw_payload in gs_person stores raw XML fragment
+        stagingStreamingService.streamXmlToStaging(
+                "sample-data/test.xml",
+                List.of("person"),
+                "v1.0",
+                "v1.0.0",
+                77701L,
+                ds,
+                50
+        );
+
+        Map<String, Object> row = jt.queryForMap("SELECT * FROM gs_person WHERE job_execution_id = 77701 LIMIT 1");
+        assertNotNull(row, "Record must exist in gs_person flat table");
+        assertNotNull(row.get("raw_payload"), "Flat table must store raw_payload");
+        String rawPayload = String.valueOf(row.get("raw_payload"));
+        assertTrue(rawPayload.contains("person") || rawPayload.contains("id"), "raw_payload must store the raw XML content/structure");
+        assertNotNull(row.get("payload_hash"), "payload_hash must be present for delta tracking");
+        assertNotNull(row.get("bnpp_id"), "bnpp_id must be populated");
+        assertEquals("person", String.valueOf(row.get("tag_name")).toLowerCase());
+    }
+
+    @Test
+    @DisplayName("Verify canonical table data is clean format (no XML, no JSON) and reference tables store reference ID")
+    void testCanonicalTableDataCleanFormatAndReferenceTableReferenceId() throws Exception {
+        // 1. Verify cleanDataFormat strips XML tags
+        String xmlFragment = "<detail><note>Critical Flag</note><priority>1</priority></detail>";
+        Object cleanXml = com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor.cleanDataFormat(xmlFragment);
+        assertEquals("Critical Flag 1", cleanXml, "Canonical data must strip all XML tags to clean scalar text");
+
+        // 2. Verify cleanDataFormat cleans JSON formatting
+        String jsonFragment = "{\"code\": \"US\", \"name\": \"United States\"}";
+        Object cleanJson = com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor.cleanDataFormat(jsonFragment);
+        assertFalse(cleanJson.toString().contains("{"), "Canonical data must not contain JSON curly braces");
+        assertFalse(cleanJson.toString().contains("}"), "Canonical data must not contain JSON curly braces");
+        assertFalse(cleanJson.toString().contains("\""), "Canonical data must not contain JSON quotes");
+
+        // 3. Verify cleanDataFormat with JSON array
+        String jsonArray = "[\"Tier1\", \"HighRisk\"]";
+        Object cleanArray = com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor.cleanDataFormat(jsonArray);
+        assertEquals("Tier1, HighRisk", cleanArray, "Canonical data must extract clean scalar values from JSON array");
+
+        // 4. Verify cleanDataFormat preserves already clean scalar values
+        assertEquals("Clean Text Value", com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor.cleanDataFormat("Clean Text Value"));
+        assertEquals(42, com.enterprise.xmldbtool.batch.DynamicXmlItemProcessor.cleanDataFormat(42));
+
+        // 5. Verify reference tables store parent reference ID (clean scalar parent ID)
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("Person/@id", "Person", "person_id", "NONE", "PK"),
+                new FieldMapping("Person/Name", "Person", "name", "NONE", "NONE"),
+                new FieldMapping("Person/Address/Street", "PersonAddress", "street", "NONE", "NONE"),
+                new FieldMapping("Person/Address/City", "PersonAddress", "city", "NONE", "NONE"),
+                new FieldMapping("Person/@id", "PersonAddress", "person_id", "NONE", "FK")
+        );
+
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor(
+                "Person",
+                mappings,
+                Collections.emptyMap(),
+                List.of("Person", "PersonAddress")
+        );
+
+        Map<String, Object> inputRecord = new LinkedHashMap<>();
+        inputRecord.put("id", "10099");
+        inputRecord.put("name", "<name>John Doe</name>"); // intentionally with embedded XML tag
+        inputRecord.put("_entities_personaddress", List.of(
+                Map.of("street", "<street>100 Main Street</street>", "city", "New York")
+        ));
+
+        DatabaseRowPayload payload = processor.process(inputRecord);
+        assertNotNull(payload);
+        assertNotNull(payload.getMultiTableRecords());
+
+        // Master Person record: name should be clean (no XML tags)
+        List<Map<String, Object>> personRows = payload.getMultiTableRecords().get("Person");
+        assertNotNull(personRows);
+        assertEquals(1, personRows.size());
+        assertEquals("John Doe", personRows.get(0).get("name"), "Canonical table must have clean data with XML tags stripped");
+
+        // Child PersonAddress record (reference table): must contain clean parent reference ID (person_id)
+        List<Map<String, Object>> addressRows = payload.getMultiTableRecords().get("PersonAddress");
+        assertNotNull(addressRows);
+        assertEquals(1, addressRows.size());
+        Map<String, Object> addrRow = addressRows.get(0);
+
+        // street should be clean (no XML tags)
+        assertEquals("100 Main Street", addrRow.get("street"), "Canonical child data must have XML tags stripped");
+        assertEquals("New York", addrRow.get("city"));
+
+        // Reference column person_id must be populated with parent reference ID
+        assertEquals("10099", String.valueOf(addrRow.get("person_id")), "Reference table must store parent reference ID");
+        assertFalse(String.valueOf(addrRow.get("person_id")).contains("<"), "Reference ID must be clean scalar, not XML");
+        assertFalse(String.valueOf(addrRow.get("person_id")).contains("{"), "Reference ID must be clean scalar, not JSON");
+    }
+
+    @Test
+    @DisplayName("Verify createFlatTableForEntity creates dedicated flat table gs_<entityname> without suffix")
+    void testCreateFlatTableForEntityDirectly() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:createflat_test_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        // Explicitly create flat table for entity "Customer"
+        List<String> created = provisioningService.createFlatTableForEntity(config, "Customer", "sample-data/test.xml");
+        assertNotNull(created);
+        assertTrue(created.stream().anyMatch(t -> t.equalsIgnoreCase("gs_customer")),
+                "Must create flat table named gs_customer");
+
+        javax.sql.DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(ds);
+
+        // Verify table structure in H2
+        List<Map<String, Object>> cols = jt.queryForList(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'GS_CUSTOMER'"
+        );
+        assertFalse(cols.isEmpty(), "Columns for gs_customer must exist in DB");
+        Set<String> colNames = cols.stream().map(c -> String.valueOf(c.get("COLUMN_NAME")).toLowerCase()).collect(java.util.stream.Collectors.toSet());
+        assertTrue(colNames.contains("id"));
+        assertTrue(colNames.contains("bnpp_id"));
+        assertTrue(colNames.contains("tag_name"));
+        assertTrue(colNames.contains("version_number"));
+        assertTrue(colNames.contains("status"));
+        assertTrue(colNames.contains("raw_payload"));
+        assertTrue(colNames.contains("payload_hash"));
+    }
+
+    @Test
+    @DisplayName("Verify fastSkipFragment skips exactly one record fragment without consuming subsequent records")
+    void testFastSkipFragmentSingleRecord() throws Exception {
+        String xml = """
+                <records>
+                    <person id="1"><name>Alice</name></person>
+                    <person id="2"><name>Bob</name></person>
+                    <person id="3"><name>Charlie</name></person>
+                </records>
+                """;
+        javax.xml.stream.XMLInputFactory factory = javax.xml.stream.XMLInputFactory.newInstance();
+        javax.xml.stream.XMLEventReader reader = factory.createXMLEventReader(new java.io.StringReader(xml));
+
+        // Advance to first person
+        while (reader.hasNext()) {
+            javax.xml.stream.events.XMLEvent ev = reader.peek();
+            if (ev.isStartElement() && ev.asStartElement().getName().getLocalPart().equals("person")) {
+                break;
+            }
+            reader.nextEvent();
+        }
+
+        // Use reflection to invoke private fastSkipFragment
+        java.lang.reflect.Method skipMethod = com.enterprise.xmldbtool.service.StagingXmlStreamingService.class.getDeclaredMethod("fastSkipFragment", javax.xml.stream.XMLEventReader.class, String.class);
+        skipMethod.setAccessible(true);
+        skipMethod.invoke(stagingStreamingService, reader, "person");
+
+        // After skipping person #1, next start element should be person #2 (NOT end of document)
+        boolean foundPerson2 = false;
+        while (reader.hasNext()) {
+            javax.xml.stream.events.XMLEvent ev = reader.peek();
+            if (ev.isStartElement() && ev.asStartElement().getName().getLocalPart().equals("person")) {
+                foundPerson2 = true;
+                break;
+            }
+            reader.nextEvent();
+        }
+        assertTrue(foundPerson2, "After skipping person #1, reader must be positioned at person #2, not consumed to EOF");
+    }
+
+    @Test
+    @DisplayName("Verify resuming job does not delete flat or canonical data and resumes from checkpoint")
+    void testResumeJobDoesNotDeleteDataAndResumesFromCheckpoint() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:resume_test_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(ds);
+
+        // Provision flat table and canonical table
+        jt.execute("CREATE TABLE IF NOT EXISTS gs_person (" +
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                "job_execution_id BIGINT, bnpp_id VARCHAR(64), tag_name VARCHAR(100), " +
+                "version_number INT DEFAULT 1, record_identifier VARCHAR(100), " +
+                "record_action VARCHAR(50), record_date VARCHAR(50), xml_version VARCHAR(50), " +
+                "schema_version VARCHAR(50), payload_hash VARCHAR(64), status VARCHAR(30) DEFAULT 'STAGED', " +
+                "raw_payload TEXT, extra_attributes TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+
+        jt.execute("CREATE TABLE IF NOT EXISTS Person (" +
+                "person_id VARCHAR(100) PRIMARY KEY, " +
+                "name VARCHAR(255), " +
+                "active_status VARCHAR(50))");
+
+        // Seed 3 records in flat table: records 1 and 2 already normalized, record 3 STAGED
+        jt.execute("DELETE FROM Person");
+        jt.execute("DELETE FROM gs_person");
+
+        jt.update("INSERT INTO Person (person_id, name, active_status) VALUES ('P1', 'Alice', 'Active')");
+        jt.update("INSERT INTO Person (person_id, name, active_status) VALUES ('P2', 'Bob', 'Active')");
+
+        jt.update("INSERT INTO gs_person (job_execution_id, record_identifier, status, raw_payload) VALUES (101, 'P1', 'NORMALIZED', '{\"@id\":\"P1\",\"name\":\"Alice\",\"active_status\":\"Active\"}')");
+        jt.update("INSERT INTO gs_person (job_execution_id, record_identifier, status, raw_payload) VALUES (101, 'P2', 'NORMALIZED', '{\"@id\":\"P2\",\"name\":\"Bob\",\"active_status\":\"Active\"}')");
+        jt.update("INSERT INTO gs_person (job_execution_id, record_identifier, status, raw_payload) VALUES (101, 'P3', 'STAGED', '{\"@id\":\"P3\",\"name\":\"Charlie\",\"active_status\":\"Active\"}')");
+
+        // Seed checkpoint for job 101: Stage 1 completed (3 records streamed), 2 normalized, stopped during Stage 2
+        stagingStreamingService.ensureCheckpointTableExists(jt);
+        stagingStreamingService.saveOrUpdateCheckpoint(jt, 101L, "stagedXmlPipelineJob_101",
+                "sample-data/synthetic_complex_pfa.xml", "STAGE_1_COMPLETED", 3, 2, "P2", "person", "STOPPED");
+
+        // Prepare resume request
+        JobLaunchRequest launchReq = new JobLaunchRequest();
+        launchReq.setSourceXmlPath("sample-data/synthetic_complex_pfa.xml");
+        launchReq.setRecordRootElement("person");
+        launchReq.setTargetTable("Person");
+        launchReq.setDbConfig(config);
+        launchReq.setResumeFromJobExecutionId(101L);
+        launchReq.setResumeFromCheckpoint(true);
+        launchReq.setRetryFailedRecords(true);
+        launchReq.setStagedPipeline(true);
+        launchReq.setMappings(List.of(
+                new FieldMapping("@id", "Person", "person_id", "PK"),
+                new FieldMapping("name", "Person", "name", "NONE"),
+                new FieldMapping("active_status", "Person", "active_status", "NONE")
+        ));
+
+        // Launch resume job
+        JobLaunchResponse response = batchJobService.launchStagedPipelineJob(launchReq);
+        assertNotNull(response);
+        assertTrue(response.isSuccess());
+
+        // Wait for asynchronous job completion
+        Long execId = response.getJobExecutionId();
+        assertNotNull(execId);
+        long deadline = System.currentTimeMillis() + 10000;
+        while (System.currentTimeMillis() < deadline) {
+            com.enterprise.xmldbtool.model.JobTelemetryResponse telemetry = batchJobService.getJobTelemetry(execId);
+            if (telemetry != null && ("COMPLETED".equals(telemetry.getStatus()) || "FAILED".equals(telemetry.getStatus()))) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+
+        // Verify: P1 and P2 in canonical table Person were NOT deleted!
+        Integer personCount = jt.queryForObject("SELECT COUNT(*) FROM Person", Integer.class);
+        assertEquals(3, personCount, "All 3 persons must exist in canonical table (P1 and P2 not deleted, P3 added)");
+
+        // Verify: P3 was normalized without deleting P1 or P2 from gs_person
+        Integer stagedRemaining = jt.queryForObject("SELECT COUNT(*) FROM gs_person WHERE status = 'STAGED'", Integer.class);
+        assertEquals(0, stagedRemaining, "All staged records must now be normalized");
+
+        Integer normalizedTotal = jt.queryForObject("SELECT COUNT(*) FROM gs_person WHERE status = 'NORMALIZED'", Integer.class);
+        assertEquals(3, normalizedTotal, "All 3 records in gs_person must be NORMALIZED");
+    }
+
+    @Test
+    @DisplayName("Verify resuming job stopped midway through Stage 1 fast-skips and does not delete already-streamed records")
+    void testResumeJobMidwayThroughStage1Streaming() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:resume_stage1_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(ds);
+
+        // Provision flat table and canonical table for country
+        jt.execute("CREATE TABLE IF NOT EXISTS gs_country (" +
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                "job_execution_id BIGINT, bnpp_id VARCHAR(64), tag_name VARCHAR(100), " +
+                "version_number INT DEFAULT 1, record_identifier VARCHAR(100), " +
+                "record_action VARCHAR(50), record_date VARCHAR(50), xml_version VARCHAR(50), " +
+                "schema_version VARCHAR(50), payload_hash VARCHAR(64), status VARCHAR(30) DEFAULT 'STAGED', " +
+                "raw_payload TEXT, extra_attributes TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+
+        jt.execute("CREATE TABLE IF NOT EXISTS Country (" +
+                "country_id VARCHAR(100) PRIMARY KEY, " +
+                "name VARCHAR(255))");
+
+        jt.execute("DELETE FROM Country");
+        jt.execute("DELETE FROM gs_country");
+
+        // Seed record 1 already streamed during the first run
+        jt.update("INSERT INTO gs_country (job_execution_id, record_identifier, status, raw_payload) VALUES (201, '1', 'STAGED', '{\"@id\":\"1\",\"name\":\"country1\"}')");
+
+        // Seed checkpoint for job 201: Stopped at record 1 during STAGE_1_STREAMING
+        stagingStreamingService.ensureCheckpointTableExists(jt);
+        stagingStreamingService.saveOrUpdateCheckpoint(jt, 201L, "stagedXmlPipelineJob_201",
+                "sample-data/test.xml", "STAGE_1_STREAMING", 1, 0, "1", "country", "STOPPED");
+
+        // Prepare resume request
+        JobLaunchRequest launchReq = new JobLaunchRequest();
+        launchReq.setSourceXmlPath("sample-data/test.xml");
+        launchReq.setRecordRootElement("country");
+        launchReq.setTargetTable("Country");
+        launchReq.setDbConfig(config);
+        launchReq.setResumeFromJobExecutionId(201L);
+        launchReq.setResumeFromCheckpoint(true);
+        launchReq.setRetryFailedRecords(true);
+        launchReq.setStagedPipeline(true);
+        launchReq.setMappings(List.of(
+                new FieldMapping("@id", "Country", "country_id", "PK"),
+                new FieldMapping("name", "Country", "name", "NONE")
+        ));
+
+        // Launch resume job
+        JobLaunchResponse response = batchJobService.launchStagedPipelineJob(launchReq);
+        assertNotNull(response);
+        assertTrue(response.isSuccess());
+
+        // Wait for asynchronous job completion
+        Long execId = response.getJobExecutionId();
+        assertNotNull(execId);
+        long deadline = System.currentTimeMillis() + 10000;
+        while (System.currentTimeMillis() < deadline) {
+            com.enterprise.xmldbtool.model.JobTelemetryResponse telemetry = batchJobService.getJobTelemetry(execId);
+            if (telemetry != null && ("COMPLETED".equals(telemetry.getStatus()) || "FAILED".equals(telemetry.getStatus()))) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+
+        // Verify: record 1 was NOT deleted from gs_country, and all records were processed
+        Integer flatCount = jt.queryForObject("SELECT COUNT(*) FROM gs_country", Integer.class);
+        assertTrue(flatCount >= 20, "gs_country must retain existing records and contain all streamed records");
+
+        // Verify all records in gs_country have reached NORMALIZED status
+        Integer unnormalizedCount = jt.queryForObject("SELECT COUNT(*) FROM gs_country WHERE status = 'STAGED'", Integer.class);
+        assertEquals(0, unnormalizedCount, "No STAGED records should remain unnormalized");
+
+        // Verify all canonical records present
+        Integer countryCount = jt.queryForObject("SELECT COUNT(*) FROM Country", Integer.class);
+        assertEquals(20, countryCount, "All 20 countries must be in canonical table");
+    }
+
+    @Test
+    void testCreateTablesRejectsWithoutIngestionJson() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:ingest_mand_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest req = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        req.setDbConfig(config);
+        req.setSourceXmlPath("sample-data/test.xml");
+        req.setRecordRootElement("country");
+        // No mappings provided (user did not upload or provide ingestion.json)
+
+        org.springframework.http.ResponseEntity<com.enterprise.xmldbtool.model.SchemaDiscoveryResponse> resp =
+                schemaDiscoveryController.createTables(req);
+
+        assertNotNull(resp);
+        assertEquals(org.springframework.http.HttpStatus.BAD_REQUEST, resp.getStatusCode());
+        assertFalse(resp.getBody().isSuccess());
+        assertTrue(resp.getBody().getMessage().contains("Ingestion JSON file is mandatory"),
+                "Message must require ingestion.json");
+    }
+
+    @Test
+    void testCreateTablesStrictlyFromIngestionJson() {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:ingest_mand_db2;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest req = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        req.setDbConfig(config);
+        req.setSourceXmlPath("sample-data/test.xml");
+        req.setRecordRootElement("country");
+        req.setMappings(List.of(
+                new FieldMapping("country/@id", "tbl_country_canonical", "id", "PK", "NONE"),
+                new FieldMapping("country/name", "tbl_country_canonical", "name", "NONE", "NONE")
+        ));
+
+        org.springframework.http.ResponseEntity<com.enterprise.xmldbtool.model.SchemaDiscoveryResponse> resp =
+                schemaDiscoveryController.createTables(req);
+
+        assertNotNull(resp);
+        assertEquals(org.springframework.http.HttpStatus.OK, resp.getStatusCode());
+        assertTrue(resp.getBody().isSuccess());
+        List<String> created = resp.getBody().getCreatedTables().stream().map(String::toLowerCase).toList();
+        assertTrue(created.contains("tbl_country_canonical"), "Canonical table from ingestion.json must be created");
+        assertTrue(created.contains("gs_country"), "Flat table gs_country must be created");
+    }
+
+    @Test
+    void testPfaSampleIngestionPopulatesAllCanonicalTables() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:pfa_canon_test;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jdbcTemplate = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        List<FieldMapping> mappings = List.of(
+                // Person master
+                new FieldMapping("Person/@id", "person", "person_id", "PK", "NONE"),
+                new FieldMapping("Person/@action", "person", "action", "NONE", "NONE"),
+                new FieldMapping("Person/@date", "person", "date", "NONE", "NONE"),
+                new FieldMapping("Person/Gender", "person", "gender", "NONE", "NONE"),
+                // occupation
+                new FieldMapping("Occupation/@code", "occupation", "code", "PK", "NONE"),
+                new FieldMapping("Occupation/@name", "occupation", "name", "NONE", "NONE"),
+                // relationship
+                new FieldMapping("Relationship/@code", "relationship", "code", "PK", "NONE"),
+                new FieldMapping("Relationship/@name", "relationship", "name", "NONE", "NONE"),
+                // sanctionsreference
+                new FieldMapping("ReferenceName/@code", "sanctionsreference", "code", "PK", "NONE"),
+                new FieldMapping("ReferenceName/@name", "sanctionsreference", "name", "NONE", "NONE"),
+                // personname
+                new FieldMapping("Person/NameDetails/Name/@NameType", "personname", "name_type", "NONE", "NONE"),
+                new FieldMapping("Person/NameDetails/Name/NameValue/FirstName", "personname", "first_name", "NONE", "NONE"),
+                new FieldMapping("Person/NameDetails/Name/NameValue/Surname", "personname", "surname", "NONE", "NONE"),
+                // persondate
+                new FieldMapping("Person/DateDetails/Date/@DateType", "persondate", "date_type", "NONE", "NONE"),
+                new FieldMapping("Person/DateDetails/Date/DateValue/@Day", "persondate", "day", "NONE", "NONE"),
+                new FieldMapping("Person/DateDetails/Date/DateValue/@Month", "persondate", "month", "NONE", "NONE"),
+                new FieldMapping("Person/DateDetails/Date/DateValue/@Year", "persondate", "year", "NONE", "NONE"),
+                // personrole
+                new FieldMapping("Person/RoleDetail/Roles/@RoleType", "personrole", "role_type", "NONE", "NONE"),
+                new FieldMapping("Person/RoleDetail/Roles/OccTitle", "personrole", "occ_title", "NONE", "NONE"),
+                // personcountry
+                new FieldMapping("Person/CountryDetails/Country/@CountryType", "personcountry", "country_type", "NONE", "NONE"),
+                new FieldMapping("Person/CountryDetails/Country/CountryValue/@Code", "personcountry", "code", "NONE", "NONE"),
+                // personidentification
+                new FieldMapping("Person/IDNumberTypes/ID/@IDType", "personidentification", "id_type", "NONE", "NONE"),
+                new FieldMapping("Person/IDNumberTypes/ID/IDValue", "personidentification", "id_value", "NONE", "NONE"),
+                // personimage
+                new FieldMapping("Person/Images/Image/@URL", "personimage", "url", "NONE", "NONE"),
+                // personsource
+                new FieldMapping("Person/SourceDescription/Source/@name", "personsource", "source_name", "NONE", "NONE")
+        );
+
+        List<String> roots = List.of("Person", "Occupation", "Relationship", "SanctionsReferencesList", "ReferenceName");
+
+        // 1. Provision tables
+        provisioningService.provisionDiscoveredTables(config, "sample-data/pfa-sample.xml", roots, Collections.emptyList(), mappings, false);
+
+        // 2. Stream to staging
+        stagingStreamingService.streamXmlToStaging("sample-data/pfa-sample.xml", roots, "v1.0", "v1.0.0", 301L, testDs, 100);
+
+        List<Map<String, Object>> allTablesInDb = jdbcTemplate.queryForList("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'PUBLIC'");
+        System.out.println("ALL DB TABLES: " + allTablesInDb);
+        for (Map<String, Object> row : allTablesInDb) {
+            String tName = (String) row.get("TABLE_NAME");
+            try {
+                long c = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tName, Long.class);
+                System.out.println("DEBUG TABLE " + tName + " row count = " + c);
+                if (tName.equalsIgnoreCase("GS_SANCTIONSREFERENCESLIST") && c > 0) {
+                    Map<String, Object> firstRow = jdbcTemplate.queryForMap("SELECT * FROM " + tName + " LIMIT 1");
+                    System.out.println("DEBUG GS_SANCTIONSREFERENCESLIST raw_payload: " + firstRow.get("raw_payload"));
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 3. Normalize to canonical
+        List<String> tableOrder = List.of("person", "occupation", "relationship", "sanctionsreference",
+                "personname", "persondate", "personrole", "personcountry", "personidentification", "personimage", "personsource");
+
+        DynamicSchemaResolutionService.NormalizationSummary normSummary = schemaResolutionService.normalizeStagingToCanonical(
+                301L, testDs, mappings, tableOrder, "person", 100
+        );
+
+        System.out.println("Normalized count: " + normSummary.normalizedCount() + ", failed: " + normSummary.failedCount());
+
+        for (String tbl : tableOrder) {
+            long count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tbl, Long.class);
+            System.out.println("Table " + tbl + " count = " + count);
+            assertTrue(count > 0, "Table '" + tbl + "' should NOT be empty! Current count: " + count);
         }
     }
 }

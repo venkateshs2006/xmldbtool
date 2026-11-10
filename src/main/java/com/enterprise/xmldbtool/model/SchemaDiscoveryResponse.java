@@ -61,6 +61,23 @@ public class SchemaDiscoveryResponse {
     public List<TableRelationship> getDiscoveredRelationships() { return discoveredRelationships; }
     public void setDiscoveredRelationships(List<TableRelationship> discoveredRelationships) { this.discoveredRelationships = discoveredRelationships; }
 
+    private boolean mappingsValidated = true;
+    private List<String> validatedXmlFields = new ArrayList<>();
+    private List<String> missingXmlFields = new ArrayList<>();
+    private String validationMessage;
+
+    public boolean isMappingsValidated() { return mappingsValidated; }
+    public void setMappingsValidated(boolean mappingsValidated) { this.mappingsValidated = mappingsValidated; }
+
+    public List<String> getValidatedXmlFields() { return validatedXmlFields; }
+    public void setValidatedXmlFields(List<String> validatedXmlFields) { this.validatedXmlFields = validatedXmlFields; }
+
+    public List<String> getMissingXmlFields() { return missingXmlFields; }
+    public void setMissingXmlFields(List<String> missingXmlFields) { this.missingXmlFields = missingXmlFields; }
+
+    public String getValidationMessage() { return validationMessage; }
+    public void setValidationMessage(String validationMessage) { this.validationMessage = validationMessage; }
+
     public List<String> getTableOrder() { return tableOrder; }
     public void setTableOrder(List<String> tableOrder) { this.tableOrder = tableOrder; }
 

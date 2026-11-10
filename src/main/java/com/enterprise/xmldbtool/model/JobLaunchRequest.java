@@ -13,8 +13,9 @@ public class JobLaunchRequest {
     private int chunkSize = 1000;
     private List<FieldMapping> mappings = new ArrayList<>();
     private String ingestMappingJson;
+    private String ingestionJsonPath;
     private List<String> tableOrder = new ArrayList<>();
-    private boolean stagedPipeline = false;
+    private boolean stagedPipeline = true;
     private Long resumeFromJobExecutionId;
     private boolean resumeFromCheckpoint = false;
     private boolean retryFailedRecords = true;
@@ -32,6 +33,9 @@ public class JobLaunchRequest {
 
     public String getIngestMappingJson() { return ingestMappingJson; }
     public void setIngestMappingJson(String ingestMappingJson) { this.ingestMappingJson = ingestMappingJson; }
+
+    public String getIngestionJsonPath() { return ingestionJsonPath; }
+    public void setIngestionJsonPath(String ingestionJsonPath) { this.ingestionJsonPath = ingestionJsonPath; }
 
     public DbConnectionConfig getDbConfig() { return dbConfig; }
     public void setDbConfig(DbConnectionConfig dbConfig) { this.dbConfig = dbConfig; }

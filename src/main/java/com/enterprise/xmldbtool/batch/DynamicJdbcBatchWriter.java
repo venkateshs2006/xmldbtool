@@ -362,6 +362,29 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                 continue;
             }
 
+            // Deduplicate within the batch to ensure PostgreSQL never encounters duplicate conflict keys in a single statement
+            Set<String> pkColumns = findPrimaryKeys(tableName, columnNames);
+            if (pkColumns != null && !pkColumns.isEmpty()) {
+                Map<String, MapSqlParameterSource> deduped = new LinkedHashMap<>();
+                for (MapSqlParameterSource param : batchParams) {
+                    StringBuilder keyBuilder = new StringBuilder();
+                    for (String pk : pkColumns) {
+                        Object val = param.hasValue(pk) ? param.getValue(pk) : null;
+                        if (val == null) {
+                            for (String paramName : param.getParameterNames()) {
+                                if (paramName.equalsIgnoreCase(pk)) {
+                                    val = param.getValue(paramName);
+                                    break;
+                                }
+                            }
+                        }
+                        keyBuilder.append(val != null ? String.valueOf(val) : "NULL").append("::");
+                    }
+                    deduped.put(keyBuilder.toString(), param);
+                }
+                batchParams = new ArrayList<>(deduped.values());
+            }
+
             // Ensure every parameter source contains an entry for all table columns in the statement
             for (MapSqlParameterSource paramSource : batchParams) {
                 for (String col : columnNames) {
@@ -412,12 +435,66 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             } catch (Exception ex) {
                 // If write failed because of a missing column from delta schema evolution, attempt self-healing ALTER TABLE and retry once
                 String exMsg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
-                if (exMsg.contains("value too long")) {
+                boolean isOracleDb = databaseProductName != null && databaseProductName.toLowerCase().contains("oracle");
+                Map<String, String> actualCols = getActualColumnNames(tableName);
+
+                if (exMsg.contains("invalid input syntax for type bigint") || exMsg.contains("invalid input syntax for integer")
+                        || exMsg.contains("invalid input syntax for type numeric")) {
+                    try {
+                        List<String> columnsToAlter = new ArrayList<>();
+                        if (this.dataSource != null) {
+                            try (Connection metaConn = this.dataSource.getConnection()) {
+                                DatabaseMetaData meta = metaConn.getMetaData();
+                                String schema = null;
+                                try { schema = metaConn.getSchema(); } catch (Throwable ignored) {}
+                                for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                                    try (ResultSet rs = meta.getColumns(null, schema, tName, null)) {
+                                        while (rs.next()) {
+                                            String cName = rs.getString("COLUMN_NAME");
+                                            int dType = rs.getInt("DATA_TYPE");
+                                            if (dType == java.sql.Types.BIGINT || dType == java.sql.Types.INTEGER
+                                                    || dType == java.sql.Types.NUMERIC || dType == java.sql.Types.SMALLINT) {
+                                                for (MapSqlParameterSource p : batchParams) {
+                                                    Object v = p.hasValue(cName) ? p.getValue(cName) : null;
+                                                    if (v instanceof String s && !s.trim().isEmpty() && !s.trim().matches("^-?\\d+(\\.\\d+)?$")) {
+                                                        columnsToAlter.add(cName);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (!columnsToAlter.isEmpty()) break;
+                                }
+                            }
+                        }
+                        if (!columnsToAlter.isEmpty()) {
+                            for (String colToAlter : columnsToAlter) {
+                                String quotedCol = quoteIdentifier(colToAlter, databaseProductName, actualCols);
+                                String alterSql = isOracleDb
+                                        ? "ALTER TABLE " + tableName + " MODIFY (" + quotedCol + " VARCHAR2(255))"
+                                        : "ALTER TABLE " + tableName + " ALTER COLUMN " + quotedCol + " TYPE VARCHAR(255) USING " + quotedCol + "::varchar";
+                                jdbcTemplate.getJdbcOperations().execute(alterSql);
+                                log.info("Self-healing: Expanded column '{}' in table '{}' to VARCHAR(255) due to non-numeric input data", colToAlter, tableName);
+                            }
+                            MapSqlParameterSource[] retryArray = batchParams.toArray(new MapSqlParameterSource[0]);
+                            int[] updateCounts = jdbcTemplate.batchUpdate(insertOrUpsertSql, retryArray);
+                            long writtenCount = updateCounts.length;
+                            totalRowsWritten.addAndGet(writtenCount);
+                            tableWriteCounts.compute(tableName, (k, v) -> (v == null ? 0L : v) + writtenCount);
+                            if (savepoint != null && conn != null) {
+                                try { conn.releaseSavepoint(savepoint); } catch (Exception ignored) {}
+                            }
+                            continue;
+                        }
+                    } catch (Exception retryEx) {
+                        log.warn("Non-numeric column self-healing retry failed for '{}': {}", tableName, retryEx.getMessage());
+                    }
+                } else if (exMsg.contains("value too long")) {
                     try {
                         java.util.regex.Matcher m = java.util.regex.Pattern.compile("column \"([^\"]+)\"").matcher(ex.getMessage());
                         if (m.find()) {
                             String colName = m.group(1).split(" ")[0];
-                            boolean isOracleDb = databaseProductName != null && databaseProductName.toLowerCase().contains("oracle");
                             String alterSql = isOracleDb ? "ALTER TABLE " + tableName + " MODIFY (" + colName + " CLOB)"
                                     : "ALTER TABLE " + tableName + " ALTER COLUMN " + colName + " SET DATA TYPE TEXT";
                             jdbcTemplate.getJdbcOperations().execute(alterSql);
@@ -739,7 +816,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         if (tableName == null) return Collections.emptySet();
 
         return pkCache.computeIfAbsent(tableName.toLowerCase(), tblKey -> {
-            Set<String> pks = new LinkedHashSet<>();
+            Set<String> verifiedDbUniqueCols = new LinkedHashSet<>();
             if (dataSource != null) {
                 try (Connection conn = dataSource.getConnection()) {
                     DatabaseMetaData meta = conn.getMetaData();
@@ -754,49 +831,51 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
                             while (rs.next()) {
                                 String pkCol = rs.getString("COLUMN_NAME");
                                 if (pkCol != null && !pkCol.isEmpty()) {
-                                    pks.add(pkCol.toLowerCase());
+                                    verifiedDbUniqueCols.add(pkCol.toLowerCase());
                                 }
                             }
                         }
-                        if (!pks.isEmpty()) break;
+                        if (!verifiedDbUniqueCols.isEmpty()) break;
                     }
 
-                    // 2. If no PK found, try unique indexes
-                    if (pks.isEmpty()) {
-                        for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
-                            try (ResultSet rs = meta.getIndexInfo(null, schema, tName, true, false)) {
-                                while (rs.next()) {
-                                    String idxCol = rs.getString("COLUMN_NAME");
-                                    if (idxCol != null && !idxCol.isEmpty()) {
-                                        pks.add(idxCol.toLowerCase());
-                                        break;
-                                    }
+                    // 2. Also check verified unique indexes
+                    for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                        try (ResultSet rs = meta.getIndexInfo(null, schema, tName, true, false)) {
+                            while (rs.next()) {
+                                String idxCol = rs.getString("COLUMN_NAME");
+                                if (idxCol != null && !idxCol.isEmpty()) {
+                                    verifiedDbUniqueCols.add(idxCol.toLowerCase());
                                 }
                             }
-                            if (!pks.isEmpty()) break;
-                        }
+                        } catch (Exception ignored) {}
                     }
                 } catch (Exception ex) {
                     log.warn("Could not query primary keys for table '{}': {}", tableName, ex.getMessage());
                 }
             }
 
-            // 3. Fallback: infer from mapped column naming conventions if pks is empty OR if pks has no match in mappedColumns
-            boolean hasOverlap = false;
-            if (mappedColumns != null && !pks.isEmpty()) {
-                for (String pk : pks) {
-                    if (mappedColumns.stream().anyMatch(c -> c.equalsIgnoreCase(pk))) {
-                        hasOverlap = true;
-                        break;
+            // If we have verified primary keys / unique columns from database metadata,
+            // only match those columns that are actually present in the current mapped batch!
+            if (!verifiedDbUniqueCols.isEmpty()) {
+                Set<String> matchedPks = new LinkedHashSet<>();
+                if (mappedColumns != null) {
+                    for (String col : mappedColumns) {
+                        if (verifiedDbUniqueCols.contains(col.toLowerCase())) {
+                            matchedPks.add(col.toLowerCase());
+                        }
                     }
                 }
-            }
-            if (!hasOverlap && mappedColumns != null) {
-                pks.clear();
-                pks.addAll(inferPrimaryKeys(tableName, mappedColumns));
+                // If the table's primary key (e.g. auto-increment id) is not in mappedColumns,
+                // there is NO unique conflict target in mappedColumns. Return empty to generate standard INSERT!
+                return matchedPks;
             }
 
-            return pks;
+            // Fallback only if no live DataSource or metadata was empty:
+            if (mappedColumns != null) {
+                return inferPrimaryKeys(tableName, mappedColumns);
+            }
+
+            return Collections.emptySet();
         });
     }
 
@@ -810,12 +889,12 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         String normTable = tableName != null ? tableName.toLowerCase() : "";
 
         // Check common identifier column names FIRST
+        // Note: NEVER treat arbitrary foreign keys (<other>_id) as primary key!
         for (String col : columns) {
             String norm = col.toLowerCase();
             if (norm.equals(normTable + "_id") || norm.equals(normTable + "id")
                     || norm.equals("id") || norm.equals("sku") || norm.equals("location_code")
                     || norm.equals("order_id") || norm.equals("code")
-                    || (norm.endsWith("_id") && !norm.equalsIgnoreCase("source_bnpp_id") && !norm.equalsIgnoreCase("staging_bnpp_id"))
                     || norm.endsWith("_pk") || norm.endsWith("_code")) {
                 inferred.add(norm);
                 return inferred;
@@ -880,18 +959,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         }
         insertSql.append(")").append(placeholders).append(")");
 
-        // If no primary key could be matched from metadata, fallback to bnpp_id if present
-        if (matchedPks.isEmpty() && columns != null) {
-            for (String col : columns) {
-                if ("bnpp_id".equalsIgnoreCase(col)) {
-                    matchedPks.add(col);
-                    nonPkCols.remove(col);
-                    break;
-                }
-            }
-        }
-
-        // If still no primary key could be identified, fallback to standard INSERT
+        // If no verified unique/primary key could be matched, fallback to standard clean INSERT
         if (matchedPks.isEmpty()) {
             return insertSql.toString();
         }

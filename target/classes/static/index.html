@@ -206,6 +206,57 @@
             font-size: 0.8rem;
             margin-top: auto;
         }
+
+        /* Job List Fit-to-Screen Mode: Remove window vertical scrollbar and fit content */
+        body.page-job-list-active,
+        body:has(#page-job-list:not(.hidden)) {
+            height: 100vh !important;
+            max-height: 100vh !important;
+            overflow: hidden !important;
+        }
+
+        body.page-job-list-active #view-app,
+        body:has(#page-job-list:not(.hidden)) #view-app {
+            height: 100vh !important;
+            max-height: 100vh !important;
+            overflow: hidden !important;
+        }
+
+        body.page-job-list-active footer,
+        body:has(#page-job-list:not(.hidden)) footer {
+            display: none !important;
+        }
+
+        #page-job-list:not(.hidden) {
+            height: calc(100vh - 72px) !important;
+            max-height: calc(100vh - 72px) !important;
+            overflow: hidden !important;
+            display: flex !important;
+            flex-direction: column !important;
+            padding-top: 1rem !important;
+            padding-bottom: 1rem !important;
+        }
+
+        #page-job-list .card {
+            flex: 1 !important;
+            min-height: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            overflow: hidden !important;
+        }
+
+        .job-list-table-wrapper {
+            flex: 1 !important;
+            min-height: 0 !important;
+            overflow-y: auto !important;
+            overflow-x: auto !important;
+            scrollbar-width: none !important; /* Firefox */
+            -ms-overflow-style: none !important; /* IE / Edge */
+        }
+
+        .job-list-table-wrapper::-webkit-scrollbar {
+            display: none !important; /* Chrome, Safari, Opera */
+        }
     </style>
 </head>
 <body>
@@ -493,6 +544,15 @@
                     </button>
                 </div>
                 <div class="p-6 overflow-y-auto space-y-4 text-xs">
+                    <div id="modal-mandatory-alert" class="hidden p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-center gap-3 shadow-xs">
+                        <div class="w-8 h-8 rounded-lg bg-amber-100 border border-amber-300 text-amber-700 flex items-center justify-center flex-shrink-0">
+                            <i class="fas fa-exclamation-triangle"></i>
+                        </div>
+                        <div>
+                            <div class="font-bold text-amber-950">Ingestion JSON File is Mandatory</div>
+                            <div class="text-[11px] text-amber-800">You cannot proceed to the next flow (Review & Execution) until you upload or modify an ingestion.json file. Tables and columns are strictly generated from your ingestion configuration.</div>
+                        </div>
+                    </div>
                     <div class="flex items-center justify-between">
                         <span class="text-xs font-bold text-gray-700 uppercase tracking-wider">JSON Mapping Payload</span>
                         <div class="flex items-center gap-2">
@@ -751,27 +811,23 @@
                 </div>
             </div>
 
-            <!-- 5-Step Connected Stepper -->
+            <!-- 4-Step Connected Stepper -->
             <div class="flex items-start mb-8 px-2 max-w-3xl mx-auto">
                 <div class="stepper-item active" data-step="1" id="step1-indicator">
                     <div class="stepper-circle"><i class="fas fa-plug text-xs"></i></div>
-                    <div class="stepper-label">Target DB</div>
+                    <div class="stepper-label">1. Target DB</div>
                 </div>
                 <div class="stepper-item" data-step="2" id="step2-indicator">
-                    <div class="stepper-circle"><i class="fas fa-file-alt text-xs"></i></div>
-                    <div class="stepper-label">Source XML</div>
+                    <div class="stepper-circle"><i class="fas fa-file-code text-xs"></i></div>
+                    <div class="stepper-label">2. Files &amp; Tables</div>
                 </div>
                 <div class="stepper-item" data-step="3" id="step3-indicator">
-                    <div class="stepper-circle"><i class="fas fa-search text-xs"></i></div>
-                    <div class="stepper-label">Discovery</div>
+                    <div class="stepper-circle"><i class="fas fa-project-diagram text-xs"></i></div>
+                    <div class="stepper-label">3. Mapping Flow</div>
                 </div>
                 <div class="stepper-item" data-step="4" id="step4-indicator">
-                    <div class="stepper-circle"><i class="fas fa-project-diagram text-xs"></i></div>
-                    <div class="stepper-label">Mapping</div>
-                </div>
-                <div class="stepper-item" data-step="5" id="step5-indicator">
                     <div class="stepper-circle"><i class="fas fa-clipboard-check text-xs"></i></div>
-                    <div class="stepper-label">Review &amp; Confirm</div>
+                    <div class="stepper-label">4. Review &amp; Submit</div>
                 </div>
             </div>
 
@@ -867,14 +923,14 @@
                             </button>
                         </div>
                         <button type="button" id="btn-step1-next" class="btn btn-primary">
-                            <span>Next: Source Selection</span>
+                            <span>Next: Source &amp; Ingestion Files</span>
                             <i class="fas fa-arrow-right ml-2"></i>
                         </button>
                     </div>
                 </form>
             </section>
 
-            <!-- STEP 2: SOURCE XML SELECTION -->
+            <!-- STEP 2: SOURCE XML & INGESTION SPECIFICATION -->
             <section id="step-section-2" class="step-content hidden card p-6 sm:p-8">
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-100 gap-3">
                     <div class="flex items-center space-x-3">
@@ -882,8 +938,8 @@
                             <i class="fas fa-file-code text-lg"></i>
                         </div>
                         <div>
-                            <h3 class="text-lg font-bold text-gray-800">Source XML Specification (6GB+ Ready)</h3>
-                            <p class="text-xs text-gray-500">Specify local XML file path or Cloud Object Storage URI with bounded StAX streaming.</p>
+                            <h3 class="text-lg font-bold text-gray-800">Source XML &amp; Ingestion Specification</h3>
+                            <p class="text-xs text-gray-500">Provide Source XML file, mandatory Ingestion JSON, and provision the 3 target database table types.</p>
                         </div>
                     </div>
                     <div class="flex items-center gap-2">
@@ -891,7 +947,7 @@
                             <i class="fas fa-file-import mr-1.5"></i> Ingest JSON Mapping
                         </button>
                         <button type="button" id="btn-use-sample-xml" class="btn text-xs py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
-                            <i class="fas fa-folder-open mr-1.5"></i> Load Built-in Demo XML
+                            <i class="fas fa-folder-open mr-1.5"></i> Load Built-in Demo (XML + Ingestion.json)
                         </button>
                     </div>
                 </div>
@@ -918,6 +974,7 @@
                         </div>
                     </div>
 
+                    <!-- Source XML File Specification -->
                     <div>
                         <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">XML Source Path or Cloud Object Storage URI</label>
                         <div class="flex items-center gap-2">
@@ -937,19 +994,15 @@
                             <span>Inspecting XML structure for candidate root elements...</span>
                         </div>
                         <p class="text-xs text-gray-500 mt-1.5">Supports local filesystem paths, S3/COS URIs, or standard URLs. StAX streaming guarantees constant memory consumption.</p>
-                        <div class="mt-2 p-2.5 rounded-lg bg-blue-50/70 border border-blue-200 text-blue-900 text-xs flex items-center gap-2">
-                            <i class="fas fa-info-circle text-blue-600 shrink-0"></i>
-                            <span><strong>Note:</strong> Enterprise Streaming Architecture handles files up to <strong>10 GB+</strong> seamlessly with constant O(1) heap memory, multi-row batched writes, and live preview without memory exhaustion.</span>
-                        </div>
                     </div>
 
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div>
                             <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">XML Fragment Record Element(s) (Root Tag / Tags)</label>
                             <input type="text" id="xml-root-element" required
-                                   placeholder="e.g. record, order, customer (or auto-detected tags)" value=""
+                                   placeholder="e.g. person, countryname, occupation" value=""
                                    class="input-field font-mono text-xs">
-                            <p class="text-xs text-gray-500 mt-1.5">Specify one or more repeating element tags (comma-separated). Multiple tags will automatically create dedicated flattened tables for each tag (e.g. <code>&lt;tag&gt;_flat</code>).</p>
+                            <p class="text-xs text-gray-500 mt-1.5">Flaten tables are created as <code class="font-bold text-emerald-800 bg-emerald-50 px-1 py-0.5 rounded">gs_&lt;entityname&gt;</code> (prefix gs_, no suffix). Leaf tags/attributes are stored as columns; nested tags are stored in raw format.</p>
                             <div id="candidate-root-tags-wrapper" class="hidden mt-2 p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200">
                                 <div class="flex items-center justify-between mb-1">
                                     <span class="text-[11px] font-bold text-emerald-800 uppercase tracking-wider block">Detected Candidate Root Tags:</span>
@@ -967,7 +1020,105 @@
                         </div>
                     </div>
 
+                    <!-- Mandatory Ingestion JSON Specification Panel -->
+                    <div class="p-5 rounded-xl bg-amber-50/80 border border-amber-300">
+                        <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 mb-3 border-b border-amber-200">
+                            <div class="flex items-center gap-2">
+                                <div class="w-8 h-8 rounded-lg bg-amber-100 text-amber-800 flex items-center justify-center font-bold">
+                                    <i class="fas fa-file-invoice"></i>
+                                </div>
+                                <div>
+                                    <h4 class="text-sm font-bold text-gray-900">Ingestion JSON File (Mandatory)</h4>
+                                    <p class="text-[11px] text-amber-900">You cannot proceed to Mapping until ingestion.json is loaded. Tables and mappings are strictly created from this file.</p>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <label class="btn text-xs py-1.5 px-3 bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer flex items-center gap-1.5 shadow-sm">
+                                    <i class="fas fa-upload"></i>
+                                    <span>Upload ingestion.json</span>
+                                    <input type="file" id="step2-json-file-input" accept=".json" class="hidden">
+                                </label>
+                                <button type="button" id="btn-step2-edit-json" class="btn text-xs py-1.5 px-3 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 font-semibold">
+                                    <i class="fas fa-code mr-1"></i> Edit / Paste JSON
+                                </button>
+                            </div>
+                        </div>
 
+                        <div id="step2-ingestion-json-status" class="text-xs">
+                            <div class="flex items-center gap-2 text-amber-900">
+                                <i class="fas fa-exclamation-circle text-amber-600"></i>
+                                <span>No ingestion.json loaded yet. Please upload your ingestion.json file or click "Load Built-in Demo".</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Target Database Schema Provisioning (Strictly 3 Table Types) -->
+                    <div class="p-5 rounded-xl bg-slate-50 border border-slate-200">
+                        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-4 border-b border-slate-200 gap-2">
+                            <div class="flex items-center gap-2">
+                                <div class="w-8 h-8 rounded-lg bg-emerald-100 text-bnp-emerald flex items-center justify-center font-bold">
+                                    <i class="fas fa-cubes"></i>
+                                </div>
+                                <div>
+                                    <h4 class="text-sm font-bold text-gray-800">Target Database Schema Provisioning (Strictly 3 Table Types)</h4>
+                                    <p class="text-[11px] text-gray-500">Only 3 table types: Canonical tables from ingestion.json, Flattened tables (gs_&lt;entity&gt;), and Invalid/error records table.</p>
+                                </div>
+                            </div>
+                            <button type="button" id="btn-create-discovered-tables" class="btn text-xs py-2 px-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 shadow-sm">
+                                <i class="fas fa-magic"></i>
+                                <span>Create Tables in Target DB</span>
+                            </button>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                            <div class="bg-white p-3.5 rounded-lg border border-slate-200">
+                                <div class="font-bold text-emerald-800 flex items-center gap-1.5 mb-1">
+                                    <i class="fas fa-table-cells text-emerald-600"></i>
+                                    <span>1. Ingestion.json Canonical Tables</span>
+                                </div>
+                                <p class="text-[11px] text-gray-500 mb-2">Clean data format (no XML/JSON). Foreign keys linked with parent reference IDs.</p>
+                                <div id="step2-canonical-tables-list" class="flex flex-wrap gap-1 font-mono text-[11px]">
+                                    <span class="text-gray-400 italic">Defined in ingestion.json</span>
+                                </div>
+                            </div>
+                            <div class="bg-white p-3.5 rounded-lg border border-slate-200">
+                                <div class="font-bold text-blue-800 flex items-center gap-1.5 mb-1">
+                                    <i class="fas fa-layer-group text-blue-600"></i>
+                                    <span>2. Flattened Tables (gs_&lt;entity&gt;)</span>
+                                </div>
+                                <p class="text-[11px] text-gray-500 mb-2">Prefix <code>gs_</code>, no suffix. Leaf tags/attributes as columns; nested tags stored in raw format.</p>
+                                <div id="step2-flat-tables-list" class="flex flex-wrap gap-1 font-mono text-[11px]">
+                                    <span class="text-gray-400 italic">e.g. gs_person</span>
+                                </div>
+                            </div>
+                            <div class="bg-white p-3.5 rounded-lg border border-slate-200">
+                                <div class="font-bold text-red-800 flex items-center gap-1.5 mb-1">
+                                    <i class="fas fa-triangle-exclamation text-red-600"></i>
+                                    <span>3. Invalid / Error Records Table</span>
+                                </div>
+                                <p class="text-[11px] text-gray-500 mb-2">Captures error messages, failed records, and skipped error data details without aborting.</p>
+                                <div id="step2-error-tables-list" class="flex flex-wrap gap-1 font-mono text-[11px]">
+                                    <span class="px-2 py-0.5 rounded bg-red-50 text-red-800 border border-red-200 font-bold">gs_error_records</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Provisioning Status Output -->
+                        <div id="step2-table-provisioning-status" class="mt-3 hidden p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 font-semibold flex items-center gap-2">
+                            <i class="fas fa-circle-check text-emerald-600 text-sm"></i>
+                            <span id="step2-table-provisioning-text">Target database tables successfully provisioned.</span>
+                        </div>
+                    </div>
+
+                    <!-- Hidden technical inspection containers to maintain backwards compatibility with inspection functions -->
+                    <div class="hidden">
+                        <span id="xml-file-size-badge">Size: --</span>
+                        <span id="badge-discovered-tags">0 Tags</span>
+                        <span id="badge-discovered-tables">0 Tables</span>
+                        <div id="xml-tags-container"></div>
+                        <div id="db-tables-container"></div>
+                        <button type="button" id="btn-rescan"></button>
+                    </div>
 
                     <div class="pt-6 flex items-center justify-between border-t border-gray-100">
                         <button type="button" class="btn btn-secondary btn-prev-step" data-to="1">
@@ -975,83 +1126,28 @@
                             <span>Back</span>
                         </button>
                         <button type="button" id="btn-step2-next" class="btn btn-primary">
-                            <span>Run Schema Discovery</span>
+                            <span>Next: Mapping Flow</span>
                             <i class="fas fa-arrow-right ml-2"></i>
                         </button>
                     </div>
                 </form>
             </section>
 
-            <!-- STEP 3: SCHEMA DISCOVERY -->
+            <!-- STEP 3: MAPPING FLOW (AUTO-ASSIGNED FROM INGESTION.JSON) -->
             <section id="step-section-3" class="step-content hidden card p-6 sm:p-8">
-                <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-100 gap-3">
-                    <div class="flex items-center space-x-3">
-                        <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
-                            <i class="fas fa-search text-lg"></i>
-                        </div>
-                        <div>
-                            <h3 class="text-lg font-bold text-gray-800">Schema Discovery Results</h3>
-                            <p class="text-xs text-gray-500">StAX sampled XML fragments and queried target database metadata.</p>
-                        </div>
-                    </div>
-                    <div class="flex items-center gap-3">
-                        <span id="xml-file-size-badge" class="px-2.5 py-1 rounded-md text-xs font-mono font-bold bg-slate-100 text-slate-700 border border-slate-200">Size: --</span>
-                        <button type="button" id="btn-rescan" class="btn btn-secondary text-xs py-1.5 px-3">
-                            <i class="fas fa-sync-alt mr-1.5 text-bnp-emerald"></i> Re-Scan
-                        </button>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
-                    <div class="lg:col-span-6 space-y-3">
-                        <div class="flex items-center justify-between">
-                            <h4 class="text-xs font-bold uppercase tracking-wider text-gray-500">Discovered XML Tags &amp; Attributes</h4>
-                            <span id="badge-discovered-tags" class="text-xs font-mono text-bnp-emerald font-bold bg-emerald-50 px-2 py-0.5 rounded">0 Tags</span>
-                        </div>
-                        <div id="xml-tags-container" class="space-y-2 max-h-[380px] overflow-y-auto pr-1"></div>
-                    </div>
-
-                    <div class="lg:col-span-6 space-y-3">
-                        <div class="flex items-center justify-between">
-                            <h4 class="text-xs font-bold uppercase tracking-wider text-gray-500">Target Database Schema</h4>
-                            <div class="flex items-center gap-2">
-                                <span id="badge-discovered-tables" class="text-xs font-mono text-bnp-emerald font-bold bg-emerald-50 px-2 py-0.5 rounded">0 Tables</span>
-                                <button type="button" id="btn-create-discovered-tables" class="btn text-[11px] py-1 px-2.5 bg-emerald-50 text-bnp-emerald hover:bg-emerald-100 border border-emerald-300 font-bold transition shadow-xs" title="Auto-create canonical relational tables and flat staging table in target database">
-                                    <i class="fas fa-magic mr-1"></i> Create Tables &amp; Flat Table
-                                </button>
-                            </div>
-                        </div>
-                        <div id="db-tables-container" class="space-y-3 max-h-[380px] overflow-y-auto pr-1"></div>
-                    </div>
-                </div>
-
-                <div class="pt-6 mt-8 flex items-center justify-between border-t border-gray-100">
-                    <button type="button" class="btn btn-secondary btn-prev-step" data-to="2">
-                        <i class="fas fa-arrow-left mr-2"></i>
-                        <span>Back</span>
-                    </button>
-                    <button type="button" id="btn-step3-next" class="btn btn-primary">
-                        <span>Next: Configure Mapping</span>
-                        <i class="fas fa-arrow-right ml-2"></i>
-                    </button>
-                </div>
-            </section>
-
-            <!-- STEP 4: MAPPING -->
-            <section id="step-section-4" class="step-content hidden card p-6 sm:p-8">
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-4 border-b border-gray-100 gap-3">
                     <div class="flex items-center space-x-3">
                         <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
                             <i class="fas fa-project-diagram text-lg"></i>
                         </div>
                         <div>
-                            <h3 class="text-lg font-bold text-gray-800">Dynamic XML-to-Database Mapping</h3>
-                            <p class="text-xs text-gray-500">Map unmarshalled XML tags and flattened attributes to SQL columns across single or multiple tables.</p>
+                            <h3 class="text-lg font-bold text-gray-800">Dynamic XML-to-Database Mapping Flow</h3>
+                            <p class="text-xs text-gray-500">Mappings auto-assigned from ingestion.json. XML tags mapped to target canonical tables and columns.</p>
                         </div>
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
                         <button type="button" id="btn-auto-map" class="btn text-xs py-1.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-bnp-emerald border border-emerald-300">
-                            <i class="fas fa-wand-magic-sparkles mr-1.5"></i> Auto-Align Exact
+                            <i class="fas fa-wand-magic-sparkles mr-1.5"></i> Auto-Align from Ingestion.json
                         </button>
                         <button type="button" id="btn-open-json-import-modal" class="btn text-xs py-1.5 px-3 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200">
                             <i class="fas fa-file-import mr-1.5"></i> Ingest JSON Mapping
@@ -1066,6 +1162,11 @@
                             <i class="fas fa-trash-can mr-1.5"></i> Clear All
                         </button>
                     </div>
+                </div>
+
+                <!-- Mandatory Ingestion JSON Status Banner -->
+                <div id="ingestion-json-status-banner" class="mb-4 transition-all duration-300">
+                    <!-- Populated dynamically by updateIngestionJsonStatusBanner() -->
                 </div>
 
                 <!-- Table Sequence Banner -->
@@ -1107,19 +1208,19 @@
                 </div>
 
                 <div class="pt-6 mt-6 flex items-center justify-between border-t border-gray-100">
-                    <button type="button" class="btn btn-secondary btn-prev-step" data-to="3">
+                    <button type="button" class="btn btn-secondary btn-prev-step" data-to="2">
                         <i class="fas fa-arrow-left mr-2"></i>
                         <span>Back</span>
                     </button>
-                    <button type="button" id="btn-step4-next" class="btn btn-primary">
-                        <span>Review Configuration &amp; Steps</span>
+                    <button type="button" id="btn-step3-next" class="btn btn-primary">
+                        <span>Next: Review &amp; Submit</span>
                         <i class="fas fa-arrow-right ml-2"></i>
                     </button>
                 </div>
             </section>
 
-            <!-- STEP 5: CONFIGURATION REVIEW & EXECUTION CONFIRMATION -->
-            <section id="step-section-5" class="step-content hidden card p-6 sm:p-8">
+            <!-- STEP 4: CONFIGURATION REVIEW & EXECUTION CONFIRMATION -->
+            <section id="step-section-4" class="step-content hidden card p-6 sm:p-8">
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-100 gap-3">
                     <div class="flex items-center space-x-3">
                         <div class="w-10 h-10 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-center text-bnp-emerald">
@@ -1247,9 +1348,9 @@
                         <!-- Left: Flat Staging Tables -->
                         <div class="bg-white p-3.5 rounded-lg border border-slate-200">
                             <div class="font-bold text-gray-700 mb-2 flex items-center gap-1.5 text-[11px] uppercase tracking-wider">
-                                <i class="fas fa-inbox text-blue-600"></i> Phase 1: Flat Staging Tables (&lt;entity&gt;_flat)
+                                <i class="fas fa-layer-group text-blue-600"></i> Phase 1: Flattened Tables (gs_&lt;entityname&gt;)
                             </div>
-                            <p class="text-[11px] text-gray-500 mb-2">Stores raw XML fragment data, tag values, @attributes, nested raw XML, bnpp_id UUID, and SHA-256 payload hash.</p>
+                            <p class="text-[11px] text-gray-500 mb-2">Stores leaf columns, @attributes, and nested tags in raw format. Primary key prefixed as <code>gs_&lt;entityname&gt;</code>.</p>
                             <div id="review-flat-tables-list" class="flex flex-wrap gap-1.5 font-mono text-[11px]">
                                 <!-- Dynamically populated list of flat tables -->
                             </div>
@@ -1374,7 +1475,7 @@
                     </div>
 
                     <div class="mt-4 pt-4 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
-                        <button type="button" class="btn btn-secondary btn-prev-step text-xs" data-to="4">
+                        <button type="button" class="btn btn-secondary btn-prev-step text-xs" data-to="3">
                             <i class="fas fa-arrow-left mr-1.5"></i>
                             <span>Adjust Mapping</span>
                         </button>
@@ -1401,13 +1502,13 @@
         <!-- ========================================================================= -->
         <!-- PAGE 2: JOB LIST (Saved Configurations & Review)                           -->
         <!-- ========================================================================= -->
-        <main id="page-job-list" class="app-page hidden flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-8">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 mb-6 border-b border-gray-200 gap-3">
+        <main id="page-job-list" class="app-page hidden flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-4 flex flex-col h-[calc(100vh-72px)] overflow-hidden">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b border-gray-200 gap-3 shrink-0">
                 <div>
-                    <h2 class="text-2xl font-bold text-gray-900">Configured Migration Jobs</h2>
-                    <p class="text-xs text-gray-500 mt-1">Review saved ingestion definitions, inspect mappings and target SQL, or trigger batch execution.</p>
+                    <h2 class="text-xl sm:text-2xl font-bold text-gray-900 leading-tight">Configured Migration Jobs</h2>
+                    <p class="text-xs text-gray-500 mt-0.5">Review saved ingestion definitions, inspect mappings and target SQL, or trigger batch execution.</p>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 shrink-0">
                     <button type="button" id="btn-refresh-job-list" class="btn btn-secondary text-xs py-1.5 px-3">
                         <i class="fas fa-sync-alt mr-1.5 text-bnp-emerald"></i> Refresh
                     </button>
@@ -1418,19 +1519,19 @@
             </div>
 
             <!-- Jobs Data Table -->
-            <div class="card overflow-hidden">
-                <div class="overflow-x-auto">
+            <div class="card overflow-hidden flex-1 min-h-0 flex flex-col border border-gray-200 shadow-xs">
+                <div class="job-list-table-wrapper flex-1 min-h-0 overflow-y-auto overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200 text-left text-xs">
-                        <thead class="bg-gray-50 text-gray-600 font-bold uppercase tracking-wider">
+                        <thead class="bg-gray-50 text-gray-600 font-bold uppercase tracking-wider sticky top-0 z-10 shadow-2xs">
                             <tr>
-                                <th class="px-4 py-3.5">#</th>
-                                <th class="px-4 py-3.5">Job Name &amp; Description</th>
-                                <th class="px-4 py-3.5">Target Table(s)</th>
-                                <th class="px-4 py-3.5">Chunk</th>
-                                <th class="px-4 py-3.5">Source Path</th>
-                                <th class="px-4 py-3.5">Last Run Status</th>
-                                <th class="px-4 py-3.5">Created By</th>
-                                <th class="px-4 py-3.5 text-right">Actions</th>
+                                <th class="px-3.5 py-3 bg-gray-50">#</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Job Name &amp; Description</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Target Table(s)</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Chunk</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Source Path</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Last Run Status</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Created By</th>
+                                <th class="px-3.5 py-3 bg-gray-50 text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody id="job-list-tbody" class="divide-y divide-gray-200 bg-white">

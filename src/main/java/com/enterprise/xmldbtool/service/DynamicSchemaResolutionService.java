@@ -138,34 +138,85 @@ public class DynamicSchemaResolutionService {
                 resolvedTableOrder
         );
 
-        long totalProcessed = 0;
-        long normalizedCount = 0;
-        long failedCount = 0;
-
         // 1. Identify distinct entity flat tables for high-performance 10GB+ partitioned ingestion
         Set<String> candidateFlatTables = new LinkedHashSet<>();
+        Set<String> processedEntities = new HashSet<>();
         if (resolvedTableOrder != null) {
             for (String tbl : resolvedTableOrder) {
                 String norm = tbl.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
-                String directFlat = norm + "_flat";
-                String singularFlat = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(norm) + "_flat";
-                String pluralFlat = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.pluralize(norm) + "_flat";
+                String singNorm = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(norm);
+                String plurNorm = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.pluralize(norm);
+                if (processedEntities.contains(norm) || processedEntities.contains(singNorm) || processedEntities.contains(plurNorm)) continue;
 
-                if (tableExists(jdbcTemplate, directFlat)) {
-                    candidateFlatTables.add(directFlat);
-                } else if (tableExists(jdbcTemplate, singularFlat)) {
-                    candidateFlatTables.add(singularFlat);
-                } else if (tableExists(jdbcTemplate, pluralFlat)) {
-                    candidateFlatTables.add(pluralFlat);
+                String gsPrefixDirect = "gs_" + norm;
+                String gsPrefixSingular = "gs_" + singNorm;
+                String gsPrefixPlural = "gs_" + plurNorm;
+                String directGs = norm + "_gs";
+                String singularGs = singNorm + "_gs";
+                String pluralGs = plurNorm + "_gs";
+                String directFlat = norm + "_flat";
+                String singularFlat = singNorm + "_flat";
+                String pluralFlat = plurNorm + "_flat";
+
+                String selected = null;
+                for (String candidate : List.of(gsPrefixDirect, gsPrefixSingular, gsPrefixPlural, directGs, singularGs, pluralGs, directFlat, singularFlat, pluralFlat)) {
+                    if (candidate.equalsIgnoreCase("gs_error_records") || candidate.equalsIgnoreCase("migration_errors") || candidate.equalsIgnoreCase("staging_xml_records")) {
+                        continue;
+                    }
+                    if (tableExists(jdbcTemplate, candidate)) {
+                        if (hasUnnormalizedRecords(jdbcTemplate, candidate, jobExecutionId)) {
+                            selected = candidate;
+                            break;
+                        }
+                        if (selected == null) {
+                            selected = candidate;
+                        }
+                    }
+                }
+                if (selected != null) {
+                    candidateFlatTables.add(selected);
+                    processedEntities.add(norm);
+                    processedEntities.add(singNorm);
+                    processedEntities.add(plurNorm);
                 }
             }
         }
 
-        // Also check if any other <root>_flat tables exist in the target database
+        // Count already normalized records if resuming from a previous run
+        long initialNormalized = 0;
+        for (String flatTable : candidateFlatTables) {
+            try {
+                Integer normInTable = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM " + flatTable + " WHERE status = 'NORMALIZED'",
+                        Integer.class
+                );
+                if (normInTable != null) {
+                    initialNormalized += normInTable;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        long totalProcessed = initialNormalized;
+        long normalizedCount = initialNormalized;
+        long failedCount = 0;
+
+        // Also check if any other gs_<root>, <root>_flat or <root>_gs tables exist in the target database
         for (String flat : findExistingFlatTables(jdbcTemplate)) {
             String normFlat = flat.toLowerCase();
-            if (!normFlat.equals("staging_xml_records") && !candidateFlatTables.contains(normFlat)) {
+            String entityBase = normFlat.startsWith("gs_") ? normFlat.substring(3) : normFlat.replaceFirst("(?i)_(gs|flat)$", "");
+            String singBase = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(entityBase);
+            String plurBase = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.pluralize(entityBase);
+            if (!normFlat.equals("staging_xml_records")
+                    && !normFlat.equals("gs_error_records")
+                    && !normFlat.equals("migration_errors")
+                    && !processedEntities.contains(entityBase)
+                    && !processedEntities.contains(singBase)
+                    && !processedEntities.contains(plurBase)
+                    && !candidateFlatTables.contains(normFlat)) {
                 candidateFlatTables.add(normFlat);
+                processedEntities.add(entityBase);
+                processedEntities.add(singBase);
+                processedEntities.add(plurBase);
             }
         }
 
@@ -192,9 +243,7 @@ public class DynamicSchemaResolutionService {
                     break;
                 }
 
-                String selectSql = "SELECT id, job_execution_id, bnpp_id, tag_name, version_number, " +
-                        "record_identifier, record_action, record_date, raw_payload, payload_hash, status " +
-                        "FROM " + flatTable + " WHERE id > ? AND " + statusClause + " ORDER BY id ASC " +
+                String selectSql = "SELECT * FROM " + flatTable + " WHERE id > ? AND " + statusClause + " ORDER BY id ASC " +
                         (isOracle ? "FETCH FIRST " + chunkSize + " ROWS ONLY" : "LIMIT " + chunkSize);
 
                 List<StagingXmlRecord> stagedBatch = fetchStagedRecordsWithKeyset(jdbcTemplate, selectSql, lastSeenId);
@@ -316,7 +365,44 @@ public class DynamicSchemaResolutionService {
         for (StagingXmlRecord record : stagedBatch) {
             processed++;
             try {
-                Map<String, Object> rawMap = objectMapper.readValue(record.getRawPayload(), new TypeReference<Map<String, Object>>() {});
+                Map<String, Object> rawMap = new LinkedHashMap<>();
+                String payloadStr = record.getRawPayload();
+                if (payloadStr != null && !payloadStr.trim().isEmpty()) {
+                    if (payloadStr.trim().startsWith("<")) {
+                        try {
+                            List<Map<String, Object>> parsed = DynamicXmlItemProcessor.parseRawXmlSubTagEntities(payloadStr, null, mappings, record.getCachedMap());
+                            if (!parsed.isEmpty()) rawMap.putAll(parsed.get(0));
+                        } catch (Exception ignored) {}
+                    } else if (payloadStr.trim().startsWith("{") || payloadStr.trim().startsWith("[")) {
+                        try {
+                            Map<String, Object> jsonMap = objectMapper.readValue(payloadStr, new TypeReference<Map<String, Object>>() {});
+                            if (jsonMap != null) rawMap.putAll(jsonMap);
+                        } catch (Exception ignored) {}
+                    }
+                }
+                // Merge all business columns from the flat table row (especially sub-tag raw XML columns!)
+                if (record.getCachedMap() != null) {
+                    for (Map.Entry<String, Object> entry : record.getCachedMap().entrySet()) {
+                        String k = entry.getKey().toLowerCase();
+                        if (k.equals("id") || k.equals("status") || k.equals("version_number")
+                                || k.equals("payload_hash") || k.equals("job_execution_id")
+                                || k.equals("created_at") || k.equals("updated_at")
+                                || k.equals("xml_version") || k.equals("schema_version")) {
+                            continue;
+                        }
+                        rawMap.putIfAbsent(entry.getKey(), entry.getValue());
+                        rawMap.putIfAbsent(k, entry.getValue());
+                    }
+                }
+                if (record.getRecordIdentifier() != null) {
+                    rawMap.putIfAbsent("record_identifier", record.getRecordIdentifier());
+                    rawMap.putIfAbsent("id", record.getRecordIdentifier());
+                    rawMap.putIfAbsent("@id", record.getRecordIdentifier());
+                }
+                if (record.getBnppId() != null) {
+                    rawMap.putIfAbsent("bnpp_id", record.getBnppId());
+                }
+
                 String entityTag = record.getTagName() != null ? record.getTagName() : record.getEntityType();
                 if (entityTag != null) {
                     rawMap.put("_entity_tag", entityTag);
@@ -492,6 +578,8 @@ public class DynamicSchemaResolutionService {
             Map<String, ExistingRecordInfo> existingMap = queryExistingRecords(jdbcTemplate, tableName, pkCol, incomingRows);
 
             List<Map<String, Object>> writeList = new ArrayList<>();
+            Map<String, Integer> keyToIndex = new HashMap<>();
+
             for (Map<String, Object> row : incomingRows) {
                 String lookupKey = resolveRowLookupKey(row, pkCol);
                 String incomingHash = (String) row.get("payload_hash");
@@ -512,7 +600,15 @@ public class DynamicSchemaResolutionService {
                         int nextVersion = (existing.versionNumber() != null ? existing.versionNumber() : 1) + 1;
                         row.put("version_number", nextVersion);
                         row.put("updated_at", new Timestamp(System.currentTimeMillis()));
-                        writeList.add(row);
+
+                        String dedupeKey = lookupKey != null ? lookupKey : (String) row.get("bnpp_id");
+                        if (dedupeKey != null && keyToIndex.containsKey(dedupeKey)) {
+                            writeList.set(keyToIndex.get(dedupeKey), row);
+                        } else {
+                            if (dedupeKey != null) keyToIndex.put(dedupeKey, writeList.size());
+                            writeList.add(row);
+                        }
+
                         if (lookupKey != null) {
                             String activeBnpp = (row.get("bnpp_id") != null) ? (String) row.get("bnpp_id") : existing.bnppId();
                             existingMap.put(lookupKey, new ExistingRecordInfo(activeBnpp, incomingHash, nextVersion));
@@ -523,7 +619,15 @@ public class DynamicSchemaResolutionService {
                     row.put("version_number", 1);
                     row.put("created_at", new Timestamp(System.currentTimeMillis()));
                     row.put("updated_at", new Timestamp(System.currentTimeMillis()));
-                    writeList.add(row);
+
+                    String dedupeKey = lookupKey != null ? lookupKey : (String) row.get("bnpp_id");
+                    if (dedupeKey != null && keyToIndex.containsKey(dedupeKey)) {
+                        writeList.set(keyToIndex.get(dedupeKey), row);
+                    } else {
+                        if (dedupeKey != null) keyToIndex.put(dedupeKey, writeList.size());
+                        writeList.add(row);
+                    }
+
                     if (lookupKey != null) {
                         String assignedBnpp = (String) row.get("bnpp_id");
                         existingMap.put(lookupKey, new ExistingRecordInfo(assignedBnpp, incomingHash, 1));
@@ -582,10 +686,6 @@ public class DynamicSchemaResolutionService {
                 return String.valueOf(val).trim();
             }
         }
-        String sbnpp = (String) row.get("source_bnpp_id");
-        if (sbnpp != null && !sbnpp.trim().isEmpty()) {
-            return sbnpp.trim();
-        }
         String bnpp = (String) row.get("bnpp_id");
         if (bnpp != null && !bnpp.trim().isEmpty()) {
             return bnpp.trim();
@@ -612,9 +712,6 @@ public class DynamicSchemaResolutionService {
                 }
             }
             if (val == null) {
-                val = r.get("source_bnpp_id");
-            }
-            if (val == null) {
                 val = r.get("bnpp_id");
             }
             if (val != null && !String.valueOf(val).trim().isEmpty()) {
@@ -623,7 +720,7 @@ public class DynamicSchemaResolutionService {
         }
         if (lookupValues.isEmpty()) return map;
 
-        String matchCol = (pkCol != null) ? pkCol : "source_bnpp_id";
+        String matchCol = (pkCol != null) ? pkCol : "bnpp_id";
         List<Object> valList = new ArrayList<>(lookupValues);
         int batchSize = 500;
 
@@ -767,17 +864,56 @@ public class DynamicSchemaResolutionService {
             try { r.setRawPayload(rs.getString("raw_payload")); } catch (Exception ignored) {}
             try { r.setPayloadHash(rs.getString("payload_hash")); } catch (Exception ignored) {}
             try { r.setStatus(rs.getString("status")); } catch (Exception ignored) {}
+
+            try {
+                java.sql.ResultSetMetaData md = rs.getMetaData();
+                Map<String, Object> colMap = new LinkedHashMap<>();
+                for (int i = 1; i <= md.getColumnCount(); i++) {
+                    String cName = md.getColumnName(i);
+                    Object val = rs.getObject(i);
+                    if (val != null) {
+                        colMap.put(cName, val);
+                        colMap.put(cName.toLowerCase(), val);
+                    }
+                }
+                r.setCachedMap(colMap);
+            } catch (Exception ignored) {}
+
             return r;
         }, lastSeenId);
     }
 
     private boolean tableExists(JdbcTemplate jdbcTemplate, String tableName) {
         try {
-            jdbcTemplate.queryForObject("SELECT 1 FROM " + tableName + " WHERE 1=0", Integer.class);
+            jdbcTemplate.execute("SELECT 1 FROM " + tableName + " WHERE 1=0");
             return true;
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    private boolean hasUnnormalizedRecords(JdbcTemplate jdbcTemplate, String tableName, Long jobExecutionId) {
+        try {
+            if (jobExecutionId != null) {
+                Integer count = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM " + tableName + " WHERE job_execution_id = ? AND (status = 'STAGED' OR status = 'RETRY' OR (status IS NOT NULL AND status != 'NORMALIZED' AND status != 'SKIPPED_UNCHANGED' AND status != 'FAILED'))",
+                        Integer.class,
+                        jobExecutionId
+                );
+                if (count != null && count > 0) return true;
+            }
+            Integer count = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM " + tableName + " WHERE status = 'STAGED' OR status = 'RETRY' OR (status IS NOT NULL AND status != 'NORMALIZED' AND status != 'SKIPPED_UNCHANGED' AND status != 'FAILED')",
+                    Integer.class
+            );
+            return count != null && count > 0;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasStagedRecordsForJob(JdbcTemplate jdbcTemplate, String tableName, Long jobExecutionId) {
+        return hasUnnormalizedRecords(jdbcTemplate, tableName, jobExecutionId);
     }
 
     private List<String> findExistingFlatTables(JdbcTemplate jdbcTemplate) {
@@ -791,11 +927,15 @@ public class DynamicSchemaResolutionService {
                     try (ResultSet rs = meta.getTables(null, schema, "%", new String[]{"TABLE"})) {
                         while (rs.next()) {
                             String name = rs.getString("TABLE_NAME");
-                            if (name != null && name.toLowerCase().endsWith("_flat")
+                            if (name != null && (name.toLowerCase().startsWith("gs_") || name.toLowerCase().endsWith("_gs") || name.toLowerCase().endsWith("_flat"))
                                     && !name.equalsIgnoreCase("staging_xml_records")
-                                    && !name.contains("__")
-                                    && !XmlSchemaDiscoveryService.isWrapperContainerTag(name.replaceFirst("(?i)_flat$", ""), null)) {
-                                flats.add(name.toLowerCase());
+                                    && !name.equalsIgnoreCase("gs_error_records")
+                                    && !name.equalsIgnoreCase("migration_errors")
+                                    && !name.contains("__")) {
+                                String base = name.toLowerCase().startsWith("gs_") ? name.substring(3) : name.replaceFirst("(?i)_(gs|flat)$", "");
+                                if (!XmlSchemaDiscoveryService.isWrapperContainerTag(base, null)) {
+                                    flats.add(name.toLowerCase());
+                                }
                             }
                         }
                     }
@@ -803,12 +943,16 @@ public class DynamicSchemaResolutionService {
             }
         } catch (Exception ex) {
             try {
-                jdbcTemplate.query("SELECT table_name FROM information_schema.tables WHERE LOWER(table_name) LIKE '%_flat'", rs -> {
+                jdbcTemplate.query("SELECT table_name FROM information_schema.tables WHERE LOWER(table_name) LIKE 'gs_%' OR LOWER(table_name) LIKE '%_gs' OR LOWER(table_name) LIKE '%_flat'", rs -> {
                     String name = rs.getString(1);
                     if (name != null && !name.equalsIgnoreCase("staging_xml_records")
-                            && !name.contains("__")
-                            && !XmlSchemaDiscoveryService.isWrapperContainerTag(name.replaceFirst("(?i)_flat$", ""), null)) {
-                        flats.add(name.toLowerCase());
+                            && !name.equalsIgnoreCase("gs_error_records")
+                            && !name.equalsIgnoreCase("migration_errors")
+                            && !name.contains("__")) {
+                        String base = name.toLowerCase().startsWith("gs_") ? name.substring(3) : name.replaceFirst("(?i)_(gs|flat)$", "");
+                        if (!XmlSchemaDiscoveryService.isWrapperContainerTag(base, null)) {
+                            flats.add(name.toLowerCase());
+                        }
                     }
                 });
             } catch (Exception ignored) {}
@@ -821,12 +965,38 @@ public class DynamicSchemaResolutionService {
         List<Long> ids = records.stream().map(StagingXmlRecord::getId).filter(Objects::nonNull).toList();
         if (!ids.isEmpty()) {
             try {
-                String updateSql = "UPDATE " + flatTable + " SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
+                String updateSql = "UPDATE " + flatTable + " SET status = ? WHERE id = ?";
                 jdbcTemplate.batchUpdate(updateSql, ids, ids.size(), (ps, id) -> {
                     ps.setString(1, status);
                     ps.setLong(2, id);
                 });
             } catch (Exception ignored) {}
+        }
+        // Also update any sibling flat tables for this entity (gs_<entity>, <entity>_gs, <entity>_flat)
+        List<String> bnppIds = records.stream().map(StagingXmlRecord::getBnppId).filter(Objects::nonNull).toList();
+        List<String> recordIds = records.stream().map(StagingXmlRecord::getRecordIdentifier).filter(Objects::nonNull).toList();
+        String norm = flatTable.toLowerCase().startsWith("gs_") ? flatTable.substring(3) : flatTable.replaceFirst("(?i)_(gs|flat)$", "");
+        for (String sibling : List.of("gs_" + norm, norm + "_gs", norm + "_flat")) {
+            if (!sibling.equalsIgnoreCase(flatTable) && tableExists(jdbcTemplate, sibling)) {
+                if (!bnppIds.isEmpty()) {
+                    try {
+                        String sibSql = "UPDATE " + sibling + " SET status = ? WHERE bnpp_id = ?";
+                        jdbcTemplate.batchUpdate(sibSql, bnppIds, bnppIds.size(), (ps, bId) -> {
+                            ps.setString(1, status);
+                            ps.setString(2, bId);
+                        });
+                    } catch (Exception ignored) {}
+                }
+                if (!recordIds.isEmpty()) {
+                    try {
+                        String sibSql = "UPDATE " + sibling + " SET status = ? WHERE record_identifier = ?";
+                        jdbcTemplate.batchUpdate(sibSql, recordIds, recordIds.size(), (ps, rId) -> {
+                            ps.setString(1, status);
+                            ps.setString(2, rId);
+                        });
+                    } catch (Exception ignored) {}
+                }
+            }
         }
     }
 
@@ -876,7 +1046,7 @@ public class DynamicSchemaResolutionService {
                         String t = rs.getString("TABLE_NAME");
                         if (t != null) {
                             String norm = t.toLowerCase();
-                            if (!norm.endsWith("_flat") && !norm.startsWith("staging_") && !norm.startsWith("batch_")) {
+                            if (!norm.startsWith("gs_") && !norm.endsWith("_flat") && !norm.endsWith("_gs") && !norm.startsWith("staging_") && !norm.startsWith("batch_")) {
                                 tables.add(t);
                             }
                         }

@@ -38,6 +38,9 @@ const AppState = {
         tableOrder: [],
         fieldMappings: [] // [{ xmlField: '@id', targetTable: 'products', targetColumn: 'id', transform: 'NONE' }]
     },
+    ingestionJsonUploadedOrModified: false,
+    ingestionJsonFileName: '',
+    ingestionJsonSource: null, // 'file' | 'editor' | 'manual'
 
     // Execution & Telemetry State
     activeJobExecutionId: null,
@@ -339,6 +342,13 @@ function switchPage(pageName) {
 
     AppState.activePage = pageName;
 
+    // Toggle fit-to-screen mode for Job List (removes outer vertical scrollbar)
+    if (pageName === 'job-list') {
+        document.body.classList.add('page-job-list-active');
+    } else {
+        document.body.classList.remove('page-job-list-active');
+    }
+
     // Update active nav button
     document.querySelectorAll('.nav-tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.app-page').forEach(p => p.classList.add('hidden'));
@@ -417,6 +427,11 @@ function initStepHandlers() {
     document.querySelectorAll('.stepper-item').forEach(item => {
         item.addEventListener('click', () => {
             const stepNum = parseInt(item.dataset.step, 10);
+            if (stepNum >= 3 && !AppState.ingestionJsonUploadedOrModified && (!AppState.mapping.fieldMappings || AppState.mapping.fieldMappings.length === 0)) {
+                showToast('Ingestion JSON file is mandatory! You cannot advance to the next flow until and unless you upload or modify the ingestion.json file.', 'warning', 'Ingestion.json Required');
+                openJsonMappingModal('import', true);
+                return;
+            }
             if (canNavigateToStep(stepNum)) {
                 navigateToStep(stepNum);
             }
@@ -482,13 +497,32 @@ function initStepHandlers() {
         navigateToStep(2);
     });
 
-    // Step 2: Use Built-in Demo XML
-    document.getElementById('btn-use-sample-xml').addEventListener('click', () => {
+    // Step 2: Use Built-in Demo XML & Ingestion JSON
+    document.getElementById('btn-use-sample-xml').addEventListener('click', async () => {
         document.getElementById('xml-file-path').value = 'sample-data/large-sample.xml';
         document.getElementById('xml-root-element').value = 'record';
         document.getElementById('batch-chunk-size').value = '1000';
         detectCandidateRootsFromInput(true);
-        showToast('Loaded demo file path: sample-data/large-sample.xml', 'info', 'Sample XML');
+
+        try {
+            const resp = await fetch('sample-data/ingestion.json');
+            if (resp.ok) {
+                const text = await resp.text();
+                const parsed = JSON.parse(text);
+                const mappings = Array.isArray(parsed) ? parsed : (parsed.mappings || []);
+                AppState.ingestionJsonUploadedOrModified = true;
+                AppState.ingestionJsonFileName = 'sample-data/ingestion.json';
+                AppState.ingestionJsonSource = 'demo';
+                AppState.mapping.fieldMappings = mappings;
+                AppState.mapping.rawMappingJson = JSON.stringify(mappings);
+                const textarea = document.getElementById('json-mapping-textarea');
+                if (textarea) textarea.value = text;
+                updateStep2IngestionStatus();
+                updateIngestionJsonStatusBanner();
+            }
+        } catch (ignored) {}
+
+        showToast('Loaded demo XML (sample-data/large-sample.xml) and Ingestion JSON (sample-data/ingestion.json)', 'info', 'Sample XML & Ingestion JSON');
     });
 
     // Step 2: Instant candidate root tags detection as soon as XML path is entered
@@ -588,12 +622,8 @@ function initStepHandlers() {
         jsonFileInput.addEventListener('change', (e) => {
             const file = e.target.files && e.target.files[0];
             if (!file) return;
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                document.getElementById('json-mapping-textarea').value = event.target.result;
-                showToast(`Loaded ${file.name} into JSON editor.`, 'info', 'File Read');
-            };
-            reader.readAsText(file);
+            handleIngestionJsonFileUpload(file, true);
+            e.target.value = '';
         });
     }
 
@@ -613,56 +643,98 @@ function initStepHandlers() {
         btnSubmitRegister.addEventListener('click', () => submitRegisterSchema());
     }
 
-    // Step 2: Source XML Next (Triggers Schema Discovery)
-    document.getElementById('btn-step2-next').addEventListener('click', () => {
-        collectSourceForm();
-        if (!AppState.source.filePath) {
-            showToast('Please specify an XML Source File Path or Cloud Storage URI.', 'warning', 'Required Field');
-            return;
-        }
-        runSchemaDiscovery();
-    });
+    // Step 2: Files & Tables -> Next to Mapping Flow
+    const btnStep2Next = document.getElementById('btn-step2-next');
+    if (btnStep2Next) {
+        btnStep2Next.addEventListener('click', async () => {
+            collectSourceForm();
+            if (!AppState.source.filePath) {
+                showToast('Please specify an XML Source File Path or Cloud Storage URI.', 'warning', 'Required Field');
+                return;
+            }
+            if (!AppState.ingestionJsonUploadedOrModified && (!AppState.mapping.fieldMappings || AppState.mapping.fieldMappings.length === 0)) {
+                showToast('Ingestion JSON file is mandatory! You cannot move to the next flow until and unless you upload or modify the ingestion.json file.', 'warning', 'Ingestion.json Required');
+                openJsonMappingModal('import', true);
+                return;
+            }
 
-    // Step 3: Rescan Discovery
-    document.getElementById('btn-rescan').addEventListener('click', () => {
-        runSchemaDiscovery();
-    });
+            // Provision tables (strictly 3 types: Ingestion.json tables, gs_<entityname> flat tables, gs_error_records)
+            await createTargetTablesInDb();
 
-    // Step 3: Create Tables & Flat Table
+            // Auto-assign mappings from ingestion.json
+            autoAlignMappings();
+
+            navigateToStep(3);
+        });
+    }
+
+    // Step 2: Ingestion JSON Upload & Edit Buttons
+    const step2JsonInput = document.getElementById('step2-json-file-input');
+    if (step2JsonInput) {
+        step2JsonInput.addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            handleIngestionJsonFileUpload(file, true);
+            e.target.value = '';
+        });
+    }
+    const btnStep2EditJson = document.getElementById('btn-step2-edit-json');
+    if (btnStep2EditJson) {
+        btnStep2EditJson.addEventListener('click', () => openJsonMappingModal('import', true));
+    }
+
+    // Step 2: Create Tables Button (The 3 Table Types)
     const btnCreateTables = document.getElementById('btn-create-discovered-tables');
     if (btnCreateTables) {
         btnCreateTables.addEventListener('click', () => {
+            if (!AppState.ingestionJsonUploadedOrModified && (!AppState.mapping.fieldMappings || AppState.mapping.fieldMappings.length === 0)) {
+                showToast('Tables can only be created based on your ingestion.json file. Please upload or modify ingestion.json.', 'warning', 'Ingestion.json Required');
+                openJsonMappingModal('import', true);
+                return;
+            }
             createTargetTablesInDb();
         });
     }
 
-    // Step 3: Next to Mapping
-    document.getElementById('btn-step3-next').addEventListener('click', () => {
-        navigateToStep(4);
-        initMappingGrid();
-    });
+    // Step 3: Rescan (if invoked)
+    const btnRescan = document.getElementById('btn-rescan');
+    if (btnRescan) {
+        btnRescan.addEventListener('click', () => runSchemaDiscovery());
+    }
 
-    // Step 4: Auto-Map Button
-    document.getElementById('btn-auto-map').addEventListener('click', () => {
-        autoAlignMappings();
-    });
+    // Step 3: Auto-Map Button (Auto-Align from Ingestion.json)
+    const btnAutoMap = document.getElementById('btn-auto-map');
+    if (btnAutoMap) {
+        btnAutoMap.addEventListener('click', () => autoAlignMappings());
+    }
 
-    // Step 4: Clear Mapping Button
-    document.getElementById('btn-clear-mapping').addEventListener('click', () => {
-        clearMappings();
-    });
+    // Step 3: Clear Mapping Button
+    const btnClearMap = document.getElementById('btn-clear-mapping');
+    if (btnClearMap) {
+        btnClearMap.addEventListener('click', () => clearMappings());
+    }
 
-    // Step 4: Add Custom Row
-    document.getElementById('btn-add-mapping-row').addEventListener('click', () => {
-        addMappingRow();
-    });
+    // Step 3: Add Custom Row
+    const btnAddRow = document.getElementById('btn-add-mapping-row');
+    if (btnAddRow) {
+        btnAddRow.addEventListener('click', () => addMappingRow());
+    }
 
-    // Step 4: Next to Review & Confirm
-    document.getElementById('btn-step4-next').addEventListener('click', () => {
-        showJobConfigurationOverview();
-    });
+    // Step 3: Next to Review & Confirm
+    const btnStep3Next = document.getElementById('btn-step3-next');
+    if (btnStep3Next) {
+        btnStep3Next.addEventListener('click', () => {
+            const mappings = collectFieldMappings();
+            if (!mappings || mappings.length === 0) {
+                showToast('Please ensure mappings are defined before moving to Review.', 'warning', 'No Mappings');
+                return;
+            }
+            AppState.mapping.fieldMappings = mappings;
+            navigateToStep(4);
+        });
+    }
 
-    // Step 5: Save as Draft
+    // Step 4: Save as Draft
     const btnSaveDraft = document.getElementById('btn-save-job-config');
     if (btnSaveDraft) {
         btnSaveDraft.addEventListener('click', () => {
@@ -670,7 +742,7 @@ function initStepHandlers() {
         });
     }
 
-    // Step 5: Submit for Approval
+    // Step 4: Submit for Approval
     const btnSubmitApproval = document.getElementById('btn-submit-approval');
     if (btnSubmitApproval) {
         btnSubmitApproval.addEventListener('click', () => {
@@ -678,7 +750,7 @@ function initStepHandlers() {
         });
     }
 
-    // Step 5: Save & Run Migration Immediately (Admin only)
+    // Step 4: Save & Run Migration Immediately (Admin only)
     const btnSaveRun = document.getElementById('btn-save-and-run-job');
     if (btnSaveRun) {
         btnSaveRun.addEventListener('click', () => {
@@ -690,17 +762,21 @@ function initStepHandlers() {
 function canNavigateToStep(stepNum) {
     if (stepNum === 1) return true;
     if (stepNum === 2) return true;
-    if (stepNum === 3) return !!AppState.source.filePath;
-    if (stepNum === 4) return AppState.schema.xmlTags.length > 0;
-    if (stepNum === 5) return AppState.mapping.fieldMappings.length > 0;
+    if (stepNum === 3) return AppState.ingestionJsonUploadedOrModified || (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0);
+    if (stepNum === 4) return AppState.ingestionJsonUploadedOrModified && AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0;
     return false;
 }
 
 function navigateToStep(step) {
+    if (step >= 3 && !AppState.ingestionJsonUploadedOrModified && (!AppState.mapping.fieldMappings || AppState.mapping.fieldMappings.length === 0)) {
+        showToast('Ingestion JSON file is mandatory! You cannot move to the next flow until and unless you upload or modify the ingestion.json file.', 'warning', 'Ingestion.json Required');
+        openJsonMappingModal('import', true);
+        return;
+    }
     AppState.currentStep = step;
 
-    // Update Stepper indicators
-    for (let i = 1; i <= 5; i++) {
+    // Update Stepper indicators (1 to 4)
+    for (let i = 1; i <= 4; i++) {
         const indicator = document.getElementById(`step${i}-indicator`);
         if (!indicator) continue;
         indicator.classList.remove('active', 'completed');
@@ -711,8 +787,8 @@ function navigateToStep(step) {
         }
     }
 
-    // Toggle Step Sections
-    for (let i = 1; i <= 5; i++) {
+    // Toggle Step Sections (1 to 4)
+    for (let i = 1; i <= 4; i++) {
         const section = document.getElementById(`step-section-${i}`);
         if (!section) continue;
         if (i === step) {
@@ -723,10 +799,20 @@ function navigateToStep(step) {
     }
 
     if (step === 2) {
+        updateStep2IngestionStatus();
         const pathInput = document.getElementById('xml-file-path');
         if (pathInput && pathInput.value.trim() && !lastDetectedXmlPath) {
             detectCandidateRootsFromInput(true);
         }
+    }
+
+    if (step === 3) {
+        updateIngestionJsonStatusBanner();
+        initMappingGrid();
+    }
+
+    if (step === 4) {
+        showJobConfigurationOverview();
     }
 
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -876,6 +962,10 @@ async function resetWorkflow(clearDbConfig = false) {
         tableOrder: [],
         fieldMappings: []
     };
+    AppState.ingestionJsonUploadedOrModified = false;
+    AppState.ingestionJsonFileName = '';
+    AppState.ingestionJsonSource = null;
+    updateIngestionJsonStatusBanner();
     AppState.previewSkipped = false;
     AppState.isDummyData = false;
     AppState.previewSkipReason = '';
@@ -1228,11 +1318,11 @@ async function runSchemaDiscovery(targetStep = 3) {
             AppState.source.fileSizeBytes = result.fileSizeBytes;
             AppState.source.fileSizeFormatted = result.fileSizeFormatted;
 
-            // Auto-populate generated mappings if user hasn't provided manual mappings
-            if ((!AppState.mapping.fieldMappings || AppState.mapping.fieldMappings.length === 0)
-                && result.generatedMappings && result.generatedMappings.length > 0) {
-                AppState.mapping.fieldMappings = result.generatedMappings;
-                applyAutoGeneratedMappings(result.generatedMappings);
+            // Field mappings are strictly defined by the user's ingestion.json.
+            // Do NOT auto-populate raw heuristic dummy mappings from XML tags.
+            if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
+                // If user has provided/uploaded ingestion.json mappings, keep them aligned
+                autoAlignMappings();
             }
             if (result.discoveredRelationships && result.discoveredRelationships.length > 0) {
                 AppState.mapping.relationships = result.discoveredRelationships;
@@ -1525,6 +1615,20 @@ function renderFlattenedTablesBanner(flatTables) {
 }
 
 async function createTargetTablesInDb() {
+    if (!AppState.ingestionJsonUploadedOrModified) {
+        showToast('Cannot create tables: ingestion.json file is mandatory. Tables must be created based strictly on your ingestion.json file. Please upload or modify ingestion.json first.', 'error', 'Ingestion JSON Required');
+        openJsonMappingModal('import', true);
+        return;
+    }
+
+    const mappings = AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0
+        ? AppState.mapping.fieldMappings
+        : collectFieldMappings();
+    if (!mappings || mappings.length === 0) {
+        showToast('No field mappings found in ingestion configuration. Please upload or specify mappings first.', 'warning', 'No Mappings');
+        return;
+    }
+
     const btn = document.getElementById('btn-create-discovered-tables');
     const origHtml = btn ? btn.innerHTML : '';
     if (btn) {
@@ -1550,7 +1654,9 @@ async function createTargetTablesInDb() {
         schemaVersion: AppState.source.schemaVersion,
         sampleLinesLimit: 1000,
         autoCreateTables: true,
-        mappings: AppState.mapping.fieldMappings || []
+        ingestionJsonMandatory: true,
+        mappings: mappings,
+        mappingJson: JSON.stringify(mappings)
     };
 
     try {
@@ -1567,7 +1673,7 @@ async function createTargetTablesInDb() {
             renderFlattenedTablesBanner(result.createdFlatTables || []);
             renderDiscoveredSchema();
             const count = AppState.schema.tables.length;
-            showToast(`Successfully created ${count} canonical tables in target DB.`, 'success', 'Tables Provisioned');
+            showToast(`Successfully created ${count} canonical tables and flat table gs_<entity> based strictly on ingestion.json.`, 'success', 'Tables Provisioned');
         } else {
             showToast(result.message || 'Failed to create tables.', 'error', 'Creation Error');
         }
@@ -1585,25 +1691,18 @@ async function createTargetTablesInDb() {
 // STEP 4: MAPPING & DETERMINISTIC TAG ORDER SEQUENCE
 // =========================================================================
 function initMappingGrid() {
+    updateIngestionJsonStatusBanner();
     const container = document.getElementById('mapping-rows-container');
     if (!container) return;
 
-    if (container.children.length === 0) {
-        if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
-            AppState.mapping.fieldMappings.forEach(m => {
-                addMappingRow(
-                    m.xmlField || '',
-                    m.targetTable || '',
-                    m.targetColumn || '',
-                    m.transform || m.transformation || 'NONE',
-                    m.constraintType || 'NONE'
-                );
-            });
-            updateTableSequenceBanner();
-        } else {
+    if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
+        if (container.children.length === 0 || container.children.length !== AppState.mapping.fieldMappings.length) {
             autoAlignMappings();
+        } else {
+            updateTableSequenceBanner();
         }
     } else {
+        container.innerHTML = '';
         updateTableSequenceBanner();
     }
 }
@@ -1638,95 +1737,76 @@ function isTableMatchForPrefix(tableName, tagPrefix) {
 
 function autoAlignMappings() {
     const container = document.getElementById('mapping-rows-container');
-    container.innerHTML = '';
+    if (!container) return;
 
-    if (AppState.schema.xmlTags.length === 0 || AppState.schema.tables.length === 0) {
-        showToast('Requires both XML tags and DB tables to auto-align.', 'warning', 'No Data');
+    // 1. Based on ingestion file, define mapping and auto assign xml tags, target table, and destination columns
+    if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
+        container.innerHTML = '';
+        AppState.mapping.fieldMappings.forEach(m => {
+            addMappingRow(
+                m.xmlField || '',
+                m.targetTable || '',
+                m.targetColumn || '',
+                m.transform || m.transformation || 'NONE',
+                m.constraintType || 'NONE'
+            );
+        });
+        updateTableSequenceBanner();
+        showToast(`Auto-assigned ${AppState.mapping.fieldMappings.length} mappings from ingestion.json.`, 'success', 'Auto-Assign Complete');
         return;
     }
 
-    let matchCount = 0;
-
-    AppState.schema.xmlTags.forEach((tag, idx) => {
-        const rawName = tag.name;
-        // e.g. "countries/country/@id", "country/@id", "person/name", "age", "@status"
-        const parts = rawName.split('/');
-        const colPart = parts[parts.length - 1].replace('@', '').toLowerCase();
-        let tagPrefix = parts.length > 1 ? parts[parts.length - 2].toLowerCase() : '';
-        if (!tagPrefix && parts.length > 0 && parts[0].includes('@')) {
-            tagPrefix = parts[0].substring(0, parts[0].indexOf('@')).toLowerCase();
-        }
-
-        let bestTable = '';
-        let bestColumn = '';
-
-        // Priority 1: Match by table prefix hint (e.g. "country" matches "countries", "descriptionlist2" matches "descriptionlists2")
-        if (tagPrefix) {
-            const candidateTables = AppState.schema.tables.filter(tbl => isTableMatchForPrefix(tbl.tableName, tagPrefix));
-
-            for (const tbl of candidateTables) {
-                for (const col of tbl.columns) {
-                    const normCol = col.columnName.toLowerCase().replace(/_/g, '');
-                    const normXml = colPart.replace(/_/g, '');
-                    if (normCol === normXml) {
-                        bestTable = tbl.tableName;
-                        bestColumn = col.columnName;
-                        break;
-                    }
-                }
-                if (bestTable) break;
+    // 2. Check if raw JSON is available in AppState or modal textarea
+    const modalTextarea = document.getElementById('json-mapping-textarea');
+    const rawJson = AppState.mapping.rawMappingJson || (modalTextarea ? modalTextarea.value.trim() : '');
+    if (rawJson) {
+        try {
+            const parsed = JSON.parse(rawJson);
+            const mappings = Array.isArray(parsed) ? parsed : (parsed.mappings || []);
+            if (mappings.length > 0) {
+                AppState.mapping.fieldMappings = mappings;
+                AppState.ingestionJsonUploadedOrModified = true;
+                container.innerHTML = '';
+                mappings.forEach(m => {
+                    addMappingRow(
+                        m.xmlField || '',
+                        m.targetTable || '',
+                        m.targetColumn || '',
+                        m.transform || m.transformation || 'NONE',
+                        m.constraintType || 'NONE'
+                    );
+                });
+                updateTableSequenceBanner();
+                updateIngestionJsonStatusBanner();
+                showToast(`Auto-assigned ${mappings.length} mappings from ingestion.json.`, 'success', 'Auto-Assign Complete');
+                return;
             }
-        }
+        } catch (ignored) {}
+    }
 
-        // Priority 2: Full scan across all tables if no prefix match or column not found in candidate (avoid assigning generic columns across prefixes)
-        const genericCols = ['id', 'action', 'status', 'name', 'type', 'code', 'created_at', 'updated_at'];
-        const isGenericCol = genericCols.includes(colPart);
-        if (!bestTable && (!tagPrefix || !isGenericCol)) {
-            for (const tbl of AppState.schema.tables) {
-                for (const col of tbl.columns) {
-                    const normCol = col.columnName.toLowerCase().replace(/_/g, '');
-                    const normXml = colPart.replace(/_/g, '');
-                    if (normCol === normXml) {
-                        bestTable = tbl.tableName;
-                        bestColumn = col.columnName;
-                        break;
-                    }
-                }
-                if (bestTable) break;
-            }
-        }
+    // 3. Fallback: prompt user to upload ingestion.json
+    showToast('Ingestion JSON is required to auto-align mappings. Please upload or paste your ingestion.json file in Step 2.', 'warning', 'Ingestion.json Required');
+    openJsonMappingModal('import', true);
+}
 
-        if (bestTable) {
-            matchCount++;
-            let constraint = 'NONE';
-            const lowerCol = bestColumn.toLowerCase();
-            const lowerTbl = bestTable.toLowerCase();
-            const rootElem = (AppState.source.rootElement || 'record').toLowerCase();
-
-            if (lowerCol === 'id' || lowerCol === `${lowerTbl}_id` || lowerCol === `${rootElem}_id`) {
-                if (lowerTbl === rootElem || lowerTbl === 'records') {
-                    constraint = 'PK';
-                } else if (lowerCol === `${rootElem}_id`) {
-                    constraint = 'FK';
-                } else if (lowerCol === 'id' || lowerCol === `${lowerTbl}_id`) {
-                    constraint = 'PK';
-                }
-            }
-            addMappingRow(rawName, bestTable, bestColumn, 'NONE', constraint);
-        } else if (idx < 6 && !tagPrefix) {
-            const firstTbl = AppState.schema.tables[0];
-            addMappingRow(rawName, firstTbl.tableName, '', 'NONE', 'NONE');
-        }
-    });
-
+function onMappingRowChanged(sourceDesc = 'Modified in Wizard') {
+    AppState.ingestionJsonUploadedOrModified = true;
+    if (!AppState.ingestionJsonFileName || AppState.ingestionJsonFileName === 'ingestion.json') {
+        AppState.ingestionJsonFileName = sourceDesc;
+    }
     updateTableSequenceBanner();
-    showToast(`Auto-aligned ${matchCount} columns with intelligent table-prefix detection.`, 'success', 'Auto Alignment Complete');
+    updateIngestionJsonStatusBanner();
 }
 
 function clearMappings() {
     document.getElementById('mapping-rows-container').innerHTML = '';
+    AppState.mapping.fieldMappings = [];
+    AppState.ingestionJsonUploadedOrModified = false;
+    AppState.ingestionJsonFileName = '';
+    AppState.ingestionJsonSource = null;
     updateTableSequenceBanner();
-    showToast('All mapping rows cleared.', 'info');
+    updateIngestionJsonStatusBanner();
+    showToast('All mapping rows cleared. Ingestion.json is mandatory to proceed.', 'info');
 }
 
 function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', selectedTransform = 'NONE', selectedConstraint = 'NONE') {
@@ -1736,17 +1816,30 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
 
     // 1. XML Source Field Select
     let xmlOptions = '<option value="">-- Select XML Tag / Attr --</option>';
-    AppState.schema.xmlTags.forEach(t => {
-        const sel = t.name === selectedXml ? 'selected' : '';
-        xmlOptions += `<option value="${escapeHtml(t.name)}" ${sel}>${escapeHtml(t.name)} (${escapeHtml(t.detectedType || 'VARCHAR')})</option>`;
+    let matchedXml = false;
+    (AppState.schema.xmlTags || []).forEach(t => {
+        const sel = t.name === selectedXml;
+        if (sel) matchedXml = true;
+        xmlOptions += `<option value="${escapeHtml(t.name)}" ${sel ? 'selected' : ''}>${escapeHtml(t.name)} (${escapeHtml(t.detectedType || 'VARCHAR')})</option>`;
     });
+    if (selectedXml && !matchedXml) {
+        xmlOptions += `<option value="${escapeHtml(selectedXml)}" selected>${escapeHtml(selectedXml)}</option>`;
+    }
 
     // 2. Target Table Select
     let tableOptions = '<option value="">-- Select Table --</option>';
-    AppState.schema.tables.forEach(tbl => {
-        const sel = tbl.tableName === selectedTable ? 'selected' : '';
-        tableOptions += `<option value="${escapeHtml(tbl.tableName)}" ${sel}>${escapeHtml(tbl.tableName)}</option>`;
+    let matchedTable = false;
+    (AppState.schema.tables || []).forEach(tbl => {
+        const sel = tbl.tableName.toLowerCase() === selectedTable.toLowerCase();
+        if (sel) matchedTable = true;
+        tableOptions += `<option value="${escapeHtml(tbl.tableName)}" ${sel ? 'selected' : ''}>${escapeHtml(tbl.tableName)}</option>`;
     });
+    if (selectedTable && !matchedTable) {
+        tableOptions += `<option value="${escapeHtml(selectedTable)}" selected>${escapeHtml(selectedTable)}</option>`;
+        if (!AppState.schema.tables.some(t => t.tableName.toLowerCase() === selectedTable.toLowerCase())) {
+            AppState.schema.tables.push({ tableName: selectedTable, columns: [] });
+        }
+    }
 
     const isPk = selectedConstraint === 'PK';
     const isFk = selectedConstraint === 'FK';
@@ -1813,17 +1906,27 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
         } else {
             constraintSelect.classList.add('text-gray-600');
         }
+        onMappingRowChanged('Modified Constraints');
     });
 
     const updateColumns = (tblName, preselectCol = '') => {
         colSelect.innerHTML = '<option value="">-- Select Column --</option>';
         if (!tblName) return;
-        const found = AppState.schema.tables.find(t => t.tableName === tblName);
-        if (found && found.columns) {
+        const found = AppState.schema.tables.find(t => t.tableName.toLowerCase() === tblName.toLowerCase());
+        let matchedCol = false;
+        if (found && found.columns && found.columns.length > 0) {
             found.columns.forEach(c => {
-                const sel = c.columnName === preselectCol ? 'selected' : '';
-                colSelect.innerHTML += `<option value="${escapeHtml(c.columnName)}" ${sel}>${escapeHtml(c.columnName)} (${escapeHtml(c.dataType)})</option>`;
+                const sel = c.columnName.toLowerCase() === preselectCol.toLowerCase();
+                if (sel) matchedCol = true;
+                colSelect.innerHTML += `<option value="${escapeHtml(c.columnName)}" ${sel ? 'selected' : ''}>${escapeHtml(c.columnName)} (${escapeHtml(c.dataType || 'VARCHAR')})</option>`;
             });
+        }
+        if (preselectCol && !matchedCol) {
+            colSelect.innerHTML += `<option value="${escapeHtml(preselectCol)}" selected>${escapeHtml(preselectCol)}</option>`;
+            if (found) {
+                if (!found.columns) found.columns = [];
+                found.columns.push({ columnName: preselectCol, dataType: 'VARCHAR' });
+            }
         }
     };
 
@@ -1833,11 +1936,19 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
 
     tableSelect.addEventListener('change', () => {
         updateColumns(tableSelect.value);
-        updateTableSequenceBanner();
+        onMappingRowChanged('Modified Target Table');
+    });
+
+    colSelect.addEventListener('change', () => {
+        onMappingRowChanged('Modified Target Column');
+    });
+
+    row.querySelector('.map-transform').addEventListener('change', () => {
+        onMappingRowChanged('Modified Transformation');
     });
 
     row.querySelector('.map-xml-field').addEventListener('change', () => {
-        updateTableSequenceBanner();
+        onMappingRowChanged('Modified XML Field');
     });
 
     // Reorder event listeners
@@ -1845,7 +1956,7 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
         const prev = row.previousElementSibling;
         if (prev) {
             container.insertBefore(row, prev);
-            updateTableSequenceBanner();
+            onMappingRowChanged('Reordered Mappings');
         }
     });
 
@@ -1853,13 +1964,13 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
         const next = row.nextElementSibling;
         if (next) {
             container.insertBefore(next, row);
-            updateTableSequenceBanner();
+            onMappingRowChanged('Reordered Mappings');
         }
     });
 
     row.querySelector('.btn-delete-row').addEventListener('click', () => {
         row.remove();
-        updateTableSequenceBanner();
+        onMappingRowChanged('Removed Mapping Row');
     });
 
     updateTableSequenceBanner();
@@ -2089,11 +2200,11 @@ function showJobConfigurationOverview() {
         const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
         rootTokens.forEach(rt => {
             const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-            flatTableNames.add(clean.endsWith('_flat') ? clean : clean + '_flat');
+            flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
         });
         mappedTables.forEach(mt => {
             const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-            flatTableNames.add(clean.endsWith('_flat') ? clean : clean + '_flat');
+            flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
         });
 
         flatTableNames.forEach(ft => {
@@ -2127,7 +2238,9 @@ function showJobConfigurationOverview() {
         jobNameInput.value = `${primaryTbl.charAt(0).toUpperCase() + primaryTbl.slice(1)} Ingestion Job`;
     }
 
-    navigateToStep(5);
+    if (AppState.currentStep !== 4) {
+        navigateToStep(4);
+    }
 }
 
 // Backward-compatible alias
@@ -2149,9 +2262,16 @@ async function saveJobConfiguration(runImmediately = false, isSubmitApproval = f
         return;
     }
 
+    if (!AppState.ingestionJsonUploadedOrModified) {
+        showToast('Ingestion JSON file is mandatory! You cannot save or launch a job without uploading or modifying the ingestion.json file.', 'error', 'Ingestion.json Required');
+        navigateToStep(2);
+        openJsonMappingModal('import', true);
+        return;
+    }
+
     const mappings = AppState.mapping.fieldMappings.length > 0 ? AppState.mapping.fieldMappings : collectFieldMappings();
     if (mappings.length === 0) {
-        showToast('Please configure at least one column mapping.', 'warning', 'No Mappings');
+        showToast('Please configure at least one column mapping in ingestion.json.', 'warning', 'No Mappings');
         return;
     }
 
@@ -2192,6 +2312,9 @@ async function saveJobConfiguration(runImmediately = false, isSubmitApproval = f
             url: AppState.dbConnection.url
         },
         mappings: mappings,
+        mappingJson: JSON.stringify(mappings),
+        ingestMappingJson: JSON.stringify(mappings),
+        ingestionJsonPath: AppState.ingestionJsonFileName || 'ingestion.json',
         createdBy: AppState.currentUser ? AppState.currentUser.username : 'planner'
     };
 
@@ -2319,11 +2442,259 @@ function onSchemaRegistryVersionSelected() {
     }
 }
 
-function openJsonMappingModal(mode = 'import') {
+function updateStep2IngestionStatus() {
+    const statusDiv = document.getElementById('step2-ingestion-json-status');
+    const canonList = document.getElementById('step2-canonical-tables-list');
+    const flatList = document.getElementById('step2-flat-tables-list');
+    if (!statusDiv) return;
+
+    const isLoaded = !!AppState.ingestionJsonUploadedOrModified;
+    const mappings = AppState.mapping.fieldMappings || [];
+    const distinctTables = Array.from(new Set(mappings.map(m => m.targetTable).filter(Boolean)));
+    const rawRoots = document.getElementById('xml-root-element')?.value.trim() || AppState.source.rootElement || '';
+    const rootTokens = rawRoots ? rawRoots.split(/[,;\s]+/).filter(Boolean) : [];
+
+    if (isLoaded && mappings.length > 0) {
+        statusDiv.innerHTML = `
+            <div class="flex items-center justify-between p-2.5 rounded-lg bg-emerald-100/70 border border-emerald-300 text-emerald-950 font-medium">
+                <div class="flex items-center gap-2">
+                    <i class="fas fa-circle-check text-emerald-600"></i>
+                    <span><strong>${escapeHtml(AppState.ingestionJsonFileName || 'ingestion.json')}</strong> active (${mappings.length} column mappings across ${distinctTables.length} canonical tables).</span>
+                </div>
+                <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-200 text-emerald-900 uppercase">Ready</span>
+            </div>
+        `;
+    } else {
+        statusDiv.innerHTML = `
+            <div class="flex items-center gap-2 text-amber-900">
+                <i class="fas fa-exclamation-circle text-amber-600"></i>
+                <span>No ingestion.json loaded yet. Please upload your ingestion.json file or click "Load Built-in Demo".</span>
+            </div>
+        `;
+    }
+
+    if (canonList) {
+        if (distinctTables.length > 0) {
+            canonList.innerHTML = distinctTables.map(t =>
+                `<span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold">${escapeHtml(t)}</span>`
+            ).join(' ');
+        } else {
+            canonList.innerHTML = '<span class="text-gray-400 italic">Defined in ingestion.json</span>';
+        }
+    }
+
+    if (flatList) {
+        const flatTags = rootTokens.length > 0 ? rootTokens : (distinctTables.length > 0 ? distinctTables : ['record']);
+        flatList.innerHTML = flatTags.map(t => {
+            const clean = t.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+            const gsName = clean.startsWith('gs_') ? clean : 'gs_' + clean;
+            return `<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 font-bold">${escapeHtml(gsName)}</span>`;
+        }).join(' ');
+    }
+}
+
+function updateIngestionJsonStatusBanner() {
+    const banner = document.getElementById('ingestion-json-status-banner');
+    if (!banner) return;
+
+    const isUploadedOrModified = !!AppState.ingestionJsonUploadedOrModified;
+    const mappings = AppState.mapping.fieldMappings || [];
+    const distinctTables = Array.from(new Set(mappings.map(m => m.targetTable).filter(Boolean)));
+
+    if (!isUploadedOrModified) {
+        banner.className = 'mb-4 p-4 rounded-xl border border-amber-300 bg-amber-50/90 text-amber-950 transition-all duration-300 shadow-xs';
+        banner.innerHTML = `
+            <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div class="flex items-start gap-3">
+                    <div class="w-10 h-10 rounded-xl bg-amber-100 border border-amber-300 text-amber-700 flex items-center justify-center text-lg flex-shrink-0 mt-0.5">
+                        <i class="fas fa-file-circle-exclamation animate-pulse"></i>
+                    </div>
+                    <div>
+                        <div class="font-bold text-sm text-amber-950 flex flex-wrap items-center gap-2">
+                            <span>Ingestion JSON File Required (Mandatory)</span>
+                            <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider bg-amber-200 text-amber-900 border border-amber-300">Flow Locked</span>
+                        </div>
+                        <p class="text-xs text-amber-800 mt-1 leading-relaxed">
+                            You <strong>cannot move to the next flow (Review &amp; Execution)</strong> until you upload or modify an <code>ingestion.json</code> file.
+                            Database tables will be strictly provisioned from your ingestion configuration (no dynamic XML schema guessing).
+                        </p>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2 flex-shrink-0 self-end sm:self-center">
+                    <label class="btn btn-primary text-xs py-1.5 px-3.5 cursor-pointer flex items-center gap-1.5 shadow-sm hover:opacity-95">
+                        <i class="fas fa-upload"></i>
+                        <span>Upload ingestion.json</span>
+                        <input type="file" id="banner-json-file-input" accept=".json" class="hidden">
+                    </label>
+                    <button type="button" id="btn-banner-edit-json" class="btn btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5 bg-white border border-amber-200 text-amber-900 hover:bg-amber-100">
+                        <i class="fas fa-code text-bnp-emerald"></i>
+                        <span>Ingest / Edit JSON</span>
+                    </button>
+                </div>
+            </div>
+        `;
+    } else {
+        const fileLabel = AppState.ingestionJsonFileName || 'ingestion.json';
+        banner.className = 'mb-4 p-4 rounded-xl border border-emerald-300 bg-emerald-50/90 text-emerald-950 transition-all duration-300 shadow-xs';
+        banner.innerHTML = `
+            <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div class="flex items-start gap-3">
+                    <div class="w-10 h-10 rounded-xl bg-emerald-100 border border-emerald-300 text-bnp-emerald flex items-center justify-center text-lg flex-shrink-0 mt-0.5">
+                        <i class="fas fa-check-circle"></i>
+                    </div>
+                    <div>
+                        <div class="font-bold text-sm text-emerald-950 flex flex-wrap items-center gap-2">
+                            <span>Ingestion JSON Active &amp; Validated</span>
+                            <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wider bg-emerald-200 text-emerald-900 border border-emerald-300">Next Flow Unlocked</span>
+                        </div>
+                        <p class="text-xs text-emerald-800 mt-1 leading-relaxed">
+                            Source: <strong class="font-mono text-emerald-900">${escapeHtml(fileLabel)}</strong> &bull;
+                            <span class="font-bold text-emerald-900">${mappings.length}</span> mapped fields across <span class="font-bold text-emerald-900">${distinctTables.length}</span> canonical tables.
+                            Tables will be provisioned strictly based on this configuration.
+                        </p>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2 flex-shrink-0 self-end sm:self-center">
+                    <button type="button" id="btn-banner-create-tables" class="btn text-xs py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 shadow-xs" title="Create canonical relational tables strictly defined in ingestion.json">
+                        <i class="fas fa-database"></i>
+                        <span>Create Tables from JSON</span>
+                    </button>
+                    <label class="btn btn-secondary text-xs py-1.5 px-3 cursor-pointer flex items-center gap-1.5 bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-100">
+                        <i class="fas fa-arrows-rotate text-gray-500"></i>
+                        <span>Replace File</span>
+                        <input type="file" id="banner-json-file-input" accept=".json" class="hidden">
+                    </label>
+                    <button type="button" id="btn-banner-edit-json" class="btn btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5 bg-white border border-emerald-200 text-emerald-900 hover:bg-emerald-100">
+                        <i class="fas fa-pen-to-square text-bnp-emerald"></i>
+                        <span>Edit JSON</span>
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    // Attach dynamic listeners inside the banner
+    const fileInput = document.getElementById('banner-json-file-input');
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (file) handleIngestionJsonFileUpload(file, true);
+            e.target.value = '';
+        });
+    }
+
+    const editBtn = document.getElementById('btn-banner-edit-json');
+    if (editBtn) {
+        editBtn.addEventListener('click', () => {
+            openJsonMappingModal('import', !AppState.ingestionJsonUploadedOrModified);
+        });
+    }
+
+    const createTablesBtn = document.getElementById('btn-banner-create-tables');
+    if (createTablesBtn) {
+        createTablesBtn.addEventListener('click', () => {
+            createTargetTablesInDb();
+        });
+    }
+}
+
+function handleIngestionJsonFileUpload(file, autoApply = true) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        const text = event.target.result;
+        try {
+            const parsed = JSON.parse(text);
+            let mappings = [];
+            let tableOrder = [];
+            let rootElem = null;
+            let chunkSize = null;
+
+            if (Array.isArray(parsed)) {
+                mappings = parsed;
+            } else if (typeof parsed === 'object' && parsed !== null) {
+                mappings = parsed.mappings || [];
+                tableOrder = parsed.tableOrder || [];
+                rootElem = parsed.rootElement || parsed.rootTag || parsed.recordRootElement;
+                chunkSize = parsed.chunkSize || parsed.batchChunkSize;
+            }
+
+            if (!mappings || mappings.length === 0) {
+                showToast(`File '${file.name}' was parsed but contains no valid mapping array.`, 'warning', 'Invalid Ingestion JSON');
+                return;
+            }
+
+            const textarea = document.getElementById('json-mapping-textarea');
+            if (textarea) textarea.value = text;
+
+            if (rootElem) {
+                const rootInput = document.getElementById('xml-root-element');
+                if (rootInput) rootInput.value = rootElem;
+                AppState.source.rootElement = rootElem;
+            }
+            if (chunkSize) {
+                const chunkInput = document.getElementById('batch-chunk-size');
+                if (chunkInput) chunkInput.value = chunkSize;
+                AppState.source.chunkSize = chunkSize;
+            }
+            if (tableOrder && tableOrder.length > 0) {
+                AppState.mapping.tableOrder = tableOrder;
+            }
+
+            AppState.ingestionJsonUploadedOrModified = true;
+            AppState.ingestionJsonFileName = file.name;
+            AppState.ingestionJsonSource = 'file';
+            AppState.mapping.fieldMappings = mappings;
+            AppState.mapping.rawMappingJson = JSON.stringify(mappings);
+
+            const container = document.getElementById('mapping-rows-container');
+            if (container) {
+                container.innerHTML = '';
+                mappings.forEach(m => {
+                    addMappingRow(
+                        m.xmlField || '',
+                        m.targetTable || '',
+                        m.targetColumn || '',
+                        m.transform || m.transformation || 'NONE',
+                        m.constraintType || 'NONE'
+                    );
+                });
+                updateTableSequenceBanner();
+            }
+
+            updateIngestionJsonStatusBanner();
+            updateStep2IngestionStatus();
+            showToast(`Loaded and applied '${file.name}' with ${mappings.length} mappings. Tables will be created strictly from this file.`, 'success', 'Ingestion.json Loaded');
+
+            const modal = document.getElementById('jsonMappingModal');
+            if (modal && !modal.classList.contains('hidden')) {
+                modal.classList.add('hidden');
+            }
+
+            if (AppState.source.filePath) {
+                runSchemaDiscovery(null);
+            }
+        } catch (err) {
+            showToast(`Failed to parse '${file.name}': ${err.message}`, 'error', 'Invalid JSON File');
+        }
+    };
+    reader.readAsText(file);
+}
+
+function openJsonMappingModal(mode = 'import', isMandatoryPrompt = false) {
     const modal = document.getElementById('jsonMappingModal');
     const title = document.getElementById('json-modal-title');
     const textarea = document.getElementById('json-mapping-textarea');
+    const alertBox = document.getElementById('modal-mandatory-alert');
     if (!modal || !title || !textarea) return;
+
+    if (alertBox) {
+        if (isMandatoryPrompt || !AppState.ingestionJsonUploadedOrModified) {
+            alertBox.classList.remove('hidden');
+        } else {
+            alertBox.classList.add('hidden');
+        }
+    }
 
     if (mode === 'export') {
         title.textContent = 'Export JSON Mapping Document';
@@ -2339,41 +2710,15 @@ function openJsonMappingModal(mode = 'import') {
         };
         textarea.value = JSON.stringify(exportData, null, 2);
     } else {
-        title.textContent = 'JSON Mapping Document Ingestion';
-        if (!textarea.value.trim() || textarea.value.includes('Custom-XML-Mapping')) {
-            const currentRoot = document.getElementById('xml-root-element')?.value.trim().split(',')[0].trim() || 'record';
-            const rootIdCol = currentRoot.toLowerCase() + '_id';
-            const childTable = currentRoot + '_details';
-            textarea.value = JSON.stringify([
-                {
-                    xmlField: `${currentRoot}/@id`,
-                    targetTable: currentRoot,
-                    targetColumn: "id",
-                    constraintType: "PK",
-                    transform: "NONE"
-                },
-                {
-                    xmlField: `${currentRoot}/name`,
-                    targetTable: currentRoot,
-                    targetColumn: "name",
-                    constraintType: "NONE",
-                    transform: "NONE"
-                },
-                {
-                    xmlField: `${currentRoot}/details/item/name`,
-                    targetTable: childTable,
-                    targetColumn: "item_name",
-                    constraintType: "NONE",
-                    transform: "NONE"
-                },
-                {
-                    xmlField: `${currentRoot}/@id`,
-                    targetTable: childTable,
-                    targetColumn: rootIdCol,
-                    constraintType: "FK",
-                    transform: "NONE"
-                }
-            ], null, 2);
+        title.textContent = (isMandatoryPrompt || !AppState.ingestionJsonUploadedOrModified)
+            ? 'Ingestion JSON Document (Mandatory)'
+            : 'JSON Mapping Document Ingestion';
+        if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
+            textarea.value = JSON.stringify(AppState.mapping.fieldMappings, null, 2);
+        } else if (AppState.mapping.rawMappingJson) {
+            textarea.value = AppState.mapping.rawMappingJson;
+        } else {
+            textarea.value = '';
         }
     }
     modal.classList.remove('hidden');
@@ -2419,6 +2764,12 @@ function applyJsonMapping() {
             AppState.mapping.fieldMappings = mappings;
             // Store raw JSON for backend-driven discovery filtering
             AppState.mapping.rawMappingJson = JSON.stringify(mappings);
+            AppState.ingestionJsonUploadedOrModified = true;
+            if (!AppState.ingestionJsonFileName) {
+                AppState.ingestionJsonFileName = 'Custom Ingestion JSON';
+            }
+            AppState.ingestionJsonSource = 'editor';
+
             const container = document.getElementById('mapping-rows-container');
             if (container) {
                 container.innerHTML = '';
@@ -2433,12 +2784,15 @@ function applyJsonMapping() {
                 });
                 updateTableSequenceBanner();
             }
-            showToast(`Successfully ingested JSON mapping with ${mappings.length} field mappings. Re-running discovery to filter tags…`, 'success', 'JSON Applied');
+            updateIngestionJsonStatusBanner();
+            updateStep2IngestionStatus();
+            showToast(`Successfully ingested JSON mapping with ${mappings.length} field mappings. Next flow unlocked!`, 'success', 'JSON Applied');
+
+            document.getElementById('jsonMappingModal').classList.add('hidden');
 
             // Auto re-run discovery so Step 3 shows only the mapped tags immediately
             if (AppState.source.filePath) {
-                document.getElementById('jsonMappingModal').classList.add('hidden');
-                runSchemaDiscovery(4);
+                runSchemaDiscovery(null);
                 return;
             }
         } else {

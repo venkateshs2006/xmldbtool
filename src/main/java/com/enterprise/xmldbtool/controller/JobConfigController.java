@@ -164,7 +164,7 @@ public class JobConfigController {
         launchRequest.setChunkSize(config.getChunkSize());
         launchRequest.setDbConfig(config.getDbConfig());
         launchRequest.setMappings(config.getMappings());
-        launchRequest.setStagedPipeline(Boolean.TRUE.equals(config.getStagedPipeline()));
+        launchRequest.setStagedPipeline(config.getStagedPipeline() == null || Boolean.TRUE.equals(config.getStagedPipeline()));
         launchRequest.setRecordRootElements(config.getRecordRootElements());
         launchRequest.setXmlVersion(config.getXmlVersion());
         launchRequest.setSchemaVersion(config.getSchemaVersion());

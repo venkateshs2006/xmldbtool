@@ -222,6 +222,11 @@ public class DynamicDataSourceService {
         hikariConfig.setUsername(config.getUsername());
         hikariConfig.setPassword(config.getPassword() != null ? config.getPassword() : "");
 
+        String rawSchema = (config.getSchema() != null && !config.getSchema().trim().isEmpty())
+                ? config.getSchema().trim() : "public";
+        String schema = rawSchema.replaceAll("[^a-zA-Z0-9_]", "_");
+        if (schema.isEmpty()) schema = "public";
+
         if (config.getSchema() != null && !config.getSchema().trim().isEmpty()) {
             hikariConfig.setSchema(config.getSchema().trim());
         }
@@ -230,6 +235,8 @@ public class DynamicDataSourceService {
         String url = config.getUrl().toLowerCase();
         if (url.contains(":postgresql:")) {
             hikariConfig.setDriverClassName("org.postgresql.Driver");
+            // Auto-ensure schema exists and set search_path on every physical connection
+            hikariConfig.setConnectionInitSql("DO $$ BEGIN CREATE SCHEMA IF NOT EXISTS \"" + schema + "\"; EXCEPTION WHEN OTHERS THEN NULL; END $$; SET search_path TO \"" + schema + "\", public;");
             // Allows PostgreSQL to infer parameter types without casting errors (e.g. timestamps, uuids, ints)
             hikariConfig.addDataSourceProperty("stringtype", "unspecified");
             // Crucial for 10GB multi-million-record batch ingestion: rewrites batched inserts into multi-row statements
@@ -239,6 +246,7 @@ public class DynamicDataSourceService {
             hikariConfig.addDataSourceProperty("defaultRowFetchSize", "1000");
         } else if (url.contains(":oracle:")) {
             hikariConfig.setDriverClassName("oracle.jdbc.OracleDriver");
+            hikariConfig.setConnectionInitSql("ALTER SESSION SET CURRENT_SCHEMA = " + schema.toUpperCase());
             hikariConfig.addDataSourceProperty("oracle.jdbc.defaultBatchValue", "1000");
         } else if (url.contains(":h2:")) {
             hikariConfig.setDriverClassName("org.h2.Driver");

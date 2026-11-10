@@ -32,8 +32,45 @@ public class SchemaDiscoveryController {
 
     @PostMapping("/create-tables")
     public ResponseEntity<SchemaDiscoveryResponse> createTables(@RequestBody SchemaDiscoveryRequest request) {
+        request.setIngestionJsonMandatory(true);
         SchemaDiscoveryResponse response = discoveryService.provisionTables(request);
         if (response.isSuccess()) {
+            return ResponseEntity.ok(response);
+        } else {
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    /**
+     * Creates a flat table like gs_<entityname> (prefix gs_, no suffix).
+     */
+    @PostMapping("/create-flat-table")
+    public ResponseEntity<Map<String, Object>> createFlatTable(@RequestBody SchemaDiscoveryRequest request) {
+        String entity = request.getRecordRootElement();
+        if (entity == null && request.getRecordRootElements() != null && !request.getRecordRootElements().isEmpty()) {
+            entity = request.getRecordRootElements().get(0);
+        }
+        if (entity == null || entity.trim().isEmpty()) {
+            entity = "record";
+        }
+        List<String> created = discoveryService.createFlatTableForEntity(
+                request.getDbConfig(), entity, request.getSourceXmlPath()
+        );
+        String tableName = "gs_" + entity.toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "tableName", tableName,
+                "createdTables", created
+        ));
+    }
+
+    @PostMapping("/validate-mappings")
+    public ResponseEntity<SchemaDiscoveryResponse> validateMappings(@RequestBody SchemaDiscoveryRequest request) {
+        // Enforce mapping validation against XML tags
+        request.setIngestionJsonMandatory(true);
+        request.setAutoCreateTables(false);
+        SchemaDiscoveryResponse response = discoveryService.discoverSchema(request);
+        if (response.isSuccess() && response.isMappingsValidated()) {
             return ResponseEntity.ok(response);
         } else {
             return ResponseEntity.badRequest().body(response);

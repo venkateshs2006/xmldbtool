@@ -14,8 +14,12 @@ public class SchemaDiscoveryRequest {
     private List<FieldMapping> mappings = new ArrayList<>();
     private String mappingJson;
     private String ingestionJsonPath;
+    private boolean ingestionJsonMandatory = false;
 
     public SchemaDiscoveryRequest() {}
+
+    public boolean isIngestionJsonMandatory() { return ingestionJsonMandatory; }
+    public void setIngestionJsonMandatory(boolean ingestionJsonMandatory) { this.ingestionJsonMandatory = ingestionJsonMandatory; }
 
     public List<FieldMapping> getMappings() { return mappings; }
     public void setMappings(List<FieldMapping> mappings) { this.mappings = mappings; }

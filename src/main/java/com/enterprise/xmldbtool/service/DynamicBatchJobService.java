@@ -36,6 +36,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.ResultSet;
 import java.io.File;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -115,15 +118,12 @@ public class DynamicBatchJobService {
      * Dynamically builds and launches Spring Batch Job for high-volume XML ingestion.
      */
     public JobLaunchResponse launchIngestionJob(JobLaunchRequest request) {
-        if (request != null && request.isStagedPipeline()) {
+        if (request != null && (request.isStagedPipeline() || request.isResumeFromCheckpoint() || request.getResumeFromJobExecutionId() != null)) {
             return launchStagedPipelineJob(request);
         }
         try {
             long timestamp = System.currentTimeMillis();
             String jobName = "dynamicXmlIngestJob_" + timestamp;
-
-            // Target DB DataSource
-            DataSource targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
 
             // 1. StaxEventItemReader with effective fragment root element resolution
             // CRUCIAL FOR 10GB FILES: Never set fragmentRoot to document root (e.g. PFA),
@@ -171,6 +171,13 @@ public class DynamicBatchJobService {
             }
             log.info("Configured StaxEventItemReader chunk streaming fragmentRootElementName='{}' (docRoot='{}')",
                     effectiveFragmentRoot, docRoot);
+
+            List<String> effectiveRoots = (request.getRecordRootElements() != null && !request.getRecordRootElements().isEmpty())
+                    ? request.getRecordRootElements() : List.of(effectiveFragmentRoot);
+
+            // Target DB DataSource: verify DB connection and tables presence on job start
+            // If not there, create db connection and tables based on job config (no dynamic XML heuristic table creation)
+            DataSource targetDataSource = verifyAndEnsureDatabaseAndTables(request, effectiveRoots);
 
             Resource xmlResource = resolveXmlResource(request.getSourceXmlPath());
             StaxEventItemReader<Map<String, Object>> reader = new StaxEventItemReader<>();
@@ -283,8 +290,9 @@ public class DynamicBatchJobService {
                     .addLong("time", timestamp)
                     .toJobParameters();
 
-            // Launch asynchronously using SimpleAsyncTaskExecutor so the HTTP request returns immediately
+            // Launch asynchronously using SimpleAsyncTaskExecutor with Java 21 Virtual Threads
             SimpleAsyncTaskExecutor asyncExecutor = new SimpleAsyncTaskExecutor("batch-exec-");
+            asyncExecutor.setVirtualThreads(true);
             JobExecution[] executionHolder = new JobExecution[1];
 
             // Launch in background
@@ -320,7 +328,6 @@ public class DynamicBatchJobService {
         try {
             long timestamp = System.currentTimeMillis();
             String jobName = "stagedXmlPipelineJob_" + timestamp;
-            DataSource targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
 
             String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
             Set<String> rootsToStream = new LinkedHashSet<>();
@@ -345,20 +352,21 @@ public class DynamicBatchJobService {
                 }
             }
 
-            // Extract root entity tag from XML field paths (e.g. person/addresses -> person)
-            if (request.getMappings() != null && !request.getMappings().isEmpty()) {
+            // Extract root entity tag from XML field paths only if rootsToStream is empty (e.g. person/addresses -> person)
+            if (rootsToStream.isEmpty() && request.getMappings() != null && !request.getMappings().isEmpty()) {
                 for (FieldMapping m : request.getMappings()) {
                     String xf = m.getXmlField();
                     if (xf != null && !xf.trim().isEmpty()) {
                         String clean = xf.trim().replaceAll("^/+", "");
                         String[] parts = clean.split("/");
-                        for (String part : parts) {
-                            if (part.startsWith("@")) continue;
-                            String resolved = XmlSchemaDiscoveryService.resolveEntityTag(part);
-                            if (resolved != null && !resolved.isEmpty()
-                                    && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
-                                rootsToStream.add(resolved);
-                                break;
+                        if (parts.length > 1) {
+                            String part = parts[0];
+                            if (!part.startsWith("@")) {
+                                String resolved = XmlSchemaDiscoveryService.resolveEntityTag(part);
+                                if (resolved != null && !resolved.isEmpty()
+                                        && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
+                                    rootsToStream.add(resolved);
+                                }
                             }
                         }
                     }
@@ -393,34 +401,35 @@ public class DynamicBatchJobService {
             List<String> effectiveRoots = new ArrayList<>(rootsToStream);
             String effectiveFragmentRoot = effectiveRoots.get(0);
 
-            // 0. Auto-resolve mappings from XML schema discovery if not provided
+            // 0. Auto-resolve mappings from job config / ingestion.json if not provided
             if (request.getMappings() == null || request.getMappings().isEmpty()) {
-                com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
-                discReq.setSourceXmlPath(request.getSourceXmlPath());
-                discReq.setRecordRootElement(effectiveFragmentRoot);
-                discReq.setRecordRootElements(effectiveRoots);
-                discReq.setMappingJson(request.getIngestMappingJson());
-                discReq.setDbConfig(request.getDbConfig());
-                com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
-                if (discResp != null && discResp.getGeneratedMappings() != null && !discResp.getGeneratedMappings().isEmpty()) {
-                    request.setMappings(discResp.getGeneratedMappings());
+                if (request.getIngestionJsonPath() != null && !request.getIngestionJsonPath().trim().isEmpty()) {
+                    List<FieldMapping> loaded = discoveryService.loadMappingsFromFile(request.getIngestionJsonPath());
+                    if (loaded != null && !loaded.isEmpty()) {
+                        request.setMappings(loaded);
+                    }
+                } else if (request.getIngestMappingJson() != null && !request.getIngestMappingJson().trim().isEmpty()) {
+                    List<FieldMapping> loaded = discoveryService.parseMappingsFromJsonStringOrFile(request.getIngestMappingJson());
+                    if (loaded != null && !loaded.isEmpty()) {
+                        request.setMappings(loaded);
+                    }
+                } else {
+                    com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+                    discReq.setSourceXmlPath(request.getSourceXmlPath());
+                    discReq.setRecordRootElement(effectiveFragmentRoot);
+                    discReq.setRecordRootElements(effectiveRoots);
+                    discReq.setMappingJson(request.getIngestMappingJson());
+                    discReq.setDbConfig(request.getDbConfig());
+                    com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
+                    if (discResp != null && discResp.getGeneratedMappings() != null && !discResp.getGeneratedMappings().isEmpty()) {
+                        request.setMappings(discResp.getGeneratedMappings());
+                    }
                 }
             }
 
-            // 1. Provision target destination tables & partitioned <entity>_flat tables with bnpp_id, version_number, tag_name
-            if (request.getDbConfig() != null) {
-                try {
-                    provisioningService.provisionDiscoveredTables(
-                            request.getDbConfig(),
-                            request.getSourceXmlPath(),
-                            effectiveRoots,
-                            null,
-                            request.getMappings()
-                    );
-                } catch (Exception ex) {
-                    log.warn("Notice provisioning destination/flat tables: {}", ex.getMessage());
-                }
-            }
+            // Target DB DataSource: verify DB connection and tables presence on job start
+            // If not there, create db connection and tables based on job config (no dynamic XML heuristic table creation)
+            DataSource targetDataSource = verifyAndEnsureDatabaseAndTables(request, effectiveRoots);
 
             List<String> tableOrder = DynamicJdbcBatchWriter.determineTableOrder(
                     request.getTableOrder(),
@@ -469,42 +478,68 @@ public class DynamicBatchJobService {
 
             // Determine if resuming from checkpoint
             long resumeFromRecordIndex = 0L;
+            boolean stage1AlreadyCompleted = false;
+            com.enterprise.xmldbtool.model.JobCheckpoint cp = null;
+            org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDataSource);
+
             if (request.isResumeFromCheckpoint() || request.getResumeFromJobExecutionId() != null) {
-                com.enterprise.xmldbtool.model.JobCheckpoint cp = null;
-                org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDataSource);
                 if (request.getResumeFromJobExecutionId() != null) {
                     cp = stagingService.getCheckpointByJobExecutionId(targetJdbc, request.getResumeFromJobExecutionId());
+                    if (cp == null && this.jdbcTemplate != null) {
+                        cp = stagingService.getCheckpointByJobExecutionId(this.jdbcTemplate, request.getResumeFromJobExecutionId());
+                    }
                 }
                 if (cp == null && request.getSourceXmlPath() != null) {
                     cp = stagingService.getLatestCheckpoint(targetJdbc, request.getSourceXmlPath());
+                    if (cp == null && this.jdbcTemplate != null) {
+                        cp = stagingService.getLatestCheckpoint(this.jdbcTemplate, request.getSourceXmlPath());
+                    }
                 }
                 if (cp != null && cp.getRecordsStreamed() > 0) {
                     resumeFromRecordIndex = cp.getRecordsStreamed();
-                    log.info("Resuming Job #{} from checkpoint: fast-skipping first {} already-streamed records.",
-                            jobExecution.getId(), resumeFromRecordIndex);
+                    if ("STAGE_1_COMPLETED".equalsIgnoreCase(cp.getStage())
+                            || "STAGE_1_DONE".equalsIgnoreCase(cp.getStatus())
+                            || "STAGE_2_NORMALIZING".equalsIgnoreCase(cp.getStage())
+                            || "COMPLETED".equalsIgnoreCase(cp.getStatus())) {
+                        stage1AlreadyCompleted = true;
+                    }
+                    log.info("Resuming Job #{} from checkpoint: recordsStreamed={}, stage1AlreadyCompleted={}",
+                            jobExecution.getId(), resumeFromRecordIndex, stage1AlreadyCompleted);
+                } else {
+                    long existingFlatCount = countExistingFlatRecords(targetJdbc, effectiveRoots);
+                    if (existingFlatCount > 0) {
+                        resumeFromRecordIndex = existingFlatCount;
+                        log.info("Resuming Job #{} from existing flat table count: fast-skipping first {} records.",
+                                jobExecution.getId(), resumeFromRecordIndex);
+                    }
                 }
             }
+
+            final long finalResumeIndex = resumeFromRecordIndex;
+            final boolean finalStage1Completed = stage1AlreadyCompleted;
+            final com.enterprise.xmldbtool.model.JobCheckpoint finalCp = cp;
 
             // Initialize in-memory metrics for real-time telemetry polling
             Map<String, Object> liveMetrics = new ConcurrentHashMap<>();
             liveMetrics.put("jobExecutionId", jobExecution.getId());
             liveMetrics.put("jobName", jobName);
             liveMetrics.put("status", "RUNNING");
-            liveMetrics.put("streamingState", "STREAMING");
-            liveMetrics.put("currentPhase", resumeFromRecordIndex > 0 ? "Resuming from checkpoint (record " + resumeFromRecordIndex + ")" : "Phase 1: Streaming XML to flat tables (StAX)");
-            liveMetrics.put("currentAction", resumeFromRecordIndex > 0 ? "Fast-skipping to record " + resumeFromRecordIndex : "Initializing StAX parser for roots: " + finalRoots);
+            liveMetrics.put("streamingState", stage1AlreadyCompleted ? "NORMALIZING" : "STREAMING");
+            liveMetrics.put("currentPhase", stage1AlreadyCompleted ? "Phase 2: Resuming canonical normalization from checkpoint"
+                    : (resumeFromRecordIndex > 0 ? "Resuming from checkpoint (record " + resumeFromRecordIndex + ")" : "Phase 1: Streaming XML to flat tables (StAX)"));
+            liveMetrics.put("currentAction", stage1AlreadyCompleted ? "Resuming transformation into relational tables"
+                    : (resumeFromRecordIndex > 0 ? "Fast-skipping to record " + resumeFromRecordIndex : "Initializing StAX parser for roots: " + finalRoots));
             liveMetrics.put("startTime", LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
             liveMetrics.put("totalRead", resumeFromRecordIndex);
-            liveMetrics.put("totalWritten", resumeFromRecordIndex);
+            liveMetrics.put("totalWritten", finalCp != null ? finalCp.getRecordsNormalized() : 0L);
             liveMetrics.put("stagedCount", resumeFromRecordIndex);
             liveMetrics.put("skippedUnchanged", 0L);
             liveMetrics.put("tableWriteCounts", new LinkedHashMap<String, Long>());
             liveMetrics.put("targetTables", finalTableOrder != null ? finalTableOrder : Collections.emptyList());
             stagedJobMetrics.put(jobExecution.getId(), liveMetrics);
 
-            final long finalResumeIndex = resumeFromRecordIndex;
-
             SimpleAsyncTaskExecutor asyncExecutor = new SimpleAsyncTaskExecutor("staged-batch-exec-");
+            asyncExecutor.setVirtualThreads(true);
             asyncExecutor.execute(() -> {
                 StepExecution stepExecution = null;
                 try {
@@ -523,34 +558,46 @@ public class DynamicBatchJobService {
                     }
 
                     // 1. Stage 1: Stream XML to flat staging with StAX, multi-root tag handling, and SHA-256 delta hashing
-                    log.info("Executing Pipeline Stage 1: StAX XML streaming to flat staging table(s) for roots: {} (resumeFromRecordIndex={})...",
-                            finalRoots, finalResumeIndex);
                     final StepExecution fStepExecution = stepExecution;
-                    StagingXmlStreamingService.StagingSummary stagingSummary = stagingService.streamXmlToStaging(
-                            request.getSourceXmlPath(),
-                            finalRoots,
-                            request.getXmlVersion(),
-                            request.getSchemaVersion(),
-                            jobExecution.getId(),
-                            targetDataSource,
-                            chunkSize,
-                            finalResumeIndex,
-                            cancellationFlag::get,
-                            (totalRead, stagedCount, skippedUnchanged, tableCounts, currentTag) -> {
-                                liveMetrics.put("totalRead", totalRead);
-                                liveMetrics.put("stagedCount", stagedCount);
-                                liveMetrics.put("skippedUnchanged", skippedUnchanged);
-                                liveMetrics.put("totalWritten", stagedCount);
-                                liveMetrics.put("streamingState", "STREAMING");
-                                liveMetrics.put("currentPhase", "Phase 1: Streaming XML to flat tables (StAX)");
-                                liveMetrics.put("currentAction", "Ingesting <" + currentTag + "> (" + totalRead + " records read, " + stagedCount + " staged)");
-                                liveMetrics.put("tableWriteCounts", new LinkedHashMap<>(tableCounts));
-                                if (fStepExecution != null) {
-                                    fStepExecution.setReadCount((int) Math.min(Integer.MAX_VALUE, totalRead));
-                                    fStepExecution.setWriteCount((int) Math.min(Integer.MAX_VALUE, stagedCount));
+                    StagingXmlStreamingService.StagingSummary stagingSummary;
+
+                    if (finalStage1Completed) {
+                        log.info("Stage 1 StAX streaming already completed in previous run ({} records). Skipping Stage 1 re-streaming and proceeding directly to Stage 2 normalization...",
+                                finalResumeIndex);
+                        stagingSummary = new StagingXmlStreamingService.StagingSummary(finalResumeIndex, finalResumeIndex, 0, 0, 0);
+                        liveMetrics.put("totalRead", finalResumeIndex);
+                        liveMetrics.put("stagedCount", finalResumeIndex);
+                        liveMetrics.put("totalWritten", finalCp != null ? finalCp.getRecordsNormalized() : 0L);
+                        liveMetrics.put("currentPhase", "Phase 2: Resuming canonical normalization from checkpoint");
+                    } else {
+                        log.info("Executing Pipeline Stage 1: StAX XML streaming to flat staging table(s) for roots: {} (resumeFromRecordIndex={})...",
+                                finalRoots, finalResumeIndex);
+                        stagingSummary = stagingService.streamXmlToStaging(
+                                request.getSourceXmlPath(),
+                                finalRoots,
+                                request.getXmlVersion(),
+                                request.getSchemaVersion(),
+                                jobExecution.getId(),
+                                targetDataSource,
+                                chunkSize,
+                                finalResumeIndex,
+                                cancellationFlag::get,
+                                (totalRead, stagedCount, skippedUnchanged, tableCounts, currentTag) -> {
+                                    liveMetrics.put("totalRead", totalRead);
+                                    liveMetrics.put("stagedCount", stagedCount);
+                                    liveMetrics.put("skippedUnchanged", skippedUnchanged);
+                                    liveMetrics.put("totalWritten", stagedCount);
+                                    liveMetrics.put("streamingState", "STREAMING");
+                                    liveMetrics.put("currentPhase", "Phase 1: Streaming XML to flat tables (StAX)");
+                                    liveMetrics.put("currentAction", "Ingesting <" + currentTag + "> (" + totalRead + " records read, " + stagedCount + " staged)");
+                                    liveMetrics.put("tableWriteCounts", new LinkedHashMap<>(tableCounts));
+                                    if (fStepExecution != null) {
+                                        fStepExecution.setReadCount((int) Math.min(Integer.MAX_VALUE, totalRead));
+                                        fStepExecution.setWriteCount((int) Math.min(Integer.MAX_VALUE, stagedCount));
+                                    }
                                 }
-                            }
-                    );
+                        );
+                    }
 
                     liveMetrics.put("totalRead", stagingSummary.totalRead());
                     liveMetrics.put("stagedCount", stagingSummary.stagedCount());
@@ -622,12 +669,38 @@ public class DynamicBatchJobService {
                                 if (fStepExecution != null) {
                                     fStepExecution.setWriteCount((int) Math.min(Integer.MAX_VALUE, normCount));
                                 }
+                                // Persist real-time normalization checkpoint
+                                try {
+                                    stagingService.saveOrUpdateCheckpoint(
+                                            new org.springframework.jdbc.core.JdbcTemplate(targetDataSource),
+                                            jobExecution.getId(), jobName, request.getSourceXmlPath(),
+                                            "STAGE_2_NORMALIZING", Math.max(stagingSummary.totalRead(), normCount),
+                                            normCount, null, currentTable, "NORMALIZING"
+                                    );
+                                } catch (Exception ignored) {}
                             }
                     );
 
                     // Check if job was stopped during Stage 2
                     if (cancellationFlag.get()) {
                         log.info("Job #{} termination confirmed during Stage 2.", jobExecution.getId());
+                        long written = liveMetrics.get("totalWritten") != null ? ((Number) liveMetrics.get("totalWritten")).longValue() : 0L;
+                        try {
+                            stagingService.saveOrUpdateCheckpoint(
+                                    new org.springframework.jdbc.core.JdbcTemplate(targetDataSource),
+                                    jobExecution.getId(), jobName, request.getSourceXmlPath(),
+                                    "STAGE_2_NORMALIZING", stagingSummary.totalRead(), written,
+                                    null, null, "STOPPED"
+                            );
+                            if (this.jdbcTemplate != null) {
+                                stagingService.saveOrUpdateCheckpoint(
+                                        this.jdbcTemplate,
+                                        jobExecution.getId(), jobName, request.getSourceXmlPath(),
+                                        "STAGE_2_NORMALIZING", stagingSummary.totalRead(), written,
+                                        null, null, "STOPPED"
+                                );
+                            }
+                        } catch (Exception ignored) {}
                         jobExecution.setStatus(BatchStatus.STOPPED);
                         jobExecution.setEndTime(LocalDateTime.now());
                         jobExecution.setExitStatus(new org.springframework.batch.core.ExitStatus("STOPPED", "Job stopped by user"));
@@ -653,6 +726,11 @@ public class DynamicBatchJobService {
                     stagingService.saveOrUpdateCheckpoint(new org.springframework.jdbc.core.JdbcTemplate(targetDataSource),
                             jobExecution.getId(), jobName, request.getSourceXmlPath(), "COMPLETED",
                             finalRowsRead, finalRowsWritten, null, null, "COMPLETED");
+                    if (this.jdbcTemplate != null) {
+                        stagingService.saveOrUpdateCheckpoint(this.jdbcTemplate,
+                                jobExecution.getId(), jobName, request.getSourceXmlPath(), "COMPLETED",
+                                finalRowsRead, finalRowsWritten, null, null, "COMPLETED");
+                    }
 
                     if (stepExecution != null) {
                         stepExecution.setReadCount((int) Math.min(Integer.MAX_VALUE, finalRowsRead));
@@ -683,12 +761,27 @@ public class DynamicBatchJobService {
                     log.info("Staged metadata-driven XML processing pipeline job completed successfully: JobExecutionId={}", jobExecution.getId());
                 } catch (Exception ex) {
                     log.error("Staged metadata-driven XML pipeline job failed: {}", ex.getMessage(), ex);
+                    long read = liveMetrics.get("totalRead") != null ? ((Number) liveMetrics.get("totalRead")).longValue() : 0L;
+                    long written = liveMetrics.get("totalWritten") != null ? ((Number) liveMetrics.get("totalWritten")).longValue() : 0L;
+                    String curPhase = liveMetrics.get("currentPhase") != null && liveMetrics.get("currentPhase").toString().contains("Phase 2")
+                            ? "STAGE_2_NORMALIZING" : "STAGE_1_STREAMING";
+                    try {
+                        stagingService.saveOrUpdateCheckpoint(
+                                new org.springframework.jdbc.core.JdbcTemplate(targetDataSource),
+                                jobExecution.getId(), jobName, request.getSourceXmlPath(),
+                                curPhase, read, written, null, null, "FAILED"
+                        );
+                    } catch (Exception ignored) {}
+                    liveMetrics.put("status", "FAILED");
+                    liveMetrics.put("streamingState", "FAILED");
+                    liveMetrics.put("currentPhase", "Job failed: " + ex.getMessage());
                     if (stepExecution != null) {
                         stepExecution.setStatus(BatchStatus.FAILED);
                         stepExecution.setEndTime(LocalDateTime.now());
                         stepExecution.setExitStatus(new org.springframework.batch.core.ExitStatus("FAILED", ex.getMessage()));
                         try {
                             jobRepository.update(stepExecution);
+                            jobRepository.updateExecutionContext(stepExecution);
                         } catch (Exception ignored) {}
                     }
                     jobExecution.setStatus(BatchStatus.FAILED);
@@ -703,6 +796,140 @@ public class DynamicBatchJobService {
             log.error("Failed to launch staged XML pipeline job: {}", ex.getMessage(), ex);
             return new JobLaunchResponse(false, "Job launch failed: " + ex.getMessage(), null, "FAILED");
         }
+    }
+
+    /**
+     * Verifies target database connection and table presence on job start.
+     * If the connection is down or missing, creates/re-establishes it.
+     * If tables are missing, provisions them strictly from the job config
+     * (flat tables gs_<entity> and canonical tables from mappings),
+     * ensuring no canonical tables are dynamically derived from XML elements.
+     */
+    public DataSource verifyAndEnsureDatabaseAndTables(JobLaunchRequest request, List<String> effectiveRoots) {
+        if (request == null || request.getDbConfig() == null) {
+            return null;
+        }
+        com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = request.getDbConfig();
+
+        // 1. Verify and establish DB connection
+        DataSource ds = null;
+        boolean connected = false;
+        try {
+            ds = dataSourceService.getOrCreateDataSource(dbConfig);
+            try (Connection conn = ds.getConnection()) {
+                if (conn.isValid(5)) {
+                    connected = true;
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("Target DB connection validation failed, re-establishing: {}", ex.getMessage());
+            connected = false;
+        }
+
+        if (!connected) {
+            try {
+                dataSourceService.closeDataSource(dbConfig);
+                ds = dataSourceService.getOrCreateDataSource(dbConfig);
+                try (Connection conn = ds.getConnection()) {
+                    if (!conn.isValid(5)) {
+                        throw new IllegalStateException("Re-established DB connection is not valid");
+                    }
+                }
+            } catch (Exception ex) {
+                log.error("Failed to establish target DB connection: {}", ex.getMessage());
+                throw new RuntimeException("Target DB connection failed: " + ex.getMessage(), ex);
+            }
+        }
+
+        // 2. Load mappings from config if missing
+        if (request.getMappings() == null || request.getMappings().isEmpty()) {
+            if (request.getIngestionJsonPath() != null && !request.getIngestionJsonPath().trim().isEmpty()) {
+                List<FieldMapping> loaded = discoveryService.loadMappingsFromFile(request.getIngestionJsonPath());
+                if (loaded != null && !loaded.isEmpty()) {
+                    request.setMappings(loaded);
+                }
+            } else if (request.getIngestMappingJson() != null && !request.getIngestMappingJson().trim().isEmpty()) {
+                List<FieldMapping> loaded = discoveryService.parseMappingsFromJsonStringOrFile(request.getIngestMappingJson());
+                if (loaded != null && !loaded.isEmpty()) {
+                    request.setMappings(loaded);
+                }
+            }
+        }
+
+        // 3. Verify table presence
+        boolean needProvisioning = false;
+        try (Connection conn = ds.getConnection()) {
+            SchemaProvisioningService.prepareConnection(conn, dbConfig);
+            DatabaseMetaData meta = conn.getMetaData();
+            String schema = null;
+            try { schema = conn.getSchema(); } catch (Throwable ignored) {}
+
+            Set<String> existingTables = new HashSet<>();
+            try (ResultSet rs = meta.getTables(null, schema, "%", new String[]{"TABLE"})) {
+                while (rs.next()) {
+                    String t = rs.getString("TABLE_NAME");
+                    if (t != null) existingTables.add(t.toLowerCase());
+                }
+            }
+
+            // Check invalid/error records table
+            if (!existingTables.contains("gs_error_records") && !existingTables.contains("migration_errors")) {
+                needProvisioning = true;
+            }
+
+            // Check flat tables gs_<root> (prefix gs_, no suffix)
+            if (effectiveRoots != null) {
+                for (String root : effectiveRoots) {
+                    if (root == null || root.trim().isEmpty()) continue;
+                    String norm = root.trim().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+                    String gsTable = "gs_" + norm;
+                    if (!existingTables.contains(gsTable)) {
+                        needProvisioning = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check canonical destination tables from job config mappings
+            if (request.getMappings() != null && !request.getMappings().isEmpty()) {
+                for (FieldMapping m : request.getMappings()) {
+                    String targetTable = m.getTargetTable();
+                    if (targetTable != null && !targetTable.trim().isEmpty()) {
+                        String norm = targetTable.trim().toLowerCase();
+                        if (!existingTables.contains(norm)) {
+                            needProvisioning = true;
+                            break;
+                        }
+                    }
+                }
+            } else if (request.getTargetTable() != null && !request.getTargetTable().trim().isEmpty()) {
+                if (!existingTables.contains(request.getTargetTable().trim().toLowerCase())) {
+                    needProvisioning = true;
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("Notice checking tables in target DB: {}", ex.getMessage());
+            needProvisioning = true;
+        }
+
+        // 4. If missing, provision strictly from job config: flat tables + mapped tables only (strictIngestionJson = true)
+        if (needProvisioning) {
+            log.info("Missing tables detected. Provisioning flat and canonical tables strictly from job config...");
+            try {
+                provisioningService.provisionDiscoveredTables(
+                        dbConfig,
+                        request.getSourceXmlPath(),
+                        effectiveRoots,
+                        null,
+                        request.getMappings(),
+                        true // strictIngestionJson = true: strictly no XML dynamic table guessing, only flat tables and mapped canonical tables
+                );
+            } catch (Exception ex) {
+                log.warn("Notice provisioning tables on job start: {}", ex.getMessage());
+            }
+        }
+
+        return ds;
     }
 
     /**
@@ -1332,7 +1559,27 @@ public class DynamicBatchJobService {
         copy.setXmlVersion(src.getXmlVersion());
         copy.setSchemaVersion(src.getSchemaVersion());
         copy.setIngestMappingJson(src.getIngestMappingJson());
+        copy.setIngestionJsonPath(src.getIngestionJsonPath());
         return copy;
+    }
+
+    private long countExistingFlatRecords(org.springframework.jdbc.core.JdbcTemplate jdbcTemplate, List<String> roots) {
+        if (jdbcTemplate == null || roots == null || roots.isEmpty()) return 0L;
+        long maxCount = 0L;
+        for (String root : roots) {
+            if (root == null || root.trim().isEmpty()) continue;
+            String norm = root.trim().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+            String singular = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(norm);
+            for (String tbl : List.of("gs_" + norm, "gs_" + singular, norm + "_gs", singular + "_gs", norm + "_flat")) {
+                try {
+                    Long count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tbl, Long.class);
+                    if (count != null && count > maxCount) {
+                        maxCount = count;
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        return maxCount;
     }
 
     private JobLaunchRequest recoverJobLaunchRequest(Long jobExecutionId, JobExecution execution) {

@@ -5,6 +5,11 @@ spring:
   application:
     name: xmldbtool
 
+  # Java 21 Virtual Threads enabled for high-throughput concurrent I/O
+  threads:
+    virtual:
+      enabled: true
+
   # Primary Datasource for Spring Batch metadata (PostgreSQL)
   datasource:
     url: jdbc:postgresql://localhost:5432/v5_batch_db

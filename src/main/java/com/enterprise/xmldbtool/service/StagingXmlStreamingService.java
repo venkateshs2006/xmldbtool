@@ -188,31 +188,43 @@ public class StagingXmlStreamingService {
         factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
         factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
 
-        long totalRead = 0;
-        long stagedCount = 0;
-        long skippedUnchanged = 0;
-        long failedCount = 0;
+        java.util.concurrent.atomic.AtomicLong totalRead = new java.util.concurrent.atomic.AtomicLong(0);
+        java.util.concurrent.atomic.AtomicLong stagedCount = new java.util.concurrent.atomic.AtomicLong(resumeFromRecordIndex);
+        java.util.concurrent.atomic.AtomicLong skippedUnchanged = new java.util.concurrent.atomic.AtomicLong(0);
+        java.util.concurrent.atomic.AtomicLong failedCount = new java.util.concurrent.atomic.AtomicLong(0);
         Map<String, Long> tableCounts = new ConcurrentHashMap<>();
 
         List<StagingXmlRecord> buffer = new ArrayList<>(batchSize);
         String detectedDocVersion = xmlVersion;
 
-        // Save initial checkpoint
+        // Save initial checkpoint preserving resume position
         saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
-                "STAGE_1_STREAMING", stagedCount, 0, null, null, "STREAMING");
+                "STAGE_1_STREAMING", stagedCount.get(), 0, null, null, "STREAMING");
 
-        try (BufferedReader reader = openReader(sourceXmlPath)) {
-            XMLEventReader xmlReader = factory.createXMLEventReader(reader);
+        // Java 21 Virtual Threads Executor for parallel high-throughput batch writes
+        // Semaphore limits in-flight batches to maintain constant O(1) heap memory on 10GB+ files
+        try (java.util.concurrent.ExecutorService vThreadExecutor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            java.util.concurrent.Semaphore inFlightBatches = new java.util.concurrent.Semaphore(4);
 
-            while (xmlReader.hasNext()) {
-                // Check if user requested stop / termination
-                if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
-                    log.info("Job #{} termination requested. Cleanly halting StAX streaming at record #{}. Checkpoint saved.",
-                            jobExecutionId, totalRead);
-                    saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
-                            "STAGE_1_STREAMING", stagedCount, 0, null, null, "STOPPED");
-                    break;
-                }
+            try (BufferedReader reader = openReader(sourceXmlPath)) {
+                XMLEventReader xmlReader = factory.createXMLEventReader(reader);
+
+                while (xmlReader.hasNext()) {
+                    // Check if user requested stop / termination
+                    if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
+                        log.info("Job #{} termination requested. Cleanly halting StAX streaming at record #{}. Checkpoint saved.",
+                                jobExecutionId, totalRead.get());
+                        if (!buffer.isEmpty()) {
+                            List<StagingXmlRecord> partial = new ArrayList<>(buffer);
+                            buffer.clear();
+                            long[] dCounts = processBatchDeltas(jdbcTemplate, partial, matchedRootTagForBatch(partial), tableCounts);
+                            stagedCount.addAndGet(dCounts[0]);
+                            flushStagingBatchFaultTolerant(jdbcTemplate, partial, jobExecutionId);
+                        }
+                        saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
+                                "STAGE_1_STREAMING", stagedCount.get(), 0, null, null, "STOPPED");
+                        break;
+                    }
 
                 XMLEvent event = xmlReader.peek();
                 if (event != null && event.isStartElement()) {
@@ -237,21 +249,25 @@ public class StagingXmlStreamingService {
                         matchedRoot = rootTagLookup.get(sing);
                     }
                     if (matchedRoot != null) {
-                        totalRead++;
+                        long currentTotal = totalRead.incrementAndGet();
 
                         // Fast-skip previously processed records when resuming from checkpoint!
-                        if (resumeFromRecordIndex > 0 && totalRead <= resumeFromRecordIndex) {
+                        // Does NOT delete or overwrite existing records in flat tables.
+                        if (resumeFromRecordIndex > 0 && currentTotal <= resumeFromRecordIndex) {
                             fastSkipFragment(xmlReader, tagName);
-                            stagedCount++;
                             String normRoot = matchedRoot.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                            String gsPrefixName = "gs_" + normRoot;
+                            String gsName = normRoot.endsWith("_gs") ? normRoot : normRoot + "_gs";
                             String flatName = normRoot.endsWith("_flat") ? normRoot : normRoot + "_flat";
+                            tableCounts.merge(gsPrefixName, 1L, Long::sum);
+                            tableCounts.merge(gsName, 1L, Long::sum);
                             tableCounts.merge(flatName, 1L, Long::sum);
 
-                            if (totalRead % 5000 == 0 || totalRead == resumeFromRecordIndex) {
-                                log.info("Fast-skipping previously processed records: {} / {}...", totalRead, resumeFromRecordIndex);
+                            if (currentTotal % 5000 == 0 || currentTotal == resumeFromRecordIndex) {
+                                log.info("Fast-skipping previously processed records: {} / {}...", currentTotal, resumeFromRecordIndex);
                                 if (progressCallback != null) {
-                                    progressCallback.onProgress(totalRead, stagedCount, skippedUnchanged, new LinkedHashMap<>(tableCounts),
-                                            "Fast-skipping to checkpoint (" + totalRead + " / " + resumeFromRecordIndex + ")");
+                                    progressCallback.onProgress(currentTotal, stagedCount.get(), skippedUnchanged.get(), new LinkedHashMap<>(tableCounts),
+                                            "Fast-skipping to checkpoint (" + currentTotal + " / " + resumeFromRecordIndex + ")");
                                 }
                             }
                             continue;
@@ -291,29 +307,40 @@ public class StagingXmlStreamingService {
 
                                 buffer.add(record);
                                 if (buffer.size() >= batchSize) {
-                                    long[] deltaCounts = processBatchDeltas(jdbcTemplate, buffer, matchedRoot, tableCounts);
-                                    stagedCount += deltaCounts[0];
-                                    skippedUnchanged += deltaCounts[1];
-
-                                    flushStagingBatchFaultTolerant(jdbcTemplate, buffer, jobExecutionId);
-                                    for (StagingXmlRecord r : buffer) {
-                                        r.setCachedMap(null);
-                                    }
+                                    List<StagingXmlRecord> batchToFlush = new ArrayList<>(buffer);
                                     buffer.clear();
-                                    saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
-                                            "STAGE_1_STREAMING", stagedCount, 0, identifier, matchedRoot, "STREAMING");
-                                    if (progressCallback != null) {
-                                        progressCallback.onProgress(totalRead, stagedCount, skippedUnchanged, new LinkedHashMap<>(tableCounts), matchedRoot);
-                                    }
-                                } else if (progressCallback != null && totalRead % 50 == 0) {
-                                    progressCallback.onProgress(totalRead, stagedCount, skippedUnchanged, new LinkedHashMap<>(tableCounts), matchedRoot);
+                                    final String activeMatchedRoot = matchedRoot;
+                                    final String activeIdentifier = identifier;
+
+                                    inFlightBatches.acquire();
+                                    vThreadExecutor.submit(() -> {
+                                        try {
+                                            long[] deltaCounts = processBatchDeltas(jdbcTemplate, batchToFlush, activeMatchedRoot, tableCounts);
+                                            stagedCount.addAndGet(deltaCounts[0]);
+                                            skippedUnchanged.addAndGet(deltaCounts[1]);
+
+                                            flushStagingBatchFaultTolerant(jdbcTemplate, batchToFlush, jobExecutionId);
+                                            for (StagingXmlRecord r : batchToFlush) {
+                                                r.setCachedMap(null);
+                                            }
+                                            saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
+                                                    "STAGE_1_STREAMING", stagedCount.get(), 0, activeIdentifier, activeMatchedRoot, "STREAMING");
+                                            if (progressCallback != null) {
+                                                progressCallback.onProgress(totalRead.get(), stagedCount.get(), skippedUnchanged.get(), new LinkedHashMap<>(tableCounts), activeMatchedRoot);
+                                            }
+                                        } finally {
+                                            inFlightBatches.release();
+                                        }
+                                    });
+                                } else if (progressCallback != null && currentTotal % 50 == 0) {
+                                    progressCallback.onProgress(currentTotal, stagedCount.get(), skippedUnchanged.get(), new LinkedHashMap<>(tableCounts), matchedRoot);
                                 }
                             }
                         } catch (Exception ex) {
-                            failedCount++;
-                            log.error("Failed to unmarshal XML fragment #{} for element '{}': {}. Skipping to next record...", totalRead, matchedRoot, ex.getMessage());
+                            failedCount.incrementAndGet();
+                            log.error("Failed to unmarshal XML fragment #{} for element '{}': {}. Skipping to next record...", currentTotal, matchedRoot, ex.getMessage());
                             recordMigrationError(jdbcTemplate, jobExecutionId, "STAGE_1_UNMARSHAL",
-                                    "{\"recordNumber\": " + totalRead + ", \"element\": \"" + matchedRoot + "\", \"error\": \"" + ex.getMessage().replace("\"", "\\\"") + "\"}", ex);
+                                    "{\"recordNumber\": " + currentTotal + ", \"element\": \"" + matchedRoot + "\", \"error\": \"" + ex.getMessage().replace("\"", "\\\"") + "\"}", ex);
                         }
                         continue;
                     }
@@ -322,39 +349,59 @@ public class StagingXmlStreamingService {
             }
 
             if (!buffer.isEmpty()) {
-                String lastRoot = buffer.get(buffer.size() - 1).getEntityType();
-                long[] deltaCounts = processBatchDeltas(jdbcTemplate, buffer, lastRoot, tableCounts);
-                stagedCount += deltaCounts[0];
-                skippedUnchanged += deltaCounts[1];
-
-                flushStagingBatchFaultTolerant(jdbcTemplate, buffer, jobExecutionId);
-                for (StagingXmlRecord r : buffer) {
-                    r.setCachedMap(null);
-                }
+                List<StagingXmlRecord> lastBatch = new ArrayList<>(buffer);
                 buffer.clear();
+                final String lastRoot = lastBatch.get(lastBatch.size() - 1).getEntityType();
+
+                inFlightBatches.acquire();
+                vThreadExecutor.submit(() -> {
+                    try {
+                        long[] deltaCounts = processBatchDeltas(jdbcTemplate, lastBatch, lastRoot, tableCounts);
+                        stagedCount.addAndGet(deltaCounts[0]);
+                        skippedUnchanged.addAndGet(deltaCounts[1]);
+
+                        flushStagingBatchFaultTolerant(jdbcTemplate, lastBatch, jobExecutionId);
+                        for (StagingXmlRecord r : lastBatch) {
+                            r.setCachedMap(null);
+                        }
+                    } finally {
+                        inFlightBatches.release();
+                    }
+                });
             }
-            saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
-                    "STAGE_1_COMPLETED", stagedCount, 0, null, null, "STAGE_1_DONE");
-            if (progressCallback != null) {
-                progressCallback.onProgress(totalRead, stagedCount, skippedUnchanged, new LinkedHashMap<>(tableCounts), "COMPLETED");
-            }
+        }
+        } // vThreadExecutor.close() awaits all virtual threads to finish cleanly
+
+        saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
+                "STAGE_1_COMPLETED", stagedCount.get(), 0, null, null, "STAGE_1_DONE");
+        if (progressCallback != null) {
+            progressCallback.onProgress(totalRead.get(), stagedCount.get(), skippedUnchanged.get(), new LinkedHashMap<>(tableCounts), "COMPLETED");
         }
 
         long elapsed = System.currentTimeMillis() - startTime;
-        log.info("StAX Staging ingestion completed: totalRead={}, staged={}, skippedUnchanged={}, failed={}, elapsedMs={}",
-                totalRead, stagedCount, skippedUnchanged, failedCount, elapsed);
+        log.info("StAX Staging ingestion completed (Virtual Threads): totalRead={}, staged={}, skippedUnchanged={}, failed={}, elapsedMs={}",
+                totalRead.get(), stagedCount.get(), skippedUnchanged.get(), failedCount.get(), elapsed);
 
-        return new StagingSummary(totalRead, stagedCount, skippedUnchanged, failedCount, elapsed);
+        return new StagingSummary(totalRead.get(), stagedCount.get(), skippedUnchanged.get(), failedCount.get(), elapsed);
+    }
+
+    private String matchedRootTagForBatch(List<StagingXmlRecord> records) {
+        if (records == null || records.isEmpty()) return "record";
+        StagingXmlRecord first = records.get(0);
+        return first.getTagName() != null ? first.getTagName() : (first.getEntityType() != null ? first.getEntityType() : "record");
     }
 
     private void fastSkipFragment(XMLEventReader xmlReader, String rootTag) throws Exception {
-        int depth = 1;
-        while (xmlReader.hasNext() && depth > 0) {
+        int depth = 0;
+        while (xmlReader.hasNext()) {
             XMLEvent event = xmlReader.nextEvent();
             if (event.isStartElement()) {
                 depth++;
             } else if (event.isEndElement()) {
                 depth--;
+                if (depth == 0) {
+                    break;
+                }
             }
         }
     }
@@ -377,24 +424,31 @@ public class StagingXmlStreamingService {
 
     public void ensureCheckpointTableExists(JdbcTemplate jdbcTemplate) {
         if (jdbcTemplate == null) return;
+        String sql = "CREATE TABLE IF NOT EXISTS job_checkpoints (" +
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                "job_execution_id BIGINT, " +
+                "job_name VARCHAR(255), " +
+                "source_xml_path VARCHAR(1000), " +
+                "stage VARCHAR(50), " +
+                "records_streamed BIGINT DEFAULT 0, " +
+                "records_normalized BIGINT DEFAULT 0, " +
+                "last_record_identifier VARCHAR(255), " +
+                "last_tag_name VARCHAR(100), " +
+                "status VARCHAR(50), " +
+                "checkpoint_data TEXT, " +
+                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                ")";
         try {
-            String sql = "CREATE TABLE IF NOT EXISTS job_checkpoints (" +
-                    "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
-                    "job_execution_id BIGINT, " +
-                    "job_name VARCHAR(255), " +
-                    "source_xml_path VARCHAR(1000), " +
-                    "stage VARCHAR(50), " +
-                    "records_streamed BIGINT DEFAULT 0, " +
-                    "records_normalized BIGINT DEFAULT 0, " +
-                    "last_record_identifier VARCHAR(255), " +
-                    "last_tag_name VARCHAR(100), " +
-                    "status VARCHAR(50), " +
-                    "checkpoint_data TEXT, " +
-                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
-                    ")";
             jdbcTemplate.execute(sql);
         } catch (Exception ex) {
-            log.debug("Notice ensuring job_checkpoints table exists: {}", ex.getMessage());
+            if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
+                try {
+                    jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
+                    jdbcTemplate.execute(sql);
+                } catch (Exception ignored) {}
+            } else {
+                log.debug("Notice ensuring job_checkpoints table exists: {}", ex.getMessage());
+            }
         }
     }
 
@@ -490,6 +544,10 @@ public class StagingXmlStreamingService {
     }
 
     public void recordMigrationError(JdbcTemplate jdbcTemplate, Long jobExecutionId, String phase, String recordData, Throwable t) {
+        recordMigrationError(jdbcTemplate, jobExecutionId, null, null, phase, recordData, t);
+    }
+
+    public void recordMigrationError(JdbcTemplate jdbcTemplate, Long jobExecutionId, String entityType, String recordIdentifier, String phase, String recordData, Throwable t) {
         if (jdbcTemplate == null) return;
         try {
             ensureErrorTableExists(jdbcTemplate);
@@ -500,30 +558,70 @@ public class StagingXmlStreamingService {
             String stackTrace = sw.toString();
             if (stackTrace.length() > 3000) stackTrace = stackTrace.substring(0, 3000);
 
-            jdbcTemplate.update(
-                    "INSERT INTO migration_errors (job_execution_id, step_name, phase, record_data, error_message, stack_trace, failed_at) " +
-                            "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-                    jobExecutionId, "stagedPipelineJob", phase, recordData != null ? recordData : "{}", errorMsg, stackTrace
-            );
+            // Insert into gs_error_records (invalid/error records table holding error msg and skipped error data details)
+            try {
+                jdbcTemplate.update(
+                        "INSERT INTO gs_error_records (job_execution_id, entity_type, record_identifier, step_name, phase, error_message, skipped_record_data, failed_at) " +
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                        jobExecutionId, entityType != null ? entityType : "RECORD", recordIdentifier, "stagedPipelineJob", phase, errorMsg, recordData != null ? recordData : "{}"
+                );
+            } catch (Exception ignored) {}
+
+            try {
+                jdbcTemplate.update(
+                        "INSERT INTO migration_errors (job_execution_id, step_name, phase, record_data, error_message, stack_trace, failed_at) " +
+                                "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                        jobExecutionId, "stagedPipelineJob", phase, recordData != null ? recordData : "{}", errorMsg, stackTrace
+                );
+            } catch (Exception ignored) {}
         } catch (Exception ex) {
             log.debug("Notice recording migration error: {}", ex.getMessage());
         }
     }
 
     private void ensureErrorTableExists(JdbcTemplate jdbcTemplate) {
+        String sqlGsError = "CREATE TABLE IF NOT EXISTS gs_error_records (" +
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                "job_execution_id BIGINT, " +
+                "entity_type VARCHAR(100), " +
+                "record_identifier VARCHAR(100), " +
+                "step_name VARCHAR(100), " +
+                "phase VARCHAR(50), " +
+                "error_message TEXT, " +
+                "skipped_record_data TEXT, " +
+                "failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                ")";
         try {
-            String createTableSql = "CREATE TABLE IF NOT EXISTS migration_errors (" +
-                    "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
-                    "job_execution_id BIGINT, " +
-                    "step_name VARCHAR(100), " +
-                    "phase VARCHAR(50), " +
-                    "record_data TEXT, " +
-                    "error_message TEXT, " +
-                    "stack_trace TEXT, " +
-                    "failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
-                    ")";
+            jdbcTemplate.execute(sqlGsError);
+        } catch (Exception ex) {
+            if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
+                try {
+                    jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
+                    jdbcTemplate.execute(sqlGsError);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        String createTableSql = "CREATE TABLE IF NOT EXISTS migration_errors (" +
+                "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                "job_execution_id BIGINT, " +
+                "step_name VARCHAR(100), " +
+                "phase VARCHAR(50), " +
+                "record_data TEXT, " +
+                "error_message TEXT, " +
+                "stack_trace TEXT, " +
+                "failed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                ")";
+        try {
             jdbcTemplate.execute(createTableSql);
-        } catch (Exception ignored) {}
+        } catch (Exception ex) {
+            if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
+                try {
+                    jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
+                    jdbcTemplate.execute(createTableSql);
+                } catch (Exception ignored) {}
+            }
+        }
     }
 
     private void flushStagingBatch(JdbcTemplate jdbcTemplate, List<StagingXmlRecord> records) {
@@ -617,116 +715,121 @@ public class StagingXmlStreamingService {
             String singular = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(norm);
             String plural = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.pluralize(norm);
 
-            // Dynamically discover which flat table exists: singular_flat, norm_flat, or plural_flat
-            String flatTable = null;
-            Set<String> tableCols = Collections.emptySet();
-            for (String candidate : List.of(singular + "_flat", norm + "_flat", plural + "_flat")) {
+            // Resolve flat tables: in target DB, gs_<entityname> is used; in H2, compatibility tables are also populated
+            List<String> targetFlatTables = new ArrayList<>();
+            for (String candidate : List.of("gs_" + norm, "gs_" + singular, "gs_" + plural, singular + "_flat", norm + "_flat", plural + "_flat", singular + "_gs", norm + "_gs")) {
                 Set<String> cols = getTableColumns(jdbcTemplate, candidate);
                 if (cols.isEmpty()) cols = getTableColumns(jdbcTemplate, candidate.toUpperCase());
-                if (!cols.isEmpty()) {
-                    flatTable = candidate;
-                    tableCols = cols;
-                    break;
+                if (!cols.isEmpty() && !targetFlatTables.contains(candidate)) {
+                    targetFlatTables.add(candidate);
                 }
             }
 
-            if (tableCols.isEmpty()) {
+            if (targetFlatTables.isEmpty()) {
                 continue;
             }
-            final Set<String> effectiveCols = tableCols;
+
             List<StagingXmlRecord> group = entry.getValue();
+            for (String flatTable : targetFlatTables) {
+                Set<String> tableCols = getTableColumns(jdbcTemplate, flatTable);
+                if (tableCols.isEmpty()) tableCols = getTableColumns(jdbcTemplate, flatTable.toUpperCase());
+                if (tableCols.isEmpty()) continue;
+                flushRecordsToTargetFlatTable(jdbcTemplate, flatTable, tableCols, group);
+            }
+        }
+    }
 
-            try {
-                List<String> insertCols = new ArrayList<>(List.of(
-                        "job_execution_id", "bnpp_id", "tag_name", "version_number",
-                        "record_identifier", "record_action", "record_date",
-                        "xml_version", "schema_version", "payload_hash", "status", "raw_payload"
-                ));
-                insertCols.removeIf(c -> !effectiveCols.contains(c.toLowerCase()));
+    private void flushRecordsToTargetFlatTable(JdbcTemplate jdbcTemplate, String flatTable, Set<String> effectiveCols, List<StagingXmlRecord> group) {
+        try {
+            List<String> insertCols = new ArrayList<>(List.of(
+                    "job_execution_id", "bnpp_id", "tag_name", "version_number",
+                    "record_identifier", "record_action", "record_date",
+                    "xml_version", "schema_version", "payload_hash", "status", "raw_payload"
+            ));
+            insertCols.removeIf(c -> !effectiveCols.contains(c.toLowerCase()));
 
-                List<String> extraCols = new ArrayList<>();
-                for (String c : effectiveCols) {
-                    if (!insertCols.contains(c) && !c.equalsIgnoreCase("id")
-                            && !c.equalsIgnoreCase("created_at") && !c.equalsIgnoreCase("updated_at")
-                            && !c.equalsIgnoreCase("extra_attributes") && !c.equalsIgnoreCase("error_message")) {
-                        extraCols.add(c);
-                    }
+            List<String> extraCols = new ArrayList<>();
+            for (String c : effectiveCols) {
+                if (!insertCols.contains(c) && !c.equalsIgnoreCase("id")
+                        && !c.equalsIgnoreCase("created_at") && !c.equalsIgnoreCase("updated_at")
+                        && !c.equalsIgnoreCase("extra_attributes") && !c.equalsIgnoreCase("error_message")) {
+                    extraCols.add(c);
                 }
-                if (tableCols.contains("extra_attributes")) {
-                    insertCols.add("extra_attributes");
-                }
-                insertCols.addAll(extraCols);
+            }
+            if (effectiveCols.contains("extra_attributes")) {
+                insertCols.add("extra_attributes");
+            }
+            insertCols.addAll(extraCols);
 
-                List<StagingXmlRecord> activeRecords = group.stream()
-                        .filter(r -> !"SKIPPED_UNCHANGED".equalsIgnoreCase(r.getStatus()))
+            List<StagingXmlRecord> activeRecords = group.stream()
+                    .filter(r -> !"SKIPPED_UNCHANGED".equalsIgnoreCase(r.getStatus()))
+                    .toList();
+            if (activeRecords.isEmpty()) return;
+
+            // Delta handling: if record_identifier already exists in flat table, replace it with the new version
+            if (effectiveCols.contains("record_identifier")) {
+                List<Object[]> deleteParams = activeRecords.stream()
+                        .map(StagingXmlRecord::getRecordIdentifier)
+                        .filter(id -> id != null && !id.trim().isEmpty())
+                        .map(id -> new Object[]{id.trim()})
                         .toList();
-                if (activeRecords.isEmpty()) continue;
+                if (!deleteParams.isEmpty()) {
+                    try {
+                        jdbcTemplate.batchUpdate("DELETE FROM " + flatTable + " WHERE record_identifier = ?", deleteParams);
+                    } catch (Exception ignored) {}
+                }
+            }
 
-                // Delta handling: if record_identifier already exists in flat table, replace it with the new version
-                if (effectiveCols.contains("record_identifier")) {
-                    List<Object[]> deleteParams = activeRecords.stream()
-                            .map(StagingXmlRecord::getRecordIdentifier)
-                            .filter(id -> id != null && !id.trim().isEmpty())
-                            .map(id -> new Object[]{id.trim()})
-                            .toList();
-                    if (!deleteParams.isEmpty()) {
-                        try {
-                            jdbcTemplate.batchUpdate("DELETE FROM " + flatTable + " WHERE record_identifier = ?", deleteParams);
-                        } catch (Exception ignored) {}
-                    }
+            Set<String> reservedKeywords = Set.of(
+                    "day", "month", "year", "date", "order", "group", "user", "value",
+                    "key", "action", "role", "type", "desc", "asc", "limit", "table", "from", "select", "where"
+            );
+            List<String> quotedCols = insertCols.stream()
+                    .map(c -> reservedKeywords.contains(c.toLowerCase()) ? "\"" + c + "\"" : c)
+                    .toList();
+            String colList = String.join(", ", quotedCols);
+            String placeholders = String.join(", ", Collections.nCopies(insertCols.size(), "?"));
+            String sql = "INSERT INTO " + flatTable + " (" + colList + ") VALUES (" + placeholders + ")";
+
+            jdbcTemplate.batchUpdate(sql, activeRecords, activeRecords.size(), (ps, r) -> {
+                Map<String, Object> map = r.getCachedMap();
+                if (map == null && r.getRawPayload() != null) {
+                    try {
+                        map = objectMapper.readValue(r.getRawPayload(), new TypeReference<Map<String, Object>>() {});
+                    } catch (Exception ignored) {}
                 }
 
-                Set<String> reservedKeywords = Set.of(
-                        "day", "month", "year", "date", "order", "group", "user", "value",
-                        "key", "action", "role", "type", "desc", "asc", "limit", "table", "from", "select", "where"
-                );
-                List<String> quotedCols = insertCols.stream()
-                        .map(c -> reservedKeywords.contains(c.toLowerCase()) ? "\"" + c + "\"" : c)
-                        .toList();
-                String colList = String.join(", ", quotedCols);
-                String placeholders = String.join(", ", Collections.nCopies(insertCols.size(), "?"));
-                String sql = "INSERT INTO " + flatTable + " (" + colList + ") VALUES (" + placeholders + ")";
-
-                jdbcTemplate.batchUpdate(sql, activeRecords, activeRecords.size(), (ps, r) -> {
-                    Map<String, Object> map = r.getCachedMap();
-                    if (map == null && r.getRawPayload() != null) {
-                        try {
-                            map = objectMapper.readValue(r.getRawPayload(), new TypeReference<Map<String, Object>>() {});
-                        } catch (Exception ignored) {}
-                    }
-
-                    int idx = 1;
-                    for (String col : insertCols) {
-                        switch (col.toLowerCase()) {
-                            case "job_execution_id" -> {
-                                if (r.getJobExecutionId() != null) ps.setLong(idx++, r.getJobExecutionId());
-                                else ps.setNull(idx++, java.sql.Types.BIGINT);
-                            }
-                            case "bnpp_id" -> ps.setString(idx++, r.getBnppId());
-                            case "tag_name" -> ps.setString(idx++, r.getTagName() != null ? r.getTagName() : r.getEntityType());
-                            case "version_number" -> ps.setInt(idx++, r.getVersionNumber() != null ? r.getVersionNumber() : 1);
-                            case "record_identifier" -> ps.setString(idx++, r.getRecordIdentifier());
-                            case "record_action" -> ps.setString(idx++, r.getRecordAction());
-                            case "record_date" -> ps.setString(idx++, r.getRecordDate());
-                            case "xml_version" -> ps.setString(idx++, r.getXmlVersion());
-                            case "schema_version" -> ps.setString(idx++, r.getSchemaVersion());
-                            case "payload_hash" -> ps.setString(idx++, r.getPayloadHash());
-                            case "status" -> {
-                                String attrVal = (map != null) ? resolveStageColumnValue(map, "status") : null;
-                                ps.setString(idx++, attrVal != null ? attrVal : r.getStatus());
-                            }
-                            case "raw_payload" -> ps.setString(idx++, r.getRawPayload());
-                            case "extra_attributes" -> ps.setString(idx++, extractValue(map, "extra_attributes", "unmapped_attributes"));
-                            default -> {
-                                String val = (map != null) ? resolveFlatColumnValue(map, col) : null;
-                                ps.setString(idx++, val);
-                            }
+                int idx = 1;
+                for (String col : insertCols) {
+                    switch (col.toLowerCase()) {
+                        case "job_execution_id" -> {
+                            if (r.getJobExecutionId() != null) ps.setLong(idx++, r.getJobExecutionId());
+                            else ps.setNull(idx++, java.sql.Types.BIGINT);
+                        }
+                        case "bnpp_id" -> ps.setString(idx++, r.getBnppId());
+                        case "tag_name" -> ps.setString(idx++, r.getTagName() != null ? r.getTagName() : r.getEntityType());
+                        case "version_number" -> ps.setInt(idx++, r.getVersionNumber() != null ? r.getVersionNumber() : 1);
+                        case "record_identifier" -> ps.setString(idx++, r.getRecordIdentifier());
+                        case "record_action" -> ps.setString(idx++, r.getRecordAction());
+                        case "record_date" -> ps.setString(idx++, r.getRecordDate());
+                        case "xml_version" -> ps.setString(idx++, r.getXmlVersion());
+                        case "schema_version" -> ps.setString(idx++, r.getSchemaVersion());
+                        case "payload_hash" -> ps.setString(idx++, r.getPayloadHash());
+                        case "status" -> {
+                            String attrVal = (map != null) ? resolveStageColumnValue(map, "status") : null;
+                            ps.setString(idx++, attrVal != null ? attrVal : r.getStatus());
+                        }
+                        case "raw_payload" -> ps.setString(idx++, r.getRawPayload());
+                        case "extra_attributes" -> ps.setString(idx++, extractValue(map, "extra_attributes", "unmapped_attributes"));
+                        default -> {
+                            String val = (map != null) ? resolveFlatColumnValue(map, col) : null;
+                            ps.setString(idx++, val);
                         }
                     }
-                });
-            } catch (Exception ex) {
-                log.error("Error flushing to specific flat table '{}': {}", flatTable, ex.getMessage(), ex);
-            }
+                }
+            });
+        } catch (Exception ex) {
+            log.error("Error flushing to specific flat table '{}': {}", flatTable, ex.getMessage(), ex);
         }
     }
 
@@ -871,13 +974,23 @@ public class StagingXmlStreamingService {
 
     private String resolveFlatColumnValue(Map<String, Object> map, String colName) {
         if (map == null || colName == null) return null;
+        String lowerCol = colName.toLowerCase();
+        // 1. If raw XML fragment was captured for this nested tag, return it directly in raw format
+        Object rawSub = map.get("_subtag_xml_" + lowerCol);
+        if (rawSub instanceof String s && !s.trim().isEmpty()) {
+            return s;
+        }
+        // 2. Direct map value (leaf tag or attribute)
         Object val = findMapValue(map, colName);
         if (val == null) {
-            val = map.get("_subtag_xml_" + colName.toLowerCase());
+            val = map.get("_subtag_xml_" + lowerCol);
         }
         if (val == null) return null;
         if (val instanceof String s) return s;
         if (val instanceof List<?> || val instanceof Map<?, ?>) {
+            if (rawSub instanceof String s && !s.trim().isEmpty()) {
+                return s;
+            }
             try {
                 return objectMapper.writeValueAsString(val);
             } catch (Exception ignored) {
@@ -992,7 +1105,11 @@ public class StagingXmlStreamingService {
                     r.setVersionNumber(currentVer);
                     staged++;
                     String normRoot = ent.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                    String gsPrefixName = "gs_" + normRoot;
+                    String gsName = normRoot.endsWith("_gs") ? normRoot : normRoot + "_gs";
                     String flatName = normRoot.endsWith("_flat") ? normRoot : normRoot + "_flat";
+                    tableCounts.merge(gsPrefixName, 1L, Long::sum);
+                    tableCounts.merge(gsName, 1L, Long::sum);
                     tableCounts.merge(flatName, 1L, Long::sum);
                     existingMap.put(lookupKey, new ExistingDeltaInfo(r.getPayloadHash(), currentVer));
                 }
@@ -1001,7 +1118,11 @@ public class StagingXmlStreamingService {
                 r.setVersionNumber(currentVer);
                 staged++;
                 String normRoot = ent.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                String gsPrefixName = "gs_" + normRoot;
+                String gsName = normRoot.endsWith("_gs") ? normRoot : normRoot + "_gs";
                 String flatName = normRoot.endsWith("_flat") ? normRoot : normRoot + "_flat";
+                tableCounts.merge(gsPrefixName, 1L, Long::sum);
+                tableCounts.merge(gsName, 1L, Long::sum);
                 tableCounts.merge(flatName, 1L, Long::sum);
                 if (lookupKey != null) {
                     existingMap.put(lookupKey, new ExistingDeltaInfo(r.getPayloadHash(), currentVer));
@@ -1102,7 +1223,18 @@ public class StagingXmlStreamingService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
                     "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")";
-            jdbcTemplate.execute(sqlStaging);
+            try {
+                jdbcTemplate.execute(sqlStaging);
+            } catch (Exception ex) {
+                if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
+                    try {
+                        jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
+                        jdbcTemplate.execute(sqlStaging);
+                    } catch (Exception ignored) {}
+                } else if (ex.getMessage() == null || !ex.getMessage().contains("already exists")) {
+                    throw ex;
+                }
+            }
             try {
                 jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS bnpp_id VARCHAR(64)");
                 jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS tag_name VARCHAR(100)");

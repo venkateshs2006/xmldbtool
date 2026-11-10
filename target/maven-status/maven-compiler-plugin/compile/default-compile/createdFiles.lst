@@ -55,6 +55,7 @@ com/enterprise/xmldbtool/service/UserService.class
 com/enterprise/xmldbtool/service/UserService$1.class
 com/enterprise/xmldbtool/model/JobCheckpoint.class
 com/enterprise/xmldbtool/batch/DynamicXmlItemProcessor$2.class
+com/enterprise/xmldbtool/batch/DynamicXmlItemProcessor$ParseFrame.class
 com/enterprise/xmldbtool/service/JobConfigService$1.class
 com/enterprise/xmldbtool/model/DataPreviewRequest.class
 com/enterprise/xmldbtool/service/XmlSchemaDiscoveryService.class
