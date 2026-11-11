@@ -506,7 +506,7 @@ public class DynamicBatchJobService {
                     log.info("Resuming Job #{} from checkpoint: recordsStreamed={}, stage1AlreadyCompleted={}",
                             jobExecution.getId(), resumeFromRecordIndex, stage1AlreadyCompleted);
                 } else {
-                    long existingFlatCount = countExistingFlatRecords(targetJdbc, effectiveRoots);
+                    long existingFlatCount = countExistingFlatRecords(targetJdbc, effectiveRoots, request.getResumeFromJobExecutionId());
                     if (existingFlatCount > 0) {
                         resumeFromRecordIndex = existingFlatCount;
                         log.info("Resuming Job #{} from existing flat table count: fast-skipping first {} records.",
@@ -1563,7 +1563,7 @@ public class DynamicBatchJobService {
         return copy;
     }
 
-    private long countExistingFlatRecords(org.springframework.jdbc.core.JdbcTemplate jdbcTemplate, List<String> roots) {
+    private long countExistingFlatRecords(org.springframework.jdbc.core.JdbcTemplate jdbcTemplate, List<String> roots, Long jobExecutionId) {
         if (jdbcTemplate == null || roots == null || roots.isEmpty()) return 0L;
         long maxCount = 0L;
         for (String root : roots) {
@@ -1572,7 +1572,13 @@ public class DynamicBatchJobService {
             String singular = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(norm);
             for (String tbl : List.of("gs_" + norm, "gs_" + singular, norm + "_gs", singular + "_gs", norm + "_flat")) {
                 try {
-                    Long count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tbl, Long.class);
+                    Long count = null;
+                    if (jobExecutionId != null) {
+                        count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tbl + " WHERE job_execution_id = ?", Long.class, jobExecutionId);
+                    }
+                    if (count == null || count == 0L) {
+                        count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tbl + " WHERE status = 'STAGED'", Long.class);
+                    }
                     if (count != null && count > maxCount) {
                         maxCount = count;
                     }

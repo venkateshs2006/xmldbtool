@@ -232,90 +232,153 @@ public class DynamicSchemaResolutionService {
                 ? "(status = 'STAGED' OR status = 'RETRY' OR status = 'FAILED')"
                 : "(status = 'STAGED' OR (status IS NOT NULL AND status != 'NORMALIZED' AND status != 'FAILED' AND status != 'SKIPPED_UNCHANGED'))";
 
-        // Process each entity-specific flat table in dependency sequence
+        // Process each entity-specific flat table in dependency sequence using Java 21 Virtual Threads for high-speed parallel DB insertion
+        int maxWorkers = Math.min(16, Math.max(4, Runtime.getRuntime().availableProcessors() * 2));
+
         for (String flatTable : candidateFlatTables) {
             long lastSeenId = 0;
             boolean hasMore = true;
 
-            while (hasMore) {
-                if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
-                    log.info("Job #{} termination requested. Cleanly halting Stage 2 normalization at record #{}.", jobExecutionId, totalProcessed);
-                    break;
+            try (java.util.concurrent.ExecutorService vThreadExecutor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                java.util.concurrent.Semaphore inFlightTasks = new java.util.concurrent.Semaphore(maxWorkers);
+                List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+                java.util.concurrent.atomic.AtomicLong atomicProcessed = new java.util.concurrent.atomic.AtomicLong(totalProcessed);
+                java.util.concurrent.atomic.AtomicLong atomicNormalized = new java.util.concurrent.atomic.AtomicLong(normalizedCount);
+                java.util.concurrent.atomic.AtomicLong atomicFailed = new java.util.concurrent.atomic.AtomicLong(failedCount);
+
+                while (hasMore) {
+                    if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
+                        log.info("Job #{} termination requested. Cleanly halting Stage 2 normalization at record #{}.", jobExecutionId, atomicProcessed.get());
+                        break;
+                    }
+
+                    String selectSql = "SELECT * FROM " + flatTable + " WHERE id > ? AND " + statusClause + " ORDER BY id ASC " +
+                            (isOracle ? "FETCH FIRST " + chunkSize + " ROWS ONLY" : "LIMIT " + chunkSize);
+
+                    List<StagingXmlRecord> stagedBatch = fetchStagedRecordsWithKeyset(jdbcTemplate, selectSql, lastSeenId);
+                    if (stagedBatch.isEmpty()) {
+                        break;
+                    }
+                    processedAnyFlat = true;
+                    lastSeenId = stagedBatch.get(stagedBatch.size() - 1).getId();
+
+                    inFlightTasks.acquire();
+                    futures.add(vThreadExecutor.submit(() -> {
+                        try {
+                            NormalizationBatchResult batchResult = processStagedBatch(
+                                    stagedBatch, processor, effectiveMappings, jdbcTemplate, batchWriter, skipListener
+                            );
+
+                            atomicProcessed.addAndGet(batchResult.processed);
+                            atomicNormalized.addAndGet(batchResult.written);
+                            atomicFailed.addAndGet(batchResult.failed);
+
+                            // Update status in flat table and central staging table
+                            if (!batchResult.successfulRecords.isEmpty()) {
+                                updateFlatTableStatus(jdbcTemplate, flatTable, batchResult.successfulRecords, "NORMALIZED", null);
+                                updateStagingStatus(jdbcTemplate, batchResult.successfulRecords, "NORMALIZED", null);
+                            }
+                            for (Map.Entry<StagingXmlRecord, String> entry : batchResult.failedRecords.entrySet()) {
+                                updateFlatTableStatus(jdbcTemplate, flatTable, List.of(entry.getKey()), "FAILED", entry.getValue());
+                                updateStagingStatus(jdbcTemplate, List.of(entry.getKey()), "FAILED", entry.getValue());
+                            }
+
+                            if (progressCallback != null) {
+                                progressCallback.onProgress(atomicProcessed.get(), atomicNormalized.get(), atomicFailed.get(),
+                                        new LinkedHashMap<>(batchWriter.getTableWriteCounts()), flatTable);
+                            }
+                        } finally {
+                            inFlightTasks.release();
+                        }
+                    }));
                 }
 
-                String selectSql = "SELECT * FROM " + flatTable + " WHERE id > ? AND " + statusClause + " ORDER BY id ASC " +
-                        (isOracle ? "FETCH FIRST " + chunkSize + " ROWS ONLY" : "LIMIT " + chunkSize);
-
-                List<StagingXmlRecord> stagedBatch = fetchStagedRecordsWithKeyset(jdbcTemplate, selectSql, lastSeenId);
-                if (stagedBatch.isEmpty()) {
-                    break;
-                }
-                processedAnyFlat = true;
-                lastSeenId = stagedBatch.get(stagedBatch.size() - 1).getId();
-
-                NormalizationBatchResult batchResult = processStagedBatch(
-                        stagedBatch, processor, effectiveMappings, jdbcTemplate, batchWriter, skipListener
-                );
-
-                totalProcessed += batchResult.processed;
-                normalizedCount += batchResult.written;
-                failedCount += batchResult.failed;
-
-                // Update status in flat table and central staging table
-                if (!batchResult.successfulRecords.isEmpty()) {
-                    updateFlatTableStatus(jdbcTemplate, flatTable, batchResult.successfulRecords, "NORMALIZED", null);
-                    updateStagingStatus(jdbcTemplate, batchResult.successfulRecords, "NORMALIZED", null);
-                }
-                for (Map.Entry<StagingXmlRecord, String> entry : batchResult.failedRecords.entrySet()) {
-                    updateFlatTableStatus(jdbcTemplate, flatTable, List.of(entry.getKey()), "FAILED", entry.getValue());
-                    updateStagingStatus(jdbcTemplate, List.of(entry.getKey()), "FAILED", entry.getValue());
+                for (java.util.concurrent.Future<?> f : futures) {
+                    try {
+                        f.get();
+                    } catch (Exception ex) {
+                        log.error("Error in parallel normalization worker for '{}': {}", flatTable, ex.getMessage(), ex);
+                    }
                 }
 
-                if (progressCallback != null) {
-                    progressCallback.onProgress(totalProcessed, normalizedCount, failedCount, new LinkedHashMap<>(batchWriter.getTableWriteCounts()), flatTable);
-                }
+                totalProcessed = atomicProcessed.get();
+                normalizedCount = atomicNormalized.get();
+                failedCount = atomicFailed.get();
+            } catch (Exception ex) {
+                log.error("Error managing virtual thread execution in normalization for '{}': {}", flatTable, ex.getMessage(), ex);
             }
         }
 
-        // 2. Fallback: Process central staging_xml_records ONLY if no partitioned flat tables were processed
-        if (!processedAnyFlat) {
+        // 2. Fallback: Process central staging_xml_records ONLY if no partitioned flat tables were processed and table exists
+        if (!processedAnyFlat && tableExists(jdbcTemplate, "staging_xml_records")) {
             long lastSeenCentralId = 0;
             boolean hasMoreCentral = true;
-            while (hasMoreCentral) {
-                if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
-                    log.info("Job #{} termination requested. Cleanly halting Stage 2 normalization at record #{}.", jobExecutionId, totalProcessed);
-                    break;
+
+            try (java.util.concurrent.ExecutorService vThreadExecutor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+                java.util.concurrent.Semaphore inFlightTasks = new java.util.concurrent.Semaphore(maxWorkers);
+                List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+                java.util.concurrent.atomic.AtomicLong atomicProcessed = new java.util.concurrent.atomic.AtomicLong(totalProcessed);
+                java.util.concurrent.atomic.AtomicLong atomicNormalized = new java.util.concurrent.atomic.AtomicLong(normalizedCount);
+                java.util.concurrent.atomic.AtomicLong atomicFailed = new java.util.concurrent.atomic.AtomicLong(failedCount);
+
+                while (hasMoreCentral) {
+                    if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
+                        log.info("Job #{} termination requested. Cleanly halting Stage 2 normalization at record #{}.", jobExecutionId, atomicProcessed.get());
+                        break;
+                    }
+
+                    String centralStatusClause = retryFailedRecords ? "(status = 'STAGED' OR status = 'FAILED')" : "status = 'STAGED'";
+                    String centralSelect = "SELECT id, job_execution_id, bnpp_id, tag_name, version_number, " +
+                            "record_identifier, record_action, record_date, raw_payload, payload_hash, status " +
+                            "FROM staging_xml_records WHERE id > ? AND " + centralStatusClause + " ORDER BY id ASC LIMIT " + chunkSize;
+
+                    List<StagingXmlRecord> centralBatch = fetchStagedRecordsWithKeyset(jdbcTemplate, centralSelect, lastSeenCentralId);
+                    if (centralBatch.isEmpty()) {
+                        break;
+                    }
+                    lastSeenCentralId = centralBatch.get(centralBatch.size() - 1).getId();
+
+                    inFlightTasks.acquire();
+                    futures.add(vThreadExecutor.submit(() -> {
+                        try {
+                            NormalizationBatchResult batchResult = processStagedBatch(
+                                    centralBatch, processor, effectiveMappings, jdbcTemplate, batchWriter, skipListener
+                            );
+
+                            atomicProcessed.addAndGet(batchResult.processed);
+                            atomicNormalized.addAndGet(batchResult.written);
+                            atomicFailed.addAndGet(batchResult.failed);
+
+                            if (!batchResult.successfulRecords.isEmpty()) {
+                                updateStagingStatus(jdbcTemplate, batchResult.successfulRecords, "NORMALIZED", null);
+                            }
+                            for (Map.Entry<StagingXmlRecord, String> entry : batchResult.failedRecords.entrySet()) {
+                                updateStagingStatus(jdbcTemplate, List.of(entry.getKey()), "FAILED", entry.getValue());
+                            }
+
+                            if (progressCallback != null) {
+                                progressCallback.onProgress(atomicProcessed.get(), atomicNormalized.get(), atomicFailed.get(),
+                                        new LinkedHashMap<>(batchWriter.getTableWriteCounts()), "staging_xml_records");
+                            }
+                        } finally {
+                            inFlightTasks.release();
+                        }
+                    }));
                 }
 
-                String centralStatusClause = retryFailedRecords ? "(status = 'STAGED' OR status = 'FAILED')" : "status = 'STAGED'";
-                String centralSelect = "SELECT id, job_execution_id, bnpp_id, tag_name, version_number, " +
-                        "record_identifier, record_action, record_date, raw_payload, payload_hash, status " +
-                        "FROM staging_xml_records WHERE id > ? AND " + centralStatusClause + " ORDER BY id ASC LIMIT " + chunkSize;
-
-                List<StagingXmlRecord> centralBatch = fetchStagedRecordsWithKeyset(jdbcTemplate, centralSelect, lastSeenCentralId);
-                if (centralBatch.isEmpty()) {
-                    break;
-                }
-                lastSeenCentralId = centralBatch.get(centralBatch.size() - 1).getId();
-
-                NormalizationBatchResult batchResult = processStagedBatch(
-                        centralBatch, processor, effectiveMappings, jdbcTemplate, batchWriter, skipListener
-                );
-
-                totalProcessed += batchResult.processed;
-                normalizedCount += batchResult.written;
-                failedCount += batchResult.failed;
-
-                if (!batchResult.successfulRecords.isEmpty()) {
-                    updateStagingStatus(jdbcTemplate, batchResult.successfulRecords, "NORMALIZED", null);
-                }
-                for (Map.Entry<StagingXmlRecord, String> entry : batchResult.failedRecords.entrySet()) {
-                    updateStagingStatus(jdbcTemplate, List.of(entry.getKey()), "FAILED", entry.getValue());
+                for (java.util.concurrent.Future<?> f : futures) {
+                    try {
+                        f.get();
+                    } catch (Exception ex) {
+                        log.error("Error in parallel central normalization worker: {}", ex.getMessage(), ex);
+                    }
                 }
 
-                if (progressCallback != null) {
-                    progressCallback.onProgress(totalProcessed, normalizedCount, failedCount, new LinkedHashMap<>(batchWriter.getTableWriteCounts()), "staging_xml_records");
-                }
+                totalProcessed = atomicProcessed.get();
+                normalizedCount = atomicNormalized.get();
+                failedCount = atomicFailed.get();
+            } catch (Exception ex) {
+                log.error("Error managing virtual thread execution in central normalization: {}", ex.getMessage(), ex);
             }
         }
 

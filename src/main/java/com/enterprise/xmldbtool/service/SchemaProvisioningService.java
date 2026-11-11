@@ -267,7 +267,7 @@ public class SchemaProvisioningService {
                     stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS version_number INT DEFAULT 1");
                     stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS xml_version VARCHAR(50)");
                     stmt.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS schema_version VARCHAR(50)");
-                    stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_staging_status ON staging_xml_records(status)");
                 } catch (Exception ignored) {}
@@ -1223,15 +1223,21 @@ public class SchemaProvisioningService {
 
         try {
             if (!isOracle) {
-                stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)");
+                try {
+                    // Drop obsolete unique index on bnpp_id if present so gs_<entity> can store multi-version history
+                    stmt.execute("DROP INDEX IF EXISTS idx_" + flatTable + "_bnpp");
+                } catch (Exception ignored) {}
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_rec_id ON " + flatTable + "(record_identifier)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_rec_ver ON " + flatTable + "(record_identifier, version_number)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_hash ON " + flatTable + "(record_identifier, payload_hash)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_status_id ON " + flatTable + "(status, id)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_status ON " + flatTable + "(status)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_version ON " + flatTable + "(xml_version, schema_version)");
             } else {
-                try { stmt.execute("CREATE UNIQUE INDEX idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)"); } catch (Exception ignored) {}
+                try { stmt.execute("CREATE INDEX idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)"); } catch (Exception ignored) {}
                 try { stmt.execute("CREATE INDEX idx_" + flatTable + "_rec_id ON " + flatTable + "(record_identifier)"); } catch (Exception ignored) {}
+                try { stmt.execute("CREATE INDEX idx_" + flatTable + "_rec_ver ON " + flatTable + "(record_identifier, version_number)"); } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
 

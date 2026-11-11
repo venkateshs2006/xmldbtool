@@ -16,6 +16,7 @@ import com.enterprise.xmldbtool.service.DynamicBatchJobService;
 import com.enterprise.xmldbtool.service.DynamicDataSourceService;
 import com.enterprise.xmldbtool.service.DynamicSchemaResolutionService;
 import com.enterprise.xmldbtool.service.SchemaProvisioningService;
+import com.enterprise.xmldbtool.service.StagingXmlStreamingService;
 import com.enterprise.xmldbtool.service.XmlPreviewService;
 import com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService;
 import org.junit.jupiter.api.DisplayName;
@@ -1315,6 +1316,7 @@ class DynamicXmlIngestionTest {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
             stmt.execute("DELETE FROM staging_xml_records");
         }
+        stagingStreamingService.clearColumnCache();
 
         // First ingestion run: should be STAGED
         var summary1 = stagingStreamingService.streamXmlToStaging(
@@ -1410,6 +1412,7 @@ class DynamicXmlIngestionTest {
             stmt.execute("DELETE FROM SanctionsReferencesList");
             stmt.execute("DELETE FROM staging_xml_records");
         }
+        stagingStreamingService.clearColumnCache();
 
         List<FieldMapping> mappings = List.of(
                 // Lookup tables
@@ -3969,6 +3972,132 @@ class DynamicXmlIngestionTest {
             System.out.println("Table " + tbl + " count = " + count);
             assertTrue(count > 0, "Table '" + tbl + "' should NOT be empty! Current count: " + count);
         }
+    }
+
+    @Test
+    @DisplayName("Verify gs_<entity> stores complete multi-version history while canonical tables retain only the latest updated values")
+    void testGsTableStoresMultiVersionHistoryWhileCanonicalHasOnlyUpdatedValues() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:gs_history_db;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("@id", "Person", "person_id", "PK"),
+                new FieldMapping("name", "Person", "name", "NONE"),
+                new FieldMapping("city", "Person", "city", "NONE")
+        );
+
+        stagingStreamingService.clearColumnCache();
+
+        com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+        discReq.setSourceXmlPath("sample-data/test.xml");
+        discReq.setRecordRootElements(List.of("person"));
+        discReq.setMappings(mappings);
+        discReq.setDbConfig(config);
+        discReq.setAutoCreateTables(true);
+        discoveryService.discoverSchema(discReq);
+
+        // --- Run 1: Initial Ingestion of Person #101 ---
+        Map<String, Object> recordV1 = new LinkedHashMap<>();
+        recordV1.put("@id", "101");
+        recordV1.put("name", "Alice Original");
+        recordV1.put("city", "London");
+        String jsonV1 = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(recordV1);
+        String hashV1 = StagingXmlStreamingService.computeSha256(jsonV1);
+
+        com.enterprise.xmldbtool.model.StagingXmlRecord stgRec1 = new com.enterprise.xmldbtool.model.StagingXmlRecord(
+                1001L, "person", "101", "create", "2026-11-10", jsonV1, hashV1
+        );
+        stgRec1.setBnppId("person_101");
+        stgRec1.setTagName("person");
+        stgRec1.setVersionNumber(1);
+        stgRec1.setCachedMap(recordV1);
+
+        stagingStreamingService.processBatchDeltas(jt, List.of(stgRec1), "person", new LinkedHashMap<>());
+        java.lang.reflect.Method flushMethod = StagingXmlStreamingService.class.getDeclaredMethod("flushStagingBatchFaultTolerant",
+                org.springframework.jdbc.core.JdbcTemplate.class, List.class, Long.class);
+        flushMethod.setAccessible(true);
+        flushMethod.invoke(stagingStreamingService, jt, List.of(stgRec1), 1001L);
+
+        // Normalize Run 1
+        DynamicSchemaResolutionService.NormalizationSummary norm1 = schemaResolutionService.normalizeStagingToCanonical(
+                1001L, testDs, mappings, List.of("Person"), "Person", 100
+        );
+        assertEquals(1, norm1.normalizedCount(), "Run 1 must normalize 1 record");
+
+        // Assertions for Run 1
+        Integer gsCountRun1 = jt.queryForObject("SELECT COUNT(*) FROM gs_person WHERE record_identifier = '101'", Integer.class);
+        assertEquals(1, gsCountRun1, "gs_person must have 1 record for Person 101");
+        Map<String, Object> gsRow1 = jt.queryForMap("SELECT version_number, status FROM gs_person WHERE record_identifier = '101'");
+        assertEquals(1, ((Number) gsRow1.get("version_number")).intValue());
+        assertEquals("NORMALIZED", gsRow1.get("status"));
+
+        Integer canonicalCountRun1 = jt.queryForObject("SELECT COUNT(*) FROM Person WHERE person_id = '101'", Integer.class);
+        assertEquals(1, canonicalCountRun1, "Canonical table Person must have 1 row for 101");
+        Map<String, Object> canRow1 = jt.queryForMap("SELECT name, city, version_number FROM Person WHERE person_id = '101'");
+        assertEquals("Alice Original", canRow1.get("name"));
+        assertEquals("London", canRow1.get("city"));
+        assertEquals(1, ((Number) canRow1.get("version_number")).intValue());
+
+        // --- Run 2: Delta Update for Person #101 (Changed city to Paris, changed name to Alice Updated) ---
+        Map<String, Object> recordV2 = new LinkedHashMap<>();
+        recordV2.put("@id", "101");
+        recordV2.put("name", "Alice Updated");
+        recordV2.put("city", "Paris");
+        String jsonV2 = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(recordV2);
+        String hashV2 = StagingXmlStreamingService.computeSha256(jsonV2);
+
+        com.enterprise.xmldbtool.model.StagingXmlRecord stgRec2 = new com.enterprise.xmldbtool.model.StagingXmlRecord(
+                1002L, "person", "101", "update", "2026-11-11", jsonV2, hashV2
+        );
+        stgRec2.setBnppId("person_101");
+        stgRec2.setTagName("person");
+        stgRec2.setCachedMap(recordV2);
+
+        // Delta processor should recognize existing record in gs_person and bump version to 2
+        stagingStreamingService.processBatchDeltas(jt, List.of(stgRec2), "person", new LinkedHashMap<>());
+        assertEquals(2, stgRec2.getVersionNumber(), "stgRec2 must be assigned version_number = 2");
+        assertEquals("STAGED", stgRec2.getStatus(), "stgRec2 must have status = STAGED");
+
+        flushMethod.invoke(stagingStreamingService, jt, List.of(stgRec2), 1002L);
+
+        // Verify: gs_person must now have BOTH Version 1 AND Version 2 (History preserved!)
+        Integer gsCountRun2 = jt.queryForObject("SELECT COUNT(*) FROM gs_person WHERE record_identifier = '101'", Integer.class);
+        assertEquals(2, gsCountRun2, "gs_person MUST retain history: 2 records for Person 101 (v1 and v2)");
+
+        // Normalize Run 2
+        DynamicSchemaResolutionService.NormalizationSummary norm2 = schemaResolutionService.normalizeStagingToCanonical(
+                1002L, testDs, mappings, List.of("Person"), "Person", 100
+        );
+        assertEquals(1L, norm2.tableWriteCounts().get("Person").longValue(), "Run 2 must write 1 updated row to Person table");
+        assertEquals(2, norm2.normalizedCount(), "Total normalized records across history is 2");
+
+        // Assertions for Canonical table after Run 2:
+        // Canonical table MUST NOT have duplicates (still exactly 1 row for Person 101), but values MUST be updated!
+        Integer canonicalCountRun2 = jt.queryForObject("SELECT COUNT(*) FROM Person WHERE person_id = '101'", Integer.class);
+        assertEquals(1, canonicalCountRun2, "Canonical table Person must NEVER duplicate rows for same entity");
+
+        Map<String, Object> canRow2 = jt.queryForMap("SELECT name, city, version_number FROM Person WHERE person_id = '101'");
+        assertEquals("Alice Updated", canRow2.get("name"), "Canonical table must have the updated name");
+        assertEquals("Paris", canRow2.get("city"), "Canonical table must have the updated city");
+        assertEquals(2, ((Number) canRow2.get("version_number")).intValue(), "Canonical table version must be updated to 2");
+
+        // Both versions in gs_person are now NORMALIZED and retained as complete history
+        List<Map<String, Object>> gsAll = jt.queryForList("SELECT id, version_number, status, job_execution_id FROM gs_person WHERE record_identifier = '101' ORDER BY version_number ASC");
+        assertEquals(2, gsAll.size());
+        assertEquals(1, ((Number) gsAll.get(0).get("version_number")).intValue());
+        assertEquals("NORMALIZED", gsAll.get(0).get("status"));
+        assertEquals(1001L, ((Number) gsAll.get(0).get("job_execution_id")).longValue());
+
+        assertEquals(2, ((Number) gsAll.get(1).get("version_number")).intValue());
+        assertEquals("NORMALIZED", gsAll.get(1).get("status"));
+        assertEquals(1002L, ((Number) gsAll.get(1).get("job_execution_id")).longValue());
     }
 }
 

@@ -202,9 +202,10 @@ public class StagingXmlStreamingService {
                 "STAGE_1_STREAMING", stagedCount.get(), 0, null, null, "STREAMING");
 
         // Java 21 Virtual Threads Executor for parallel high-throughput batch writes
-        // Semaphore limits in-flight batches to maintain constant O(1) heap memory on 10GB+ files
+        // Semaphore dynamically matches database connection capacity while maintaining constant O(1) heap memory
+        int maxParallelBatches = Math.min(16, Math.max(4, Runtime.getRuntime().availableProcessors() * 2));
         try (java.util.concurrent.ExecutorService vThreadExecutor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
-            java.util.concurrent.Semaphore inFlightBatches = new java.util.concurrent.Semaphore(4);
+            java.util.concurrent.Semaphore inFlightBatches = new java.util.concurrent.Semaphore(maxParallelBatches);
 
             try (BufferedReader reader = openReader(sourceXmlPath)) {
                 XMLEventReader xmlReader = factory.createXMLEventReader(reader);
@@ -323,8 +324,11 @@ public class StagingXmlStreamingService {
                                             for (StagingXmlRecord r : batchToFlush) {
                                                 r.setCachedMap(null);
                                             }
-                                            saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
-                                                    "STAGE_1_STREAMING", stagedCount.get(), 0, activeIdentifier, activeMatchedRoot, "STREAMING");
+                                            long currentStaged = stagedCount.get();
+                                            if (currentStaged % 2000 == 0 || activeIdentifier == null) {
+                                                saveOrUpdateCheckpoint(jdbcTemplate, jobExecutionId, "stagedXmlPipelineJob_" + jobExecutionId, sourceXmlPath,
+                                                        "STAGE_1_STREAMING", currentStaged, 0, activeIdentifier, activeMatchedRoot, "STREAMING");
+                                            }
                                             if (progressCallback != null) {
                                                 progressCallback.onProgress(totalRead.get(), stagedCount.get(), skippedUnchanged.get(), new LinkedHashMap<>(tableCounts), activeMatchedRoot);
                                             }
@@ -628,48 +632,50 @@ public class StagingXmlStreamingService {
         if (records.isEmpty()) return;
 
         Set<String> cols = getTableColumns(jdbcTemplate, "staging_xml_records");
-        boolean hasBnpp = cols.contains("bnpp_id");
+        if (!cols.isEmpty()) {
+            boolean hasBnpp = cols.contains("bnpp_id");
 
-        if (hasBnpp) {
-            String insertSql = "INSERT INTO staging_xml_records (" +
-                    "job_execution_id, bnpp_id, tag_name, version_number, entity_type, record_identifier, record_action, record_date, xml_version, schema_version, raw_payload, payload_hash, status, created_at, updated_at" +
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+            if (hasBnpp) {
+                String insertSql = "INSERT INTO staging_xml_records (" +
+                        "job_execution_id, bnpp_id, tag_name, version_number, entity_type, record_identifier, record_action, record_date, xml_version, schema_version, raw_payload, payload_hash, status, created_at, updated_at" +
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
 
-            jdbcTemplate.batchUpdate(insertSql, records, records.size(), (ps, r) -> {
-                if (r.getJobExecutionId() != null) ps.setLong(1, r.getJobExecutionId()); else ps.setNull(1, java.sql.Types.BIGINT);
-                ps.setString(2, r.getBnppId());
-                ps.setString(3, r.getTagName() != null ? r.getTagName() : r.getEntityType());
-                ps.setInt(4, r.getVersionNumber() != null ? r.getVersionNumber() : 1);
-                ps.setString(5, r.getEntityType());
-                ps.setString(6, r.getRecordIdentifier());
-                ps.setString(7, r.getRecordAction());
-                ps.setString(8, r.getRecordDate());
-                ps.setString(9, r.getXmlVersion());
-                ps.setString(10, r.getSchemaVersion());
-                ps.setString(11, r.getRawPayload());
-                ps.setString(12, r.getPayloadHash());
-                ps.setString(13, r.getStatus());
-            });
-        } else {
-            String insertSql = "INSERT INTO staging_xml_records (" +
-                    "job_execution_id, entity_type, record_identifier, record_action, record_date, xml_version, schema_version, raw_payload, payload_hash, status, created_at, updated_at" +
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+                jdbcTemplate.batchUpdate(insertSql, records, records.size(), (ps, r) -> {
+                    if (r.getJobExecutionId() != null) ps.setLong(1, r.getJobExecutionId()); else ps.setNull(1, java.sql.Types.BIGINT);
+                    ps.setString(2, r.getBnppId());
+                    ps.setString(3, r.getTagName() != null ? r.getTagName() : r.getEntityType());
+                    ps.setInt(4, r.getVersionNumber() != null ? r.getVersionNumber() : 1);
+                    ps.setString(5, r.getEntityType());
+                    ps.setString(6, r.getRecordIdentifier());
+                    ps.setString(7, r.getRecordAction());
+                    ps.setString(8, r.getRecordDate());
+                    ps.setString(9, r.getXmlVersion());
+                    ps.setString(10, r.getSchemaVersion());
+                    ps.setString(11, r.getRawPayload());
+                    ps.setString(12, r.getPayloadHash());
+                    ps.setString(13, r.getStatus());
+                });
+            } else {
+                String insertSql = "INSERT INTO staging_xml_records (" +
+                        "job_execution_id, entity_type, record_identifier, record_action, record_date, xml_version, schema_version, raw_payload, payload_hash, status, created_at, updated_at" +
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
 
-            jdbcTemplate.batchUpdate(insertSql, records, records.size(), (ps, r) -> {
-                if (r.getJobExecutionId() != null) ps.setLong(1, r.getJobExecutionId()); else ps.setNull(1, java.sql.Types.BIGINT);
-                ps.setString(2, r.getEntityType());
-                ps.setString(3, r.getRecordIdentifier());
-                ps.setString(4, r.getRecordAction());
-                ps.setString(5, r.getRecordDate());
-                ps.setString(6, r.getXmlVersion());
-                ps.setString(7, r.getSchemaVersion());
-                ps.setString(8, r.getRawPayload());
-                ps.setString(9, r.getPayloadHash());
-                ps.setString(10, r.getStatus());
-            });
+                jdbcTemplate.batchUpdate(insertSql, records, records.size(), (ps, r) -> {
+                    if (r.getJobExecutionId() != null) ps.setLong(1, r.getJobExecutionId()); else ps.setNull(1, java.sql.Types.BIGINT);
+                    ps.setString(2, r.getEntityType());
+                    ps.setString(3, r.getRecordIdentifier());
+                    ps.setString(4, r.getRecordAction());
+                    ps.setString(5, r.getRecordDate());
+                    ps.setString(6, r.getXmlVersion());
+                    ps.setString(7, r.getSchemaVersion());
+                    ps.setString(8, r.getRawPayload());
+                    ps.setString(9, r.getPayloadHash());
+                    ps.setString(10, r.getStatus());
+                });
+            }
         }
 
-        // Flush into specific root flattened table(s): e.g. <entityType>_flat
+        // Flush into specific root flattened table(s): e.g. gs_<entityType>
         flushToSpecificFlatTables(jdbcTemplate, records);
     }
 
@@ -766,19 +772,7 @@ public class StagingXmlStreamingService {
                     .toList();
             if (activeRecords.isEmpty()) return;
 
-            // Delta handling: if record_identifier already exists in flat table, replace it with the new version
-            if (effectiveCols.contains("record_identifier")) {
-                List<Object[]> deleteParams = activeRecords.stream()
-                        .map(StagingXmlRecord::getRecordIdentifier)
-                        .filter(id -> id != null && !id.trim().isEmpty())
-                        .map(id -> new Object[]{id.trim()})
-                        .toList();
-                if (!deleteParams.isEmpty()) {
-                    try {
-                        jdbcTemplate.batchUpdate("DELETE FROM " + flatTable + " WHERE record_identifier = ?", deleteParams);
-                    } catch (Exception ignored) {}
-                }
-            }
+            // Retain complete audit history in gs_<entity> table: each version is inserted without deleting previous rows.
 
             Set<String> reservedKeywords = Set.of(
                     "day", "month", "year", "date", "order", "group", "user", "value",
@@ -1068,20 +1062,50 @@ public class StagingXmlStreamingService {
                 params.add(ent);
                 params.addAll(subList);
 
-                String query = "SELECT record_identifier, payload_hash, MAX(version_number) AS max_ver " +
-                        "FROM staging_xml_records WHERE entity_type = ? AND record_identifier IN (" + placeholders + ") " +
-                        "GROUP BY record_identifier, payload_hash";
-                try {
-                    jdbcTemplate.query(query, rs -> {
-                        String id = rs.getString("record_identifier");
-                        String hash = rs.getString("payload_hash");
-                        int ver = rs.getInt("max_ver");
-                        if (id != null) {
-                            existingMap.put(ent + ":" + id, new ExistingDeltaInfo(hash, ver));
-                        }
-                    }, params.toArray());
-                } catch (Exception ex) {
-                    log.debug("Batch delta lookup notice: {}", ex.getMessage());
+                boolean hasCentralStaging = !getTableColumns(jdbcTemplate, "staging_xml_records").isEmpty();
+                if (hasCentralStaging) {
+                    String query = "SELECT record_identifier, payload_hash, MAX(version_number) AS max_ver " +
+                            "FROM staging_xml_records WHERE entity_type = ? AND record_identifier IN (" + placeholders + ") " +
+                            "GROUP BY record_identifier, payload_hash";
+                    try {
+                        jdbcTemplate.query(query, rs -> {
+                            String id = rs.getString("record_identifier");
+                            String hash = rs.getString("payload_hash");
+                            int ver = rs.getInt("max_ver");
+                            if (id != null) {
+                                ExistingDeltaInfo current = existingMap.get(ent + ":" + id);
+                                if (current == null || ver >= current.latestVersion) {
+                                    existingMap.put(ent + ":" + id, new ExistingDeltaInfo(hash, ver));
+                                }
+                            }
+                        }, params.toArray());
+                    } catch (Exception ex) {
+                        log.debug("Batch delta lookup notice (staging_xml_records): {}", ex.getMessage());
+                    }
+                } else {
+                    // Check entity flat table gs_<entity> when central staging table is absent
+                    String norm = ent.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                    String sing = DynamicXmlUnmarshaller.singularize(norm);
+                    List<Object> flatParams = new ArrayList<>(subList);
+                    for (String tbl : List.of("gs_" + norm, "gs_" + sing, norm + "_gs", sing + "_gs", norm + "_flat")) {
+                        try {
+                            String flatQuery = "SELECT record_identifier, payload_hash, MAX(version_number) AS max_ver " +
+                                    "FROM " + tbl + " WHERE record_identifier IN (" + placeholders + ") " +
+                                    "GROUP BY record_identifier, payload_hash";
+                            jdbcTemplate.query(flatQuery, rs -> {
+                                String id = rs.getString("record_identifier");
+                                String hash = rs.getString("payload_hash");
+                                int ver = rs.getInt("max_ver");
+                                if (id != null) {
+                                    ExistingDeltaInfo current = existingMap.get(ent + ":" + id);
+                                    if (current == null || ver >= current.latestVersion) {
+                                        existingMap.put(ent + ":" + id, new ExistingDeltaInfo(hash, ver));
+                                    }
+                                }
+                            }, flatParams.toArray());
+                            break;
+                        } catch (Exception ignored) {}
+                    }
                 }
             }
         }
@@ -1241,7 +1265,7 @@ public class StagingXmlStreamingService {
                 jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS version_number INT DEFAULT 1");
                 jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS xml_version VARCHAR(50)");
                 jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS schema_version VARCHAR(50)");
-                jdbcTemplate.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
+                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
                 jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)");
                 jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_rec_id ON staging_xml_records(record_identifier)");
                 jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_status_id ON staging_xml_records(status, id)");
