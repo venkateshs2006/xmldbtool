@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XMLDbTool - Enterprise Login</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bnp-emerald: #00965e;
+            --bnp-dark-grey: #333333;
+            --bnp-hover: #007a4d;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a;
+            color: #1e293b;
+            margin: 0;
+            min-height: 100vh;
+        }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .card {
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+            border: 1px solid #e2e8f0;
+        }
+        .input-field {
+            width: 100%;
+            padding: 0.65rem 1rem;
+            border-radius: 8px;
+            border: 1px solid #cbd5e1;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+            background-color: #f8fafc;
+            color: #334155;
+        }
+        .input-field:focus {
+            outline: none;
+            border-color: var(--bnp-emerald);
+            box-shadow: 0 0 0 3px rgba(0, 150, 94, 0.15);
+            background-color: #ffffff;
+        }
+        .btn {
+            padding: 0.65rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .btn-primary {
+            background-color: var(--bnp-emerald);
+            color: #ffffff;
+            border: 1px solid transparent;
+        }
+        .btn-primary:hover:not(:disabled) {
+            background-color: var(--bnp-hover);
+        }
+    </style>
+</head>
+<body>
+    <div id="toast-container" class="fixed top-24 right-6 z-[9999] flex flex-col gap-2 max-w-md w-full pointer-events-none"></div>
+
+    <div id="view-login" class="min-h-screen flex flex-col justify-center items-center px-4 py-12 bg-gradient-to-br from-slate-900 via-slate-800 to-emerald-950">
+        <div class="max-w-md w-full bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border border-white/20 p-8 sm:p-10 animate-fadeIn">
+            <!-- Brand Emblem -->
+            <div class="text-center mb-6">
+                <img src="https://cdn-group.bnpparibas.com/build/images/logo-bnp.svg" alt="BNP Paribas Logo" class="h-12 mx-auto mb-3">
+                <h2 class="text-2xl font-bold text-gray-900 tracking-tight">XML<span class="text-bnp-emerald">DbTool</span></h2>
+                <p class="text-xs text-gray-500 font-semibold uppercase tracking-wider mt-1">Enterprise Dynamic Ingestion Suite</p>
+                <div class="h-0.5 w-16 bg-bnp-emerald mx-auto mt-3 rounded-full"></div>
+            </div>
+
+            <!-- Error Banner -->
+            <div id="login-error-alert" class="hidden mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+                <i class="fas fa-exclamation-circle text-red-500 shrink-0"></i>
+                <span id="login-error-text">Invalid credentials</span>
+            </div>
+
+            <!-- Login Form -->
+            <form id="login-form" class="space-y-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">Username</label>
+                    <div class="relative">
+                        <input type="text" id="login-username" required autocomplete="username"
+                               placeholder="admin" value="admin"
+                               class="input-field text-sm pl-10 font-mono">
+                        <i class="fas fa-user absolute left-3.5 top-3.5 text-gray-400 text-xs"></i>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">Password</label>
+                    <div class="relative">
+                        <input type="password" id="login-password" required autocomplete="current-password"
+                               placeholder="••••••••" value="admin123"
+                               class="input-field text-sm pl-10 font-mono">
+                        <i class="fas fa-lock absolute left-3.5 top-3.5 text-gray-400 text-xs"></i>
+                    </div>
+                </div>
+
+                <div class="pt-2">
+                    <button type="submit" id="btn-do-login" class="btn btn-primary w-full py-2.5 text-sm font-bold shadow-md">
+                        <i class="fas fa-arrow-right-to-bracket mr-2"></i>
+                        <span>Sign In to Platform</span>
+                    </button>
+                </div>
+            </form>
+
+            <!-- Demo Account Fast Selectors -->
+            <div class="mt-6 pt-5 border-t border-gray-100">
+                <div class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider text-center mb-2">Preset Enterprise Role Accounts</div>
+                <div class="grid grid-cols-3 gap-2">
+                    <button type="button" class="btn-demo-login p-2.5 rounded-lg border border-gray-200 hover:border-blue-400 hover:bg-blue-50 text-left transition text-xs" data-user="planner" data-pass="planner123">
+                        <div class="font-bold text-gray-900 flex items-center gap-1"><i class="fas fa-calendar-plus text-blue-600 text-[10px]"></i> planner</div>
+                        <div class="text-[10px] text-gray-400 mt-0.5">Role: Planner</div>
+                    </button>
+                    <button type="button" class="btn-demo-login p-2.5 rounded-lg border border-gray-200 hover:border-amber-400 hover:bg-amber-50 text-left transition text-xs" data-user="approver" data-pass="approver123">
+                        <div class="font-bold text-gray-900 flex items-center gap-1"><i class="fas fa-clipboard-check text-amber-600 text-[10px]"></i> approver</div>
+                        <div class="text-[10px] text-gray-400 mt-0.5">Role: Approver</div>
+                    </button>
+                    <button type="button" class="btn-demo-login p-2.5 rounded-lg border border-gray-200 hover:border-emerald-400 hover:bg-emerald-50 text-left transition text-xs" data-user="admin" data-pass="admin123">
+                        <div class="font-bold text-gray-900 flex items-center gap-1"><i class="fas fa-shield-halved text-emerald-600 text-[10px]"></i> admin</div>
+                        <div class="text-[10px] text-gray-400 mt-0.5">Role: Admin</div>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-6 text-center text-xs text-slate-400">
+            <span>&copy; 2026 BNP Paribas Corporate &bull; Pure JDBC &amp; Spring Batch Architecture</span>
+        </div>
+    </div>
+
+
+    <script src="/js/common.js"></script>
+    <script src="/js/login.js"></script>
+</body>
+</html>

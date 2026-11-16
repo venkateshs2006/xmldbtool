@@ -148,9 +148,15 @@ public class XmlSchemaDiscoveryService {
 
                 // If user mappings are provided, only show the tables mentioned in the mapping file
                 if (hasUserMappings && effectiveMappings != null && !effectiveMappings.isEmpty()) {
-                    Set<String> mappedTables = effectiveMappings.stream()
-                            .map(m -> m.getTargetTable().toLowerCase())
-                            .collect(Collectors.toSet());
+                    Set<String> mappedTables = new HashSet<>();
+                    for (FieldMapping m : effectiveMappings) {
+                        if (m.getTargetTable() != null) {
+                            String norm = m.getTargetTable().trim().toLowerCase();
+                            mappedTables.add(norm);
+                            mappedTables.add(norm.replaceFirst("^gs_", ""));
+                            mappedTables.add("gs_" + norm.replaceFirst("^gs_", ""));
+                        }
+                    }
                     canonicalTables = canonicalTables.stream()
                             .filter(t -> mappedTables.contains(t.getTableName().toLowerCase()))
                             .toList();
@@ -244,9 +250,15 @@ public class XmlSchemaDiscoveryService {
                         .toList();
 
                 if (hasUserMappings && effectiveMappings != null && !effectiveMappings.isEmpty()) {
-                    Set<String> mappedTables = effectiveMappings.stream()
-                            .map(m -> m.getTargetTable().toLowerCase())
-                            .collect(Collectors.toSet());
+                    Set<String> mappedTables = new HashSet<>();
+                    for (FieldMapping m : effectiveMappings) {
+                        if (m.getTargetTable() != null) {
+                            String norm = m.getTargetTable().trim().toLowerCase();
+                            mappedTables.add(norm);
+                            mappedTables.add(norm.replaceFirst("^gs_", ""));
+                            mappedTables.add("gs_" + norm.replaceFirst("^gs_", ""));
+                        }
+                    }
                     canonicalTables = canonicalTables.stream()
                             .filter(t -> mappedTables.contains(t.getTableName().toLowerCase()))
                             .toList();
@@ -1078,11 +1090,21 @@ public class XmlSchemaDiscoveryService {
                 if (parentTable == null && childCol.toLowerCase().endsWith("_id")) {
                     parentTable = childCol.substring(0, childCol.length() - 3);
                 }
-                if (parentTable == null && m.getXmlField() != null && m.getXmlField().contains("/")) {
-                    parentTable = m.getXmlField().split("/")[0];
+                if (parentTable == null && m.getXmlField() != null) {
+                    String[] parts = m.getXmlField().split("/");
+                    for (String part : parts) {
+                        String cleanPart = part.replace("@", "").toLowerCase();
+                        if (!cleanPart.equalsIgnoreCase(childTable) && !cleanPart.equals("records") && !cleanPart.equals("pfa") && !cleanPart.equals("record")) {
+                            parentTable = part.replace("@", "");
+                            break;
+                        }
+                    }
                 }
 
                 if (parentTable != null && !parentTable.equalsIgnoreCase(childTable)) {
+                    if (childTable.toLowerCase().startsWith("gs_") && !parentTable.toLowerCase().startsWith("gs_")) {
+                        parentTable = "gs_" + parentTable.toLowerCase();
+                    }
                     if (m.getForeignKeyTable() == null) {
                         m.setForeignKeyTable(parentTable);
                     }

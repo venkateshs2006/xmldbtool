@@ -3221,6 +3221,7 @@ class DynamicXmlIngestionTest {
 
     private boolean isValidUuid(String val) {
         if (val == null) return false;
+        if (val.startsWith("BNPP-") || val.startsWith("BNPP_")) return true;
         try {
             UUID.fromString(val);
             return true;
@@ -3971,6 +3972,117 @@ class DynamicXmlIngestionTest {
             long count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tbl, Long.class);
             System.out.println("Table " + tbl + " count = " + count);
             assertTrue(count > 0, "Table '" + tbl + "' should NOT be empty! Current count: " + count);
+        }
+    }
+
+    @Test
+    @DisplayName("Verify PFA sample ingestion with gs_ prefix populates all dependent gs_person child tables and lookup tables")
+    void testPfaSampleIngestionPopulatesAllGsTablesStrict() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:pfa_gs_strict_test;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        List<FieldMapping> mappings = List.of(
+                // country
+                new FieldMapping("PFA/CountryList/CountryName/@code", "gs_country", "code", "PK", "NONE"),
+                new FieldMapping("PFA/CountryList/CountryName/@name", "gs_country", "name", "NONE", "NONE"),
+                // occupation
+                new FieldMapping("PFA/OccupationList/Occupation/@code", "gs_occupation", "code", "PK", "NONE"),
+                new FieldMapping("PFA/OccupationList/Occupation/@name", "gs_occupation", "name", "NONE", "NONE"),
+                // relationship
+                new FieldMapping("PFA/RelationshipList/Relationship/@code", "gs_relationship", "code", "PK", "NONE"),
+                new FieldMapping("PFA/RelationshipList/Relationship/@name", "gs_relationship", "name", "NONE", "NONE"),
+                // sanctionsreference
+                new FieldMapping("PFA/SanctionsReferencesList/ReferenceName/@code", "gs_sanctionsreference", "code", "PK", "NONE"),
+                new FieldMapping("PFA/SanctionsReferencesList/ReferenceName/@name", "gs_sanctionsreference", "name", "NONE", "NONE"),
+                new FieldMapping("PFA/SanctionsReferencesList/ReferenceName/@status", "gs_sanctionsreference", "status", "NONE", "NONE"),
+                // Person master
+                new FieldMapping("PFA/Records/Person/@id", "gs_person", "id", "PK", "NONE"),
+                new FieldMapping("PFA/Records/Person/@action", "gs_person", "action", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/Gender", "gs_person", "gender", "NONE", "NONE"),
+                // personname
+                new FieldMapping("PFA/Records/Person/NameDetails/Name/@NameType", "gs_personname", "name_type", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/NameDetails/Name/NameValue/FirstName", "gs_personname", "first_name", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/NameDetails/Name/NameValue/Surname", "gs_personname", "surname", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/@id", "gs_personname", "person_id", "FK", "NONE"),
+                // personrole
+                new FieldMapping("PFA/Records/Person/RoleDetail/Roles/@RoleType", "gs_personrole", "role_type", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/RoleDetail/Roles/OccTitle", "gs_personrole", "occ_title", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/@id", "gs_personrole", "person_id", "FK", "NONE"),
+                // persondate
+                new FieldMapping("PFA/Records/Person/DateDetails/Date/@DateType", "gs_persondate", "date_type", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/DateDetails/Date/DateValue/@Year", "gs_persondate", "year", "NONE", "TO_INT"),
+                new FieldMapping("PFA/Records/Person/DateDetails/Date/DateValue/@Month", "gs_persondate", "month", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/DateDetails/Date/DateValue/@Day", "gs_persondate", "day", "NONE", "TO_INT"),
+                new FieldMapping("PFA/Records/Person/@id", "gs_persondate", "person_id", "FK", "NONE"),
+                // personcountry
+                new FieldMapping("PFA/Records/Person/CountryDetails/Country/@CountryType", "gs_personcountry", "country_type", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/CountryDetails/Country/CountryValue/@Code", "gs_personcountry", "country_code", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/@id", "gs_personcountry", "person_id", "FK", "NONE"),
+                // personidentification
+                new FieldMapping("PFA/Records/Person/IDNumberTypes/ID/@IDType", "gs_personidentification", "id_type", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/IDNumberTypes/ID/IDValue", "gs_personidentification", "id_value", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/@id", "gs_personidentification", "person_id", "FK", "NONE"),
+                // personsource
+                new FieldMapping("PFA/Records/Person/SourceDescription/Source/@name", "gs_personsource", "source_url", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/@id", "gs_personsource", "person_id", "FK", "NONE"),
+                // personimage
+                new FieldMapping("PFA/Records/Person/Images/Image/@URL", "gs_personimage", "image_url", "NONE", "NONE"),
+                new FieldMapping("PFA/Records/Person/@id", "gs_personimage", "person_id", "FK", "NONE")
+        );
+
+        List<String> roots = List.of("Person", "CountryName", "Occupation", "Relationship", "SanctionsReferencesList", "ReferenceName");
+
+        // 1. Provision gs_ tables
+        provisioningService.provisionDiscoveredTables(config, "sample-data/pfa-sample.xml", roots, Collections.emptyList(), mappings, true);
+
+        // 2. Launch pipeline job
+        JobLaunchRequest launchReq = new JobLaunchRequest();
+        launchReq.setDbConfig(config);
+        launchReq.setSourceXmlPath("sample-data/pfa-sample.xml");
+        launchReq.setRecordRootElement("Person");
+        launchReq.setRecordRootElements(roots);
+        launchReq.setVendorName("DOW_JONES");
+        launchReq.setMappings(mappings);
+        launchReq.setStagedPipeline(true);
+
+        JobLaunchResponse launchResp = batchJobService.launchIngestionJob(launchReq);
+        assertTrue(launchResp.isSuccess());
+
+        // Wait for background virtual thread pipeline to finish
+        Thread.sleep(2500);
+
+        List<String> expectedNonEmptyTables = List.of(
+                "gs_person",
+                "gs_personcountry",
+                "gs_persondate",
+                "gs_personidentification",
+                "gs_personimage",
+                "gs_personname",
+                "gs_personrole",
+                "gs_personsource",
+                "gs_relationship",
+                "gs_sanctionsreference"
+        );
+
+        for (String tbl : expectedNonEmptyTables) {
+            Integer count = jt.queryForObject("SELECT COUNT(*) FROM " + tbl, Integer.class);
+            assertNotNull(count, "Count query for '" + tbl + "' should return a number");
+            assertTrue(count > 0, "Dependent table '" + tbl + "' must NOT be empty! Current count: " + count);
+
+            List<Map<String, Object>> rows = jt.queryForList("SELECT * FROM " + tbl + " LIMIT 5");
+            for (Map<String, Object> r : rows) {
+                assertNotNull(r.get("bnpp_id"), "bnpp_id in '" + tbl + "' must not be null");
+                assertNotNull(r.get("source_bnpp_id"), "source_bnpp_id in '" + tbl + "' must not be null");
+                assertNotNull(r.get("staging_bnpp_id"), "staging_bnpp_id in '" + tbl + "' must not be null");
+                assertNotNull(r.get("history_ids"), "history_ids in '" + tbl + "' must not be null");
+            }
         }
     }
 

@@ -42,7 +42,9 @@ import java.sql.ResultSet;
 import java.io.File;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -71,6 +73,7 @@ public class DynamicBatchJobService {
     private final StagingXmlStreamingService stagingService;
     private final DynamicSchemaResolutionService resolutionService;
     private final SchemaProvisioningService provisioningService;
+    private final SystemLoggingService systemLoggingService;
     private final ResourceLoader resourceLoader = new DefaultResourceLoader();
 
     // In-memory cache of active job listeners for real-time telemetry error reporting
@@ -87,6 +90,7 @@ public class DynamicBatchJobService {
 
     private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public DynamicBatchJobService(JobRepository jobRepository,
                                  JobLauncher jobLauncher,
                                  JobExplorer jobExplorer,
@@ -96,7 +100,8 @@ public class DynamicBatchJobService {
                                  XmlSchemaDiscoveryService discoveryService,
                                  StagingXmlStreamingService stagingService,
                                  DynamicSchemaResolutionService resolutionService,
-                                 SchemaProvisioningService provisioningService) {
+                                 SchemaProvisioningService provisioningService,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) SystemLoggingService systemLoggingService) {
         this.jobRepository = jobRepository;
         this.jobLauncher = jobLauncher;
         this.jobExplorer = jobExplorer;
@@ -107,6 +112,21 @@ public class DynamicBatchJobService {
         this.stagingService = stagingService;
         this.resolutionService = resolutionService;
         this.provisioningService = provisioningService;
+        this.systemLoggingService = systemLoggingService;
+    }
+
+    public DynamicBatchJobService(JobRepository jobRepository,
+                                 JobLauncher jobLauncher,
+                                 JobExplorer jobExplorer,
+                                 PlatformTransactionManager transactionManager,
+                                 DynamicXmlUnmarshaller dynamicXmlUnmarshaller,
+                                 DynamicDataSourceService dataSourceService,
+                                 XmlSchemaDiscoveryService discoveryService,
+                                 StagingXmlStreamingService stagingService,
+                                 DynamicSchemaResolutionService resolutionService,
+                                 SchemaProvisioningService provisioningService) {
+        this(jobRepository, jobLauncher, jobExplorer, transactionManager, dynamicXmlUnmarshaller,
+             dataSourceService, discoveryService, stagingService, resolutionService, provisioningService, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -352,20 +372,42 @@ public class DynamicBatchJobService {
                 }
             }
 
-            // Extract root entity tag from XML field paths only if rootsToStream is empty (e.g. person/addresses -> person)
-            if (rootsToStream.isEmpty() && request.getMappings() != null && !request.getMappings().isEmpty()) {
+            List<String> xmlCandidates = discoveryService.detectCandidateRootElements(request.getSourceXmlPath());
+            Set<String> xmlCandidateSet = new HashSet<>();
+            if (xmlCandidates != null) {
+                for (String c : xmlCandidates) {
+                    if (c != null) xmlCandidateSet.add(c.trim().toLowerCase());
+                }
+            }
+
+            // Match root entity tags with candidate tags actually present in the XML document
+            if (request.getMappings() != null && !request.getMappings().isEmpty()) {
                 for (FieldMapping m : request.getMappings()) {
+                    String targetTable = m.getTargetTable() != null ? m.getTargetTable().trim() : "";
+                    String normTbl = targetTable.toLowerCase().replaceFirst("^gs_", "");
+                    String singTbl = DynamicXmlUnmarshaller.singularize(normTbl);
+                    if (xmlCandidateSet.contains(normTbl)) {
+                        rootsToStream.add(normTbl);
+                    } else if (xmlCandidateSet.contains(singTbl)) {
+                        rootsToStream.add(singTbl);
+                    }
+
                     String xf = m.getXmlField();
                     if (xf != null && !xf.trim().isEmpty()) {
                         String clean = xf.trim().replaceAll("^/+", "");
                         String[] parts = clean.split("/");
                         if (parts.length > 1) {
-                            String part = parts[0];
-                            if (!part.startsWith("@")) {
+                            for (String part : parts) {
+                                if (part.startsWith("@")) break;
                                 String resolved = XmlSchemaDiscoveryService.resolveEntityTag(part);
                                 if (resolved != null && !resolved.isEmpty()
-                                        && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
-                                    rootsToStream.add(resolved);
+                                        && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)
+                                        && (docRoot == null || !resolved.equalsIgnoreCase(docRoot))) {
+                                    // Only add tag if it actually exists in the XML candidate tags or no candidates found yet
+                                    if (xmlCandidateSet.isEmpty() || xmlCandidateSet.contains(resolved.toLowerCase())) {
+                                        rootsToStream.add(resolved);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -379,9 +421,8 @@ public class DynamicBatchJobService {
             }
             rootsToStream.removeIf(r -> XmlSchemaDiscoveryService.isWrapperContainerTag(r, docRoot));
 
-            if (rootsToStream.isEmpty()) {
-                List<String> candidates = discoveryService.detectCandidateRootElements(request.getSourceXmlPath());
-                for (String c : candidates) {
+            if (rootsToStream.isEmpty() && xmlCandidates != null) {
+                for (String c : xmlCandidates) {
                     if (c != null && !c.trim().isEmpty()) {
                         String resolved = XmlSchemaDiscoveryService.resolveEntityTag(c);
                         if (resolved != null && !resolved.isEmpty() && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)) {
@@ -519,6 +560,68 @@ public class DynamicBatchJobService {
             final boolean finalStage1Completed = stage1AlreadyCompleted;
             final com.enterprise.xmldbtool.model.JobCheckpoint finalCp = cp;
 
+            // Register uploaded XML file in file_history tracking table
+            String xmlPath = request.getSourceXmlPath();
+            long fileSizeKb = 0;
+            String fileChecksum = null;
+            String fileName = "unknown.xml";
+            if (xmlPath != null) {
+                try {
+                    Path p = Paths.get(xmlPath);
+                    if (Files.exists(p)) {
+                        fileSizeKb = Files.size(p) / 1024;
+                        fileName = p.getFileName().toString();
+                        fileChecksum = StagingXmlStreamingService.computeSha256(Files.readString(p));
+                    } else {
+                        fileName = xmlPath.contains("/") ? xmlPath.substring(xmlPath.lastIndexOf('/') + 1) : xmlPath;
+                    }
+                } catch (Exception ex) {
+                    fileName = xmlPath.contains("/") ? xmlPath.substring(xmlPath.lastIndexOf('/') + 1) : xmlPath;
+                }
+            }
+
+            String registeredFileId = request.getFileId();
+            if (registeredFileId == null && systemLoggingService != null) {
+                String ingestionContent = request.getIngestMappingJson();
+                String ingestionPath = request.getIngestionJsonPath();
+                if ((ingestionContent == null || ingestionContent.isEmpty()) && ingestionPath != null) {
+                    try {
+                        Path ip = Paths.get(ingestionPath);
+                        if (Files.exists(ip)) {
+                            ingestionContent = Files.readString(ip);
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                Map<String, Object> meta = new LinkedHashMap<>();
+                meta.put("recordRootElements", effectiveRoots);
+                meta.put("targetTables", tableOrder);
+                meta.put("ingestionJsonPath", ingestionPath);
+                meta.put("chunkSize", chunkSize);
+
+                registeredFileId = systemLoggingService.registerFile(
+                        targetDataSource,
+                        request.getVendorName(),
+                        request.getVendorId(),
+                        fileName,
+                        fileSizeKb,
+                        fileChecksum,
+                        ingestionPath,
+                        ingestionContent,
+                        request.getTriggeredBy() != null ? request.getTriggeredBy() : "USER",
+                        meta
+                );
+                request.setFileId(registeredFileId);
+            }
+            final String activeFileId = registeredFileId;
+
+            if (systemLoggingService != null) {
+                systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                        "JOB_STARTED", effectiveFragmentRoot,
+                        "Launched staged pipeline job for roots: " + effectiveRoots + ", tables: " + allTables,
+                        0L, request.getTriggeredBy() != null ? request.getTriggeredBy() : "USER", "STARTED");
+            }
+
             // Initialize in-memory metrics for real-time telemetry polling
             Map<String, Object> liveMetrics = new ConcurrentHashMap<>();
             liveMetrics.put("jobExecutionId", jobExecution.getId());
@@ -578,6 +681,7 @@ public class DynamicBatchJobService {
                                 request.getXmlVersion(),
                                 request.getSchemaVersion(),
                                 jobExecution.getId(),
+                                activeFileId,
                                 targetDataSource,
                                 chunkSize,
                                 finalResumeIndex,
@@ -597,6 +701,13 @@ public class DynamicBatchJobService {
                                     }
                                 }
                         );
+                    }
+
+                    if (systemLoggingService != null) {
+                        systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                                "STAGING_COMPLETED", finalRecordRoot,
+                                "Stage 1 completed: staged " + stagingSummary.stagedCount() + " records into gs_ tables",
+                                stagingSummary.stagedCount(), "SYSTEM", "SUCCESS");
                     }
 
                     liveMetrics.put("totalRead", stagingSummary.totalRead());
@@ -641,7 +752,8 @@ public class DynamicBatchJobService {
                                 request.getSourceXmlPath(),
                                 finalRecordRoot,
                                 request.getMappings(),
-                                targetDataSource
+                                targetDataSource,
+                                activeFileId
                         );
                         headerTasklet.execute(null, null);
                     }
@@ -680,6 +792,13 @@ public class DynamicBatchJobService {
                                 } catch (Exception ignored) {}
                             }
                     );
+
+                    if (systemLoggingService != null) {
+                        systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                                "NORMALIZATION_COMPLETED", finalRecordRoot,
+                                "Stage 2 canonical normalization completed: normalized " + normSummary.normalizedCount() + " canonical records",
+                                normSummary.normalizedCount(), "SYSTEM", "SUCCESS");
+                    }
 
                     // Check if job was stopped during Stage 2
                     if (cancellationFlag.get()) {
@@ -758,9 +877,25 @@ public class DynamicBatchJobService {
                     try {
                         jobRepository.updateExecutionContext(jobExecution);
                     } catch (Exception ignored) {}
+                    if (systemLoggingService != null) {
+                        systemLoggingService.updateFileStatus(targetDataSource, activeFileId, "COMPLETED", stagingSummary.totalRead());
+                        systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                                "JOB_COMPLETED", finalRecordRoot,
+                                "Staged pipeline job completed successfully: JobExecutionId=" + jobExecution.getId() + ", recordsNormalized=" + finalRowsWritten,
+                                finalRowsWritten, "SYSTEM", "COMPLETED");
+                    }
                     log.info("Staged metadata-driven XML processing pipeline job completed successfully: JobExecutionId={}", jobExecution.getId());
                 } catch (Exception ex) {
                     log.error("Staged metadata-driven XML pipeline job failed: {}", ex.getMessage(), ex);
+                    if (systemLoggingService != null) {
+                        systemLoggingService.updateFileStatus(targetDataSource, activeFileId, "FAILED", 0L);
+                        systemLoggingService.logError(targetDataSource, activeFileId, jobExecution.getId(),
+                                finalRecordRoot, null, "FATAL", "JOB_EXECUTION_FAILURE",
+                                ex.getMessage(), ex, null);
+                        systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                                "JOB_FAILED", finalRecordRoot,
+                                "Staged pipeline job failed: " + ex.getMessage(), 0L, "SYSTEM", "FAILED");
+                    }
                     long read = liveMetrics.get("totalRead") != null ? ((Number) liveMetrics.get("totalRead")).longValue() : 0L;
                     long written = liveMetrics.get("totalWritten") != null ? ((Number) liveMetrics.get("totalWritten")).longValue() : 0L;
                     String curPhase = liveMetrics.get("currentPhase") != null && liveMetrics.get("currentPhase").toString().contains("Phase 2")
@@ -877,8 +1012,20 @@ public class DynamicBatchJobService {
                 needProvisioning = true;
             }
 
-            // Check flat tables gs_<root> (prefix gs_, no suffix)
-            if (effectiveRoots != null) {
+            // Check flat tables gs_<entity> (prefix gs_, no suffix) based on ingestion.json target tables
+            if (request.getMappings() != null && !request.getMappings().isEmpty()) {
+                for (FieldMapping m : request.getMappings()) {
+                    String targetTable = m.getTargetTable();
+                    if (targetTable != null && !targetTable.trim().isEmpty()) {
+                        String norm = targetTable.trim().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+                        String gsTable = "gs_" + norm;
+                        if (!existingTables.contains(gsTable)) {
+                            needProvisioning = true;
+                            break;
+                        }
+                    }
+                }
+            } else if (effectiveRoots != null) {
                 for (String root : effectiveRoots) {
                     if (root == null || root.trim().isEmpty()) continue;
                     String norm = root.trim().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");

@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XMLDbTool - Configured Jobs & Approvals</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js for High-Throughput Batch Telemetry -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Google Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bnp-emerald: #00965e;
+            --bnp-dark-grey: #333333;
+            --bnp-hover: #007a4d;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc;
+            color: #1e293b;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        .font-mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        header {
+            background: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 0 4%;
+            height: 72px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 50;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Top Nav Tabs */
+        .nav-tab-btn {
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: #64748b;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid transparent;
+        }
+        .nav-tab-btn:hover {
+            color: var(--bnp-emerald);
+            background-color: #f0fdf4;
+        }
+        .nav-tab-btn.active {
+            color: var(--bnp-emerald);
+            background-color: #ecfdf5;
+            border-color: #a7f3d0;
+            font-weight: 700;
+        }
+
+        /* Stepper matching workflow.html */
+        .stepper-item {
+            flex: 1;
+            text-align: center;
+            position: relative;
+            cursor: pointer;
+        }
+        .stepper-item::after {
+            content: '';
+            position: absolute;
+            top: 17px;
+            left: 50%;
+            width: 100%;
+            height: 2px;
+            background-color: #cbd5e1;
+            z-index: 1;
+            transition: background-color 0.3s;
+        }
+        .stepper-item:last-child::after { display: none; }
+        .stepper-item.completed::after { background-color: var(--bnp-emerald); }
+        .stepper-circle {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background-color: #ffffff;
+            border: 2px solid #cbd5e1;
+            color: #94a3b8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            margin: 0 auto;
+            position: relative;
+            z-index: 2;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.03);
+            font-size: 0.85rem;
+        }
+        .stepper-item.active .stepper-circle {
+            border-color: var(--bnp-emerald);
+            color: var(--bnp-emerald);
+            background-color: #ffffff;
+            box-shadow: 0 0 0 4px rgba(0, 150, 94, 0.15);
+        }
+        .stepper-item.completed .stepper-circle {
+            background-color: var(--bnp-emerald);
+            border-color: var(--bnp-emerald);
+            color: #ffffff;
+        }
+        .stepper-label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: #64748b;
+            margin-top: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .stepper-item.active .stepper-label { color: var(--bnp-emerald); font-weight: 700; }
+        .stepper-item.completed .stepper-label { color: var(--bnp-dark-grey); }
+
+        /* Card Styles */
+        .card {
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            border: 1px solid #e2e8f0;
+        }
+
+        /* Form Inputs */
+        .input-field {
+            width: 100%;
+            padding: 0.65rem 1rem;
+            border-radius: 8px;
+            border: 1px solid #cbd5e1;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+            background-color: #f8fafc;
+            color: #334155;
+        }
+        .input-field:focus {
+            outline: none;
+            border-color: var(--bnp-emerald);
+            box-shadow: 0 0 0 3px rgba(0, 150, 94, 0.15);
+            background-color: #ffffff;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 0.65rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+        .btn-primary {
+            background-color: var(--bnp-emerald);
+            color: #ffffff;
+            border: 1px solid transparent;
+        }
+        .btn-primary:hover:not(:disabled) {
+            background-color: var(--bnp-hover);
+            box-shadow: 0 4px 6px rgba(0, 150, 94, 0.2);
+            transform: translateY(-1px);
+        }
+        .btn-secondary {
+            background-color: #ffffff;
+            color: #475569;
+            border: 1px solid #cbd5e1;
+        }
+        .btn-secondary:hover:not(:disabled) {
+            background-color: #f1f5f9;
+            color: #0f172a;
+            border-color: #94a3b8;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        footer {
+            background: var(--bnp-dark-grey);
+            color: #ffffff;
+            padding: 24px 6%;
+            font-size: 0.8rem;
+            margin-top: auto;
+        }
+
+        /* Job List Fit-to-Screen Mode: Remove window vertical scrollbar and fit content */
+        body.page-job-list-active,
+        body:has(#page-job-list:not(.hidden)) {
+            height: 100vh !important;
+            max-height: 100vh !important;
+            overflow: hidden !important;
+        }
+
+        body.page-job-list-active #view-app,
+        body:has(#page-job-list:not(.hidden)) #view-app {
+            height: 100vh !important;
+            max-height: 100vh !important;
+            overflow: hidden !important;
+        }
+
+        body.page-job-list-active footer,
+        body:has(#page-job-list:not(.hidden)) footer {
+            display: none !important;
+        }
+
+        #page-job-list:not(.hidden) {
+            height: calc(100vh - 72px) !important;
+            max-height: calc(100vh - 72px) !important;
+            overflow: hidden !important;
+            display: flex !important;
+            flex-direction: column !important;
+            padding-top: 1rem !important;
+            padding-bottom: 1rem !important;
+        }
+
+        #page-job-list .card {
+            flex: 1 !important;
+            min-height: 0 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            overflow: hidden !important;
+        }
+
+        .job-list-table-wrapper {
+            flex: 1 !important;
+            min-height: 0 !important;
+            overflow-y: auto !important;
+            overflow-x: auto !important;
+            scrollbar-width: none !important; /* Firefox */
+            -ms-overflow-style: none !important; /* IE / Edge */
+        }
+
+        .job-list-table-wrapper::-webkit-scrollbar {
+            display: none !important; /* Chrome, Safari, Opera */
+        }
+    </style>
+</head>
+<body>
+
+
+<body class="page-job-list-active">
+    <div id="toast-container" class="fixed top-24 right-6 z-[9999] flex flex-col gap-2 max-w-md w-full pointer-events-none"></div>
+
+
+    <div id="view-app" class="flex-1 flex flex-col min-h-screen">
+        <div id="jobReviewModal" class="fixed inset-0 bg-black/50 backdrop-blur-xs flex items-center justify-center z-[9999] hidden p-4">
+            <div class="card max-w-3xl w-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl border border-gray-200" onclick="event.stopPropagation()">
+                <div class="p-5 border-b border-gray-200 flex items-center justify-between bg-slate-50">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-lg bg-emerald-100 text-bnp-emerald flex items-center justify-center text-lg font-bold">
+                            <i class="fas fa-clipboard-check"></i>
+                        </div>
+                        <div>
+                            <h3 id="review-modal-job-name" class="text-base font-bold text-gray-900">Job Review</h3>
+                            <p id="review-modal-desc" class="text-xs text-gray-500">Configuration Details &amp; Direct Spring Batch Trigger</p>
+                        </div>
+                    </div>
+                    <button type="button" id="btn-close-review-modal" class="text-gray-400 hover:text-gray-600 text-lg">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+
+                <div class="p-6 overflow-y-auto space-y-5 text-xs">
+                    <!-- Approval / Review Status Banner -->
+                    <div id="review-modal-approval-banner" class="hidden p-3.5 rounded-xl border text-xs flex items-center justify-between gap-3">
+                        <div class="flex items-center gap-2.5">
+                            <span id="review-modal-banner-icon" class="w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm shrink-0">
+                                <i class="fas fa-info-circle"></i>
+                            </span>
+                            <div>
+                                <div id="review-modal-banner-title" class="font-bold">--</div>
+                                <div id="review-modal-banner-subtitle" class="text-[11px] mt-0.5">--</div>
+                            </div>
+                        </div>
+                        <span id="review-modal-banner-badge" class="px-2.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase shrink-0">--</span>
+                    </div>
+
+                    <!-- Interactive Rejection Reason Box (Shown when Approver clicks Reject) -->
+                    <div id="review-modal-reject-box" class="hidden p-4 rounded-xl bg-red-50 border border-red-300 text-xs">
+                        <div class="font-bold text-red-900 mb-1 flex items-center gap-1.5">
+                            <i class="fas fa-triangle-exclamation text-red-600"></i>
+                            <span>Specify Rejection Reason (Mandatory for Planner)</span>
+                        </div>
+                        <p class="text-[11px] text-red-700 mb-2">Explain to the Planner why this configuration cannot be executed (e.g., incorrect table schema, missing columns, or bad target database).</p>
+                        <textarea id="review-modal-reject-reason" rows="3" class="input-field text-xs bg-white w-full font-mono border-red-300 focus:ring-red-500" placeholder="Enter detailed reason for rejection..."></textarea>
+                        <div class="mt-2.5 flex justify-end gap-2">
+                            <button type="button" id="btn-cancel-modal-reject" class="btn btn-secondary text-xs py-1 px-3">Cancel</button>
+                            <button type="button" id="btn-confirm-modal-reject" class="btn text-xs py-1 px-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded shadow-2xs">
+                                <i class="fas fa-ban mr-1"></i> Confirm Rejection
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- General Details Grid -->
+                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 bg-gray-50 p-3.5 rounded-xl border border-gray-200">
+                        <div>
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Target Table(s)</div>
+                            <div id="review-modal-target-table" class="font-bold text-gray-800 font-mono mt-0.5 truncate">--</div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Chunk Size</div>
+                            <div id="review-modal-chunk-size" class="font-bold text-gray-800 font-mono mt-0.5">1000</div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Entities (ingestion.json)</div>
+                            <div id="review-modal-root-tag" class="font-bold text-gray-800 font-mono mt-0.5">--</div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Pipeline Mode</div>
+                            <div id="review-modal-pipeline-mode" class="font-bold text-gray-800 font-mono mt-0.5 text-[10px]">--</div>
+                        </div>
+                        <div>
+                            <div class="text-[10px] uppercase font-bold text-gray-400">Approval Status</div>
+                            <div id="review-modal-status-badge" class="mt-0.5"><span class="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-100 text-bnp-emerald">READY</span></div>
+                        </div>
+                    </div>
+
+                    <!-- Source XML Path -->
+                    <div>
+                        <div class="font-bold text-gray-700 uppercase tracking-wider text-[11px] mb-1">Source XML File / COS URI</div>
+                        <div id="review-modal-source-path" class="p-2.5 rounded-lg bg-slate-100 font-mono text-[11px] text-gray-800 break-all border border-slate-200">--</div>
+                    </div>
+
+                    <!-- Database Target -->
+                    <div>
+                        <div class="font-bold text-gray-700 uppercase tracking-wider text-[11px] mb-1">Database Target Connection</div>
+                        <div id="review-modal-db-details" class="p-2.5 rounded-lg bg-slate-100 font-mono text-[11px] text-gray-800 border border-slate-200 flex flex-wrap gap-4">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- Table Order Sequence -->
+                    <div>
+                        <div class="font-bold text-gray-700 uppercase tracking-wider text-[11px] mb-1">Table Ingestion Order Sequence (Tag-Ordered)</div>
+                        <div id="review-modal-table-order" class="flex flex-wrap gap-1.5 font-mono">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- Mappings Table -->
+                    <div>
+                        <div class="font-bold text-gray-700 uppercase tracking-wider text-[11px] mb-1.5">Field Mappings &amp; Transformations</div>
+                        <div class="border border-gray-200 rounded-lg overflow-hidden max-h-48 overflow-y-auto">
+                            <table class="min-w-full divide-y divide-gray-200 text-left font-mono">
+                                <thead class="bg-gray-100 text-gray-700 sticky top-0">
+                                    <tr>
+                                        <th class="px-3 py-2">Source XML Field</th>
+                                        <th class="px-3 py-2">Target Table</th>
+                                        <th class="px-3 py-2">Target Column</th>
+                                        <th class="px-3 py-2">Constraint</th>
+                                        <th class="px-3 py-2">Transform</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="review-modal-mappings-tbody" class="divide-y divide-gray-100">
+                                    <!-- Populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="p-4 bg-gray-50 border-t border-gray-200 flex flex-wrap items-center justify-between gap-2.5">
+                    <button type="button" id="btn-close-review-modal-2" class="btn btn-secondary text-xs">Close</button>
+                    <div class="flex items-center gap-2">
+                        <!-- Approver Actions (Visible to Approver & Admin when status is PENDING_APPROVAL) -->
+                        <button type="button" id="btn-modal-reject-job" class="hidden btn text-xs font-bold py-1.5 px-3 bg-red-50 text-red-700 border border-red-300 hover:bg-red-100 rounded shadow-2xs">
+                            <i class="fas fa-xmark mr-1.5 text-red-600"></i> Reject with Reason
+                        </button>
+                        <button type="button" id="btn-modal-approve-job" class="hidden btn text-xs font-bold py-1.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded shadow-2xs">
+                            <i class="fas fa-check mr-1.5 text-white"></i> Approve Configuration
+                        </button>
+
+                        <!-- Planner Actions (Visible to Planner & Admin when status is APPROVED) -->
+                        <button type="button" id="btn-modal-run-job" class="hidden btn btn-primary text-xs font-bold px-5">
+                            <i class="fas fa-play mr-1.5"></i>
+                            <span>Run Spring Batch Migration Now</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="errorDetailsModal" class="hidden fixed inset-0 z-50 overflow-y-auto bg-black/60 flex items-center justify-center p-4">
+            <div class="bg-white rounded-2xl max-w-3xl w-full p-6 shadow-2xl border border-gray-200 space-y-4">
+                <div class="flex items-center justify-between pb-3 border-b border-gray-200">
+                    <div class="flex items-center gap-2">
+                        <i class="fas fa-triangle-exclamation text-red-600 text-lg"></i>
+                        <div>
+                            <h3 class="text-base font-bold text-gray-900" id="error-modal-title">Error Diagnostic Inspector</h3>
+                            <span class="text-xs font-mono text-gray-500" id="error-modal-id">ERR-000</span>
+                        </div>
+                    </div>
+                    <button type="button" id="btn-close-error-modal" class="text-gray-400 hover:text-gray-600 text-xl font-bold">&times;</button>
+                </div>
+                <div class="space-y-3 text-xs">
+                    <div>
+                        <span class="font-bold text-gray-700 uppercase tracking-wider block mb-1">Error Message</span>
+                        <div id="error-modal-message" class="p-2.5 rounded bg-red-50 text-red-900 font-mono text-xs break-all border border-red-200">--</div>
+                    </div>
+                    <div>
+                        <span class="font-bold text-gray-700 uppercase tracking-wider block mb-1">Failed Record / Payload Snippet</span>
+                        <pre id="error-modal-payload" class="p-3 rounded bg-slate-900 text-emerald-400 font-mono text-xs overflow-x-auto max-h-40 border border-slate-700 whitespace-pre-wrap break-all">--</pre>
+                    </div>
+                    <div>
+                        <span class="font-bold text-gray-700 uppercase tracking-wider block mb-1">Java / Database Stack Trace</span>
+                        <pre id="error-modal-stacktrace" class="p-3 rounded bg-slate-900 text-slate-300 font-mono text-[11px] overflow-x-auto max-h-60 border border-slate-700 whitespace-pre-wrap break-all">--</pre>
+                    </div>
+                </div>
+                <div class="flex justify-end pt-3 border-t border-gray-200">
+                    <button type="button" id="btn-close-error-modal-bottom" class="btn btn-secondary text-xs py-1.5 px-4">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- BNP Corporate Header with Menu Split -->
+        <header>
+            <div class="flex items-center gap-6">
+                <a href="schedule.html" class="logo-link flex items-center">
+                    <img src="https://cdn-group.bnpparibas.com/build/images/logo-bnp.svg" alt="BNP Paribas Logo" style="height: 44px;">
+                </a>
+                <div class="hidden lg:block border-l border-gray-200 pl-4">
+                    <h1 class="text-base font-bold text-[#333333] tracking-tight leading-none">XML<span class="text-bnp-emerald">DbTool</span></h1>
+                    <p class="text-[9px] text-gray-400 font-semibold uppercase tracking-widest mt-0.5">Enterprise Ingestion Suite</p>
+                </div>
+
+                <!-- Main Top Navigation Tabs -->
+                <nav class="ml-2 flex items-center gap-1">
+                    <a href="schedule.html" id="nav-btn-schedule" class="nav-tab-btn ">
+                        <i class="fas fa-calendar-plus mr-1.5 text-xs"></i>
+                        <span>Schedule Job</span>
+                    </a>
+                    <a href="joblist.html" id="nav-btn-job-list" class="nav-tab-btn active">
+                        <i class="fas fa-list-check mr-1.5 text-xs"></i>
+                        <span>Job List</span>
+                    </a>
+                    <a href="execution-summary.html" id="nav-btn-execution-summary" class="nav-tab-btn ">
+                        <i class="fas fa-chart-line mr-1.5 text-xs"></i>
+                        <span>Execution Summary</span>
+                    </a>
+                    <a href="users.html" id="nav-btn-users" class="nav-tab-btn ">
+                        <i class="fas fa-users-cog mr-1.5 text-xs"></i>
+                        <span>Users</span>
+                    </a>
+                </nav>
+            </div>
+
+            <div class="flex items-center gap-3">
+                <div id="db-status-pill" class="hidden sm:flex items-center space-x-2 px-2.5 py-1 rounded-full bg-slate-100 border border-slate-200 text-[11px] text-slate-600 font-semibold">
+                    <span id="db-status-dot" class="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
+                    <span id="db-status-text">Disconnected</span>
+                </div>
+
+                <!-- Current User Profile Pill -->
+                <div class="flex items-center gap-2 pl-2 border-l border-gray-200">
+                    <div class="w-7 h-7 rounded-full bg-emerald-100 text-bnp-emerald flex items-center justify-center font-bold text-xs">
+                        <i class="fas fa-user"></i>
+                    </div>
+                    <div class="text-left hidden sm:block">
+                        <div id="current-user-name" class="font-bold text-xs text-gray-800 leading-none">--</div>
+                        <span id="current-user-role" class="text-[9px] font-mono uppercase px-1 rounded bg-slate-100 text-slate-500 font-bold">--</span>
+                    </div>
+                </div>
+
+                <!-- Logout Button -->
+                <button type="button" id="btn-logout" title="Sign Out" class="btn text-xs py-1.5 px-3 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition">
+                    <i class="fas fa-sign-out-alt sm:mr-1.5"></i>
+                    <span class="hidden sm:inline">Logout</span>
+                </button>
+            </div>
+        </header>
+
+
+        <main id="page-job-list" class="app-page flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-4 flex flex-col h-[calc(100vh-72px)] overflow-hidden">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 mb-3 border-b border-gray-200 gap-3 shrink-0">
+                <div>
+                    <h2 class="text-xl sm:text-2xl font-bold text-gray-900 leading-tight">Configured Migration Jobs</h2>
+                    <p class="text-xs text-gray-500 mt-0.5">Review saved ingestion definitions, inspect mappings and target SQL, or trigger batch execution.</p>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <button type="button" id="btn-refresh-job-list" class="btn btn-secondary text-xs py-1.5 px-3">
+                        <i class="fas fa-sync-alt mr-1.5 text-bnp-emerald"></i> Refresh
+                    </button>
+                    <button type="button" id="btn-create-new-job" class="btn btn-primary text-xs py-1.5 px-3">
+                        <i class="fas fa-plus mr-1.5"></i> Schedule New Job
+                    </button>
+                </div>
+            </div>
+
+            <!-- Jobs Data Table -->
+            <div class="card overflow-hidden flex-1 min-h-0 flex flex-col border border-gray-200 shadow-xs">
+                <div class="job-list-table-wrapper flex-1 min-h-0 overflow-y-auto overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200 text-left text-xs">
+                        <thead class="bg-gray-50 text-gray-600 font-bold uppercase tracking-wider sticky top-0 z-10 shadow-2xs">
+                            <tr>
+                                <th class="px-3.5 py-3 bg-gray-50">#</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Job Name &amp; Description</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Target Table(s)</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Chunk</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Source Path</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Last Run Status</th>
+                                <th class="px-3.5 py-3 bg-gray-50">Created By</th>
+                                <th class="px-3.5 py-3 bg-gray-50 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="job-list-tbody" class="divide-y divide-gray-200 bg-white">
+                            <!-- Populated dynamically -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+
+
+    </div>
+
+    <script src="/js/common.js"></script>
+    <script src="/js/joblist.js"></script>
+</body>
+</html>

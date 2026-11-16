@@ -373,36 +373,65 @@ public class SchemaProvisioningService {
                 isH2 = (prod != null && prod.toLowerCase().contains("h2")) || config.getUrl().toLowerCase().contains(":h2:");
             } catch (Exception ignored) {}
 
-            // 2. For EVERY identified entity root tag, create flattened table with gs_ prefix (NO suffix)
+            // 2. For EVERY identified entity in ingestion.json and root tags, create golden source table gs_<entityname>
             Set<String> provisionedFlats = new HashSet<>();
-            for (String rootTag : effectiveRoots) {
-                if (rootTag == null || rootTag.trim().isEmpty()) continue;
-                String norm = rootTag.trim().toLowerCase();
+            Set<String> allEntityTargets = new LinkedHashSet<>();
+            if (mappings != null && !mappings.isEmpty()) {
+                for (FieldMapping m : mappings) {
+                    if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
+                        allEntityTargets.add(m.getTargetTable().trim());
+                    }
+                }
+            }
+            boolean hasMappings = mappings != null && !mappings.isEmpty();
+            if (effectiveRoots != null) {
+                for (String r : effectiveRoots) {
+                    if (r != null && !r.trim().isEmpty()) {
+                        String rNorm = r.trim().toLowerCase();
+                        boolean skipRecord = hasMappings && rNorm.equals("record");
+                        if (!skipRecord && !WRAPPER_NAMES.contains(rNorm)
+                                && !XmlSchemaDiscoveryService.isWrapperContainerTag(rNorm, docRoot)) {
+                            allEntityTargets.add(r.trim());
+                        }
+                    }
+                }
+            }
+
+            for (String entity : allEntityTargets) {
+                if (entity == null || entity.trim().isEmpty()) continue;
+                String norm = entity.trim().toLowerCase();
+                boolean skipRecord = hasMappings && norm.equals("record");
                 if (WRAPPER_NAMES.contains(norm) || (docRoot != null && norm.equalsIgnoreCase(docRoot))
-                        || XmlSchemaDiscoveryService.isWrapperContainerTag(norm, docRoot)) {
-                    continue; // Never provision docRoot or wrappers as entity tables
+                        || XmlSchemaDiscoveryService.isWrapperContainerTag(norm, docRoot) || skipRecord) {
+                    continue; // Never provision docRoot, record, or wrappers as entity tables
                 }
                 String safe = norm.replaceAll("[^a-zA-Z0-9_]", "_");
-                // Flattened table: gs_<entityname> (prefix gs_, no suffix)
-                String gsPrefixTable = "gs_" + safe;
+                // Target Golden Source table: gs_<entityname> (prefix gs_, no suffix)
+                String gsPrefixTable = safe.startsWith("gs_") ? safe : "gs_" + safe;
                 if (provisionedFlats.add(gsPrefixTable)) {
-                    createdTables.addAll(provisionSpecificFlattenedTable(stmt, gsPrefixTable, rootTag, effectiveElements, isOracle));
+                    createdTables.addAll(provisionSpecificFlattenedTable(stmt, gsPrefixTable, entity, effectiveElements, mappings, isOracle));
                 }
 
-                // In H2 unit test mode only, create compatibility tables so legacy unit test assertions pass
-                if (isH2) {
+                // In legacy H2 unit test mode only (when strictIngestionJson is false), create compatibility tables so legacy unit test assertions pass
+                if (isH2 && !strictIngestionJson) {
                     try {
                         String flatTable = safe + "_flat";
                         String gsTable = safe + "_gs";
-                        createdTables.addAll(provisionSpecificFlattenedTable(stmt, flatTable, rootTag, effectiveElements, isOracle));
-                        createdTables.addAll(provisionSpecificFlattenedTable(stmt, gsTable, rootTag, effectiveElements, isOracle));
+                        createdTables.addAll(provisionSpecificFlattenedTable(stmt, flatTable, entity, effectiveElements, mappings, isOracle));
+                        createdTables.addAll(provisionSpecificFlattenedTable(stmt, gsTable, entity, effectiveElements, mappings, isOracle));
                     } catch (Exception ignored) {}
                 }
+            }
+
+            // Apply Primary Key, Unique constraints, and Foreign Key relationships on gs_<entity> tables
+            if (hasMappings) {
+                applyForeignKeyRelationshipsOnGsTables(stmt, mappings, isOracle);
             }
 
             // 3. Tables based on ingestion.json (canonical relational tables)
             boolean hasUserMappings = mappings != null && !mappings.isEmpty();
             if (hasUserMappings) {
+                // Provision mapped tables directly from mapping definitions
                 createdTables.addAll(provisionMappedTables(stmt, mappings, effectiveElements, isOracle));
             } else if (!strictIngestionJson) {
                 // Legacy fallback for tests that explicitly assert auto-derived tables without ingestion.json
@@ -417,9 +446,8 @@ public class SchemaProvisioningService {
                 }
                 createdTables.addAll(provisionLookupTables(stmt, effectiveElements, isOracle));
             } else {
-                // Rule: Do NOT create canonical tables based on raw XML heuristics to avoid schema confusion.
-                // Ingestion.json is mandatory for canonical table provisioning.
-                log.info("Automatic table creation based on raw XML tags is disabled to prevent schema confusion. Ingestion.json is mandatory for canonical table creation.");
+                // Rule: Strictly provision only gs_<entity> tables based on ingestion.json
+                log.info("Strict Ingestion JSON mode: Provisioning strictly gs_<entity> tables with PK/FK relationships.");
             }
 
         } catch (Exception ex) {
@@ -484,9 +512,12 @@ public class SchemaProvisioningService {
                     pkDetectedType = typeLookup.get(simpleXml);
                 }
                 String pkColNorm = pkCol.toLowerCase();
-                boolean isStringPk = pkColNorm.contains("code") || pkColNorm.contains("sku") || pkColNorm.contains("name")
+                boolean isExplicitNumeric = "BIGINT".equalsIgnoreCase(pkDetectedType) || "INT".equalsIgnoreCase(pkDetectedType)
+                        || "INTEGER".equalsIgnoreCase(pkDetectedType) || "LONG".equalsIgnoreCase(pkDetectedType);
+                boolean isStringPk = !isExplicitNumeric || pkColNorm.contains("code") || pkColNorm.contains("sku") || pkColNorm.contains("name")
                         || pkColNorm.contains("key") || pkColNorm.contains("uuid") || pkColNorm.contains("symbol")
-                        || pkColNorm.contains("str") || "VARCHAR".equalsIgnoreCase(pkDetectedType) || "STRING".equalsIgnoreCase(pkDetectedType);
+                        || pkColNorm.contains("str") || pkColNorm.contains("person")
+                        || "VARCHAR".equalsIgnoreCase(pkDetectedType) || "STRING".equalsIgnoreCase(pkDetectedType);
                 String quotedPkCol = DynamicJdbcBatchWriter.quoteIdentifier(pkCol, isOracle ? "Oracle" : "PostgreSQL", Collections.emptyMap());
                 String pkType = isStringPk ? (isOracle ? "VARCHAR2(255) PRIMARY KEY" : "VARCHAR(255) PRIMARY KEY")
                         : (isOracle ? "NUMBER(19) PRIMARY KEY" : "BIGINT PRIMARY KEY");
@@ -546,6 +577,10 @@ public class SchemaProvisioningService {
             colDefs.append(", source_bnpp_id VARCHAR(64)");
             desiredCols.add("staging_bnpp_id");
             colDefs.append(", staging_bnpp_id VARCHAR(64)");
+            desiredCols.add("history_ids");
+            colDefs.append(", history_ids ").append(isOracle ? "CLOB" : "TEXT");
+            desiredCols.add("file_id");
+            colDefs.append(", file_id VARCHAR(64)");
             desiredCols.add("version_number");
             colDefs.append(", version_number INT DEFAULT 1");
             desiredCols.add("tag_name");
@@ -606,6 +641,126 @@ public class SchemaProvisioningService {
         }
 
         return tables;
+    }
+
+    /**
+     * Applies Primary Key unique constraints and Foreign Key relationships directly onto gs_<entity> tables
+     * as defined in ingestion.json mapping configurations.
+     */
+    public void applyForeignKeyRelationshipsOnGsTables(Statement stmt,
+                                                      List<FieldMapping> mappings,
+                                                      boolean isOracle) {
+        if (stmt == null || mappings == null || mappings.isEmpty()) return;
+
+        Map<String, List<FieldMapping>> byTable = new LinkedHashMap<>();
+        for (FieldMapping m : mappings) {
+            if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
+                byTable.computeIfAbsent(m.getTargetTable().trim(), k -> new ArrayList<>()).add(m);
+            }
+        }
+
+        Map<String, String> entityToGsTable = new HashMap<>();
+        Map<String, String> entityToPkCol = new HashMap<>();
+
+        for (Map.Entry<String, List<FieldMapping>> entry : byTable.entrySet()) {
+            String entity = entry.getKey();
+            String normEntity = entity.toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+            String gsTable = normEntity.startsWith("gs_") ? normEntity : "gs_" + normEntity;
+            entityToGsTable.put(normEntity, gsTable);
+            entityToGsTable.put(normEntity.replaceFirst("^gs_", ""), gsTable);
+
+            String pkCol = null;
+            for (FieldMapping m : entry.getValue()) {
+                if ("PK".equalsIgnoreCase(m.getConstraintType()) && m.getTargetColumn() != null) {
+                    pkCol = m.getTargetColumn().trim().toLowerCase();
+                    break;
+                }
+            }
+            if (pkCol == null) {
+                pkCol = "id";
+            }
+            entityToPkCol.put(normEntity, pkCol);
+            entityToPkCol.put(normEntity.replaceFirst("^gs_", ""), pkCol);
+
+            // Ensure referenced PK/unique column has UNIQUE constraint/index so FK can reference it
+            if (!pkCol.equalsIgnoreCase("id")) {
+                try {
+                    String uqName = ("uq_" + gsTable + "_" + pkCol).toLowerCase();
+                    if (uqName.length() > 30 && isOracle) uqName = uqName.substring(0, 30);
+                    if (!isOracle) {
+                        stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS " + uqName + " ON " + gsTable + "(" + pkCol + ")");
+                    } else {
+                        stmt.execute("ALTER TABLE " + gsTable + " ADD CONSTRAINT " + uqName + " UNIQUE (" + pkCol + ")");
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // Add Foreign Key constraints on gs_<child> referencing gs_<parent>
+        for (Map.Entry<String, List<FieldMapping>> entry : byTable.entrySet()) {
+            String childEntity = entry.getKey().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+            String childGsTable = entityToGsTable.get(childEntity);
+            if (childGsTable == null) continue;
+
+            for (FieldMapping m : entry.getValue()) {
+                boolean isFk = "FK".equalsIgnoreCase(m.getConstraintType())
+                        || (m.getForeignKeyTable() != null && !m.getForeignKeyTable().trim().isEmpty());
+                if (isFk && m.getTargetColumn() != null) {
+                    String childCol = m.getTargetColumn().trim().toLowerCase();
+
+                    // Determine parent entity
+                    String parentEntity = m.getForeignKeyTable();
+                    if (parentEntity == null || parentEntity.trim().isEmpty()) {
+                        if (childCol.endsWith("_id")) {
+                            parentEntity = childCol.substring(0, childCol.length() - 3);
+                        } else if (m.getXmlField() != null) {
+                            String[] parts = m.getXmlField().split("/");
+                            for (String part : parts) {
+                                String cleanPart = part.replace("@", "").toLowerCase();
+                                if (entityToGsTable.containsKey(cleanPart) && !cleanPart.equalsIgnoreCase(childEntity)) {
+                                    parentEntity = cleanPart;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (parentEntity != null) {
+                        String normParent = parentEntity.toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+                        String parentGsTable = entityToGsTable.get(normParent);
+                        if (parentGsTable == null) {
+                            parentGsTable = normParent.startsWith("gs_") ? normParent : "gs_" + normParent;
+                        }
+                        String parentCol = m.getForeignKeyColumn();
+                        if (parentCol == null || parentCol.trim().isEmpty()) {
+                            parentCol = entityToPkCol.getOrDefault(normParent, "id");
+                        }
+
+                        if (!childGsTable.equalsIgnoreCase(parentGsTable)) {
+                            String fkName = ("fk_" + childGsTable + "_" + childCol).toLowerCase();
+                            if (fkName.length() > 30 && isOracle) fkName = fkName.substring(0, 30);
+
+                            try {
+                                String fkSql = "ALTER TABLE " + childGsTable + " ADD CONSTRAINT " + fkName
+                                        + " FOREIGN KEY (" + childCol + ") REFERENCES " + parentGsTable + "(" + parentCol + ")";
+                                stmt.execute(fkSql);
+                                log.info("Successfully established relationship: {}({}) -> {}({})",
+                                        childGsTable, childCol, parentGsTable, parentCol);
+                            } catch (Exception ex) {
+                                log.debug("Notice adding FK constraint {}: {}", fkName, ex.getMessage());
+                            }
+
+                            try {
+                                if (!isOracle) {
+                                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + childGsTable + "_" + childCol
+                                            + " ON " + childGsTable + "(" + childCol + ")");
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -677,6 +832,10 @@ public class SchemaProvisioningService {
         masterColDefs.append(", source_bnpp_id VARCHAR(64)");
         masterCols.add("staging_bnpp_id");
         masterColDefs.append(", staging_bnpp_id VARCHAR(64)");
+        masterCols.add("history_ids");
+        masterColDefs.append(", history_ids ").append(isOracle ? "CLOB" : "TEXT");
+        masterCols.add("file_id");
+        masterColDefs.append(", file_id VARCHAR(64)");
         masterCols.add("version_number");
         masterColDefs.append(", version_number INT DEFAULT 1");
         masterCols.add("tag_name");
@@ -786,6 +945,10 @@ public class SchemaProvisioningService {
                 childCols.append(", source_bnpp_id VARCHAR(64)");
                 childDesiredCols.add("staging_bnpp_id");
                 childCols.append(", staging_bnpp_id VARCHAR(64)");
+                childDesiredCols.add("history_ids");
+                childCols.append(", history_ids ").append(isOracle ? "CLOB" : "TEXT");
+                childDesiredCols.add("file_id");
+                childCols.append(", file_id VARCHAR(64)");
                 childDesiredCols.add("version_number");
                 childCols.append(", version_number INT DEFAULT 1");
                 childDesiredCols.add("tag_name");
@@ -910,6 +1073,10 @@ public class SchemaProvisioningService {
             colDefs.append(", source_bnpp_id VARCHAR(64)");
             desiredCols.add("staging_bnpp_id");
             colDefs.append(", staging_bnpp_id VARCHAR(64)");
+            desiredCols.add("history_ids");
+            colDefs.append(", history_ids ").append(isOracle ? "CLOB" : "TEXT");
+            desiredCols.add("file_id");
+            colDefs.append(", file_id VARCHAR(64)");
             desiredCols.add("version_number");
             colDefs.append(", version_number INT DEFAULT 1");
             desiredCols.add("tag_name");
@@ -1093,13 +1260,23 @@ public class SchemaProvisioningService {
                                                         String rootTag,
                                                         List<DiscoveredElement> discoveredXmlElements,
                                                         boolean isOracle) {
+        return provisionSpecificFlattenedTable(stmt, flatTable, rootTag, discoveredXmlElements, null, isOracle);
+    }
+
+    public List<String> provisionSpecificFlattenedTable(Statement stmt,
+                                                        String flatTable,
+                                                        String rootTag,
+                                                        List<DiscoveredElement> discoveredXmlElements,
+                                                        List<FieldMapping> mappings,
+                                                        boolean isOracle) {
         List<String> tables = new ArrayList<>();
         if (stmt == null || flatTable == null || flatTable.trim().isEmpty()) {
             return tables;
         }
 
         Set<String> desiredCols = new LinkedHashSet<>(List.of(
-                "job_execution_id", "bnpp_id", "tag_name", "version_number",
+                "job_execution_id", "file_id", "bnpp_id", "source_bnpp_id", "staging_bnpp_id", "history_ids",
+                "tag_name", "version_number",
                 "record_identifier", "record_action", "record_date",
                 "xml_version", "schema_version", "payload_hash", "status",
                 "raw_payload", "extra_attributes"
@@ -1176,12 +1353,48 @@ public class SchemaProvisioningService {
             }
         }
 
+        // Additional columns explicitly mapped in ingestion.json for this entity
+        if (mappings != null) {
+            for (FieldMapping m : mappings) {
+                if (m.getTargetTable() != null && m.getTargetColumn() != null) {
+                    String normTarget = m.getTargetTable().trim().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+                    if (normTarget.equalsIgnoreCase(tagNorm) || flatTable.equalsIgnoreCase("gs_" + normTarget)
+                            || ("gs_" + normTarget).equalsIgnoreCase(flatTable)) {
+                        String col = m.getTargetColumn().trim().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+                        if (!col.isEmpty() && !desiredCols.contains(col) && !col.equalsIgnoreCase("id")) {
+                            desiredCols.add(col);
+                            String sqlColType = isOracle ? "VARCHAR2(500)" : "VARCHAR(500)";
+                            String trans = m.getTransform() != null ? m.getTransform().toUpperCase() : "";
+                            if ("TO_BOOLEAN".equals(trans)) {
+                                sqlColType = isOracle ? "NUMBER(1)" : "BOOLEAN";
+                            } else if ("TO_INT".equals(trans) || "TO_LONG".equals(trans)) {
+                                sqlColType = isOracle ? "NUMBER(19)" : "BIGINT";
+                            } else if ("TO_DATE".equals(trans) || "TO_TIMESTAMP".equals(trans)) {
+                                sqlColType = isOracle ? "DATE" : "TIMESTAMP";
+                            } else if (col.contains("note") || col.contains("desc") || col.contains("payload")
+                                    || col.contains("url") || col.contains("image") || col.contains("source")
+                                    || col.contains("extra") || col.contains("details")) {
+                                sqlColType = isOracle ? "CLOB" : "TEXT";
+                            }
+                            String quotedCol = Set.of("day", "month", "year", "date", "order", "group", "user", "value", "key", "action", "role").contains(col)
+                                    ? "\"" + col + "\"" : col;
+                            colDefs.append(", ").append(quotedCol).append(" ").append(sqlColType);
+                        }
+                    }
+                }
+            }
+        }
+
         String createSql;
         if (isOracle) {
             createSql = "CREATE TABLE " + flatTable + " (" +
                     "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
                     "job_execution_id NUMBER(19), " +
+                    "file_id VARCHAR2(64), " +
                     "bnpp_id VARCHAR2(64), " +
+                    "source_bnpp_id VARCHAR2(64), " +
+                    "staging_bnpp_id VARCHAR2(64), " +
+                    "history_ids CLOB, " +
                     "tag_name VARCHAR2(100), " +
                     "version_number NUMBER(10) DEFAULT 1, " +
                     "record_identifier VARCHAR2(100), " +
@@ -1201,7 +1414,11 @@ public class SchemaProvisioningService {
             createSql = "CREATE TABLE IF NOT EXISTS " + flatTable + " (" +
                     "id BIGSERIAL PRIMARY KEY, " +
                     "job_execution_id BIGINT, " +
+                    "file_id VARCHAR(64), " +
                     "bnpp_id VARCHAR(64), " +
+                    "source_bnpp_id VARCHAR(64), " +
+                    "staging_bnpp_id VARCHAR(64), " +
+                    "history_ids TEXT, " +
                     "tag_name VARCHAR(100), " +
                     "version_number INT DEFAULT 1, " +
                     "record_identifier VARCHAR(100), " +

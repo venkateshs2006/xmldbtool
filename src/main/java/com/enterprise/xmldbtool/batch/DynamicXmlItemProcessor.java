@@ -122,6 +122,12 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         Map<String, List<Map<String, Object>>> multiTableRecords = new LinkedHashMap<>();
         String entityTag = (String) xmlRecord.get("_entity_tag");
         if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
+        if (entityTag == null) entityTag = (String) xmlRecord.get("tag_name");
+        if (entityTag == null) entityTag = (String) xmlRecord.get("entity_type");
+        boolean hasMultiEntities = xmlRecord.keySet().stream().anyMatch(k -> k.startsWith("_entities_"));
+        if (entityTag == null && !hasMultiEntities) {
+            entityTag = this.defaultTargetTable;
+        }
 
         for (String tableName : targetTables) {
             List<FieldMapping> tblMappings = tableMappings.get(tableName);
@@ -129,59 +135,85 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
 
             if (entityTag != null && !entityTag.isEmpty()) {
                 String normEntity = entityTag.toLowerCase().replaceAll("[^a-zA-Z0-9]", "");
-                String singEntity = DynamicXmlUnmarshaller.singularize(normEntity);
-                String plurEntity = DynamicXmlUnmarshaller.pluralize(normEntity);
-                String baseEnt = normEntity.replaceAll("(?i)lists?$", "");
+                String strippedEntity = normEntity.startsWith("gs") ? normEntity.substring(2) : normEntity;
+                String singEntity = DynamicXmlUnmarshaller.singularize(strippedEntity);
+                String plurEntity = DynamicXmlUnmarshaller.pluralize(strippedEntity);
+                String baseEnt = strippedEntity.replaceAll("(?i)lists?$", "");
                 String singBase = DynamicXmlUnmarshaller.singularize(baseEnt);
 
-                boolean tableRelevant = tblMappings.stream().anyMatch(m -> {
-                    String xf = m.getXmlField();
-                    if (xf != null) {
-                        String clean = xf.replace("@", "").toLowerCase().replaceAll("[^a-zA-Z0-9/]", "");
-                        if (clean.contains("/")) {
-                            String firstTag = clean.substring(0, clean.indexOf("/"));
-                            if (firstTag.equals(normEntity) || firstTag.equals(singEntity) || firstTag.equals(plurEntity)
-                                    || firstTag.equals(baseEnt) || firstTag.equals(singBase)
-                                    || xmlRecord.containsKey("_entities_" + firstTag)
-                                    || xmlRecord.containsKey("_subtag_" + firstTag)
-                                    || xmlRecord.containsKey("_subtag_xml_" + firstTag)) {
-                                return true;
-                            }
-                        } else {
-                            if (clean.equals(normEntity) || clean.equals(singEntity) || clean.equals(plurEntity)
-                                    || clean.equals(baseEnt) || clean.equals(singBase)) {
-                                return true;
-                            }
-                        }
-                    }
-                    String tt = m.getTargetTable();
-                    if (tt != null) {
-                        String normT = tt.toLowerCase().replaceAll("[^a-zA-Z0-9]", "");
-                        String singT = DynamicXmlUnmarshaller.singularize(normT);
-                        String baseT = normT.replaceAll("(?i)lists?$", "");
-                        String singBaseT = DynamicXmlUnmarshaller.singularize(baseT);
+                String normTbl = tableName.toLowerCase().replaceAll("[^a-zA-Z0-9]", "");
+                String strippedTbl = normTbl.startsWith("gs") ? normTbl.substring(2) : normTbl;
+                String singTbl = DynamicXmlUnmarshaller.singularize(strippedTbl);
+                String baseTbl = strippedTbl.replaceAll("(?i)lists?$", "");
+                String singBaseTbl = DynamicXmlUnmarshaller.singularize(baseTbl);
 
-                        if (normT.equals(normEntity) || normT.equals(singEntity) || normT.equals(plurEntity)
-                                || singT.equals(normEntity) || singT.equals(singEntity)
-                                || normT.equals(baseEnt) || normT.equals(singBase)
-                                || baseT.equals(baseEnt) || singBaseT.equals(singBase)) {
-                            return true;
-                        }
+                // Guard against cross-entity contamination
+                if (strippedTbl.startsWith("person") && !strippedEntity.startsWith("person")) {
+                    continue; // Child table of Person belongs exclusively to Person
+                }
+                if (strippedTbl.startsWith("country") && !strippedEntity.startsWith("country")) {
+                    continue;
+                }
+                if (strippedTbl.startsWith("country") && strippedEntity.startsWith("country")) {
+                    if (strippedEntity.contains("list") != strippedTbl.contains("list")) {
+                        continue;
                     }
-                    return false;
-                });
+                }
+                if (strippedTbl.startsWith("occupation") && !strippedEntity.startsWith("occupation")) {
+                    continue;
+                }
+                if (strippedTbl.startsWith("relationship") && !strippedEntity.startsWith("relation")) {
+                    continue;
+                }
+
+                boolean tableRelevant = strippedTbl.equals(strippedEntity)
+                        || strippedTbl.equals(singEntity)
+                        || strippedTbl.equals(plurEntity)
+                        || singTbl.equals(strippedEntity)
+                        || singTbl.equals(singEntity)
+                        || strippedTbl.equals(baseEnt)
+                        || strippedTbl.equals(singBase)
+                        || baseTbl.equals(baseEnt)
+                        || singBaseTbl.equals(singBase)
+                        || (strippedTbl.startsWith(strippedEntity) && !strippedTbl.equals(strippedEntity))
+                        || (singTbl.startsWith(singEntity) && !singTbl.equals(singEntity));
 
                 if (!tableRelevant) {
-                    String normTbl = tableName.toLowerCase().replaceAll("[^a-zA-Z0-9]", "");
-                    String singTbl = DynamicXmlUnmarshaller.singularize(normTbl);
-                    String baseTbl = normTbl.replaceAll("(?i)lists?$", "");
-                    String singBaseTbl = DynamicXmlUnmarshaller.singularize(baseTbl);
+                    tableRelevant = tblMappings.stream().anyMatch(m -> {
+                        String xf = m.getXmlField();
+                        if (xf != null) {
+                            String clean = xf.replace("@", "").toLowerCase().replaceAll("[^a-zA-Z0-9/]", "");
+                            if (clean.contains("/person/") && !strippedEntity.equals("person")) {
+                                return false;
+                            }
+                            for (String part : clean.split("/")) {
+                                if (part.equals(strippedEntity) || part.equals(singEntity) || part.equals(plurEntity)
+                                        || part.equals(baseEnt) || part.equals(singBase)
+                                        || xmlRecord.containsKey("_entities_" + part)
+                                        || xmlRecord.containsKey("_subtag_" + part)
+                                        || xmlRecord.containsKey("_subtag_xml_" + part)) {
+                                    return true;
+                                }
+                            }
+                        }
+                        String tt = m.getTargetTable();
+                        if (tt != null) {
+                            String normT = tt.toLowerCase().replaceAll("[^a-zA-Z0-9]", "");
+                            String strippedT = normT.startsWith("gs") ? normT.substring(2) : normT;
+                            String singT = DynamicXmlUnmarshaller.singularize(strippedT);
+                            String baseT = strippedT.replaceAll("(?i)lists?$", "");
+                            String singBaseT = DynamicXmlUnmarshaller.singularize(baseT);
 
-                    tableRelevant = normTbl.equals(normEntity) || normTbl.equals(singEntity) || normTbl.equals(plurEntity)
-                            || singTbl.equals(normEntity) || singTbl.equals(singEntity)
-                            || normTbl.equals(baseEnt) || normTbl.equals(singBase)
-                            || baseTbl.equals(baseEnt) || singBaseTbl.equals(singBase)
-                            || (normTbl.startsWith(normEntity) && !normTbl.equals(normEntity));
+                            if (strippedT.equals(strippedEntity) || strippedT.equals(singEntity) || strippedT.equals(plurEntity)
+                                    || singT.equals(strippedEntity) || singT.equals(singEntity)
+                                    || strippedT.equals(baseEnt) || strippedT.equals(singBase)
+                                    || baseT.equals(baseEnt) || singBaseT.equals(singBase)
+                                    || (strippedT.startsWith(strippedEntity) && !strippedT.equals(strippedEntity))) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    });
                 }
 
                 if (!tableRelevant) {
@@ -235,6 +267,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                     // Ensure canonical table data is in clean data format (no xml or no json)
                     cleanCanonicalRow(rowMap);
 
+                    // Ensure enterprise traceability & tracking metadata (bnpp_id, source_bnpp_id, staging_bnpp_id, history_ids)
+                    enrichRowEnterpriseIdentity(rowMap, tableName, xmlRecord);
+
                     if (isValidRow(rowMap, pkCol)) {
                         validRows.add(rowMap);
                     }
@@ -259,6 +294,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
 
                 // Ensure canonical table data is in clean data format (no xml or no json)
                 cleanCanonicalRow(rowMap);
+
+                // Ensure enterprise traceability & tracking metadata (bnpp_id, source_bnpp_id, staging_bnpp_id, history_ids)
+                enrichRowEnterpriseIdentity(rowMap, tableName, xmlRecord);
 
                 if (isValidRow(rowMap, pkCol)) {
                     validRows.add(rowMap);
@@ -308,6 +346,69 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
         }
         return true;
+    }
+
+    /**
+     * Enriches a table row with complete enterprise traceability identifiers:
+     * - bnpp_id: Sequential alphanumeric unique identifier
+     * - source_bnpp_id: Originating/parent BNPP ID
+     * - staging_bnpp_id: Staging BNPP ID linking back to the historical/staging source row
+     * - history_ids: History backtracking array/reference
+     */
+    private void enrichRowEnterpriseIdentity(Map<String, Object> rowMap, String tableName, Map<String, Object> xmlRecord) {
+        if (rowMap == null) return;
+
+        // 1. bnpp_id
+        String bid = (String) rowMap.get("bnpp_id");
+        if (bid == null || bid.trim().isEmpty()) {
+            bid = com.enterprise.xmldbtool.util.BnppIdGenerator.generateId("BNPP");
+            rowMap.put("bnpp_id", bid);
+        }
+
+        // 2. Resolve source / staging bnpp_id from parent entity or record's bnpp_id
+        String parentBnpp = (xmlRecord != null) ? (String) xmlRecord.get("_parent_bnpp_id") : null;
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("bnpp_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("_bnpp_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("source_bnpp_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("staging_bnpp_id");
+
+        if (rowMap.get("source_bnpp_id") == null) {
+            rowMap.put("source_bnpp_id", parentBnpp != null ? parentBnpp : bid);
+        }
+        if (rowMap.get("staging_bnpp_id") == null) {
+            rowMap.put("staging_bnpp_id", parentBnpp != null ? parentBnpp : bid);
+        }
+
+        // 3. history_ids: seed with source_bnpp_id or current bnpp_id
+        if (rowMap.get("history_ids") == null) {
+            String histId = (String) rowMap.get("source_bnpp_id");
+            if (histId == null) histId = bid;
+            rowMap.put("history_ids", "[" + histId + "]");
+        }
+
+        // 4. file_id
+        if (rowMap.get("file_id") == null && xmlRecord != null && xmlRecord.get("file_id") != null) {
+            rowMap.put("file_id", xmlRecord.get("file_id"));
+        }
+
+        // 5. version_number
+        if (rowMap.get("version_number") == null) {
+            Object ver = (xmlRecord != null) ? xmlRecord.get("version_number") : null;
+            rowMap.put("version_number", ver != null ? ver : 1);
+        }
+
+        // 6. tag_name
+        if (rowMap.get("tag_name") == null) {
+            rowMap.put("tag_name", tableName != null ? tableName.toLowerCase() : "record");
+        }
+
+        // 7. created_at & updated_at
+        if (rowMap.get("created_at") == null) {
+            rowMap.put("created_at", new java.sql.Timestamp(System.currentTimeMillis()));
+        }
+        if (rowMap.get("updated_at") == null) {
+            rowMap.put("updated_at", new java.sql.Timestamp(System.currentTimeMillis()));
+        }
     }
 
     /**
@@ -415,10 +516,14 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
      */
     private void ensureReferenceId(Map<String, Object> rowMap, String tableName, Map<String, Object> xmlRecord, List<FieldMapping> tblMappings) {
         String masterTable = (this.defaultTargetTable != null ? this.defaultTargetTable.toLowerCase() : "record");
-        String defaultFkCol = masterTable + "_id";
+        String baseMaster = masterTable.replaceFirst("^gs_", "");
+        String defaultFkCol = baseMaster + "_id";
         Set<String> fkCols = new LinkedHashSet<>();
 
-        boolean isChildOfMaster = tableName != null && tableName.toLowerCase().startsWith(masterTable);
+        String normTbl = tableName != null ? tableName.toLowerCase() : "";
+        String baseTbl = normTbl.replaceFirst("^gs_", "");
+        boolean isChildOfMaster = baseTbl.startsWith(baseMaster) && !baseTbl.equals(baseMaster);
+
         if (tblMappings != null) {
             for (FieldMapping m : tblMappings) {
                 if ("FK".equalsIgnoreCase(m.getConstraintType()) || m.getForeignKeyTable() != null) {
@@ -457,6 +562,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         if (xmlRecord == null) return null;
         String defaultFkCol = (this.defaultTargetTable != null ? this.defaultTargetTable.toLowerCase() : "record") + "_id";
         Object parentId = xmlRecord.get(defaultFkCol);
+        if (parentId == null) parentId = xmlRecord.get(defaultFkCol.replaceFirst("^gs_", ""));
+        if (parentId == null) parentId = xmlRecord.get("person_id");
+        if (parentId == null) parentId = xmlRecord.get("record_identifier");
         if (parentId == null) parentId = xmlRecord.get("id");
         if (parentId == null) parentId = xmlRecord.get("@id");
         if (parentId == null) parentId = xmlRecord.get("Id");
@@ -466,12 +574,16 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         if (parentId == null) parentId = xmlRecord.get("code");
         if (parentId == null) parentId = xmlRecord.get("@code");
         if (parentId == null) parentId = xmlRecord.get("_bnpp_id");
+        if (parentId == null) parentId = xmlRecord.get("bnpp_id");
         if (parentId == null) parentId = xmlRecord.get("_record_id");
         if (parentId == null && this.mappings != null) {
             for (FieldMapping m : this.mappings) {
                 if ("PK".equalsIgnoreCase(m.getConstraintType())
                         && m.getTargetTable() != null
-                        && m.getTargetTable().equalsIgnoreCase(this.defaultTargetTable)) {
+                        && (m.getTargetTable().equalsIgnoreCase(this.defaultTargetTable)
+                            || m.getTargetTable().equalsIgnoreCase("gs_" + this.defaultTargetTable)
+                            || ("gs_" + m.getTargetTable()).equalsIgnoreCase(this.defaultTargetTable)
+                            || m.getTargetTable().replaceFirst("(?i)^gs_", "").equalsIgnoreCase(this.defaultTargetTable.replaceFirst("(?i)^gs_", "")))) {
                     parentId = xmlRecord.get(m.getTargetColumn());
                     if (parentId == null && m.getXmlField() != null) {
                         parentId = resolveXmlValue(xmlRecord, m.getXmlField(), m.getTargetColumn());
@@ -510,12 +622,17 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         String defaultNorm = this.defaultTargetTable != null ? this.defaultTargetTable.toLowerCase().trim() : "record";
         String entityTag = (String) xmlRecord.get("_entity_tag");
         if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
+        if (entityTag == null) entityTag = (String) xmlRecord.get("tag_name");
+        if (entityTag == null) entityTag = (String) xmlRecord.get("entity_type");
+        if (entityTag == null) entityTag = this.defaultTargetTable;
         String normEntity = entityTag != null ? entityTag.toLowerCase().trim() : defaultNorm;
+        String baseEntity = normEntity.replaceFirst("^gs_", "");
+        String baseTable = normTable.replaceFirst("^gs_", "");
 
         // If table is the main root master entity itself and no direct _entities_* was found, it is a single master record
-        if (normTable.equals(normEntity) || normTable.equals(defaultNorm)
-                || normTable.equals(DynamicXmlUnmarshaller.singularize(normEntity))
-                || normTable.equals(DynamicXmlUnmarshaller.pluralize(normEntity))) {
+        if (baseTable.equals(baseEntity) || baseTable.equals(defaultNorm)
+                || baseTable.equals(DynamicXmlUnmarshaller.singularize(baseEntity))
+                || baseTable.equals(DynamicXmlUnmarshaller.pluralize(baseEntity))) {
             return Collections.emptyList();
         }
 
@@ -524,9 +641,18 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         candidateTags.add(normTable);
         candidateTags.add(singular);
         candidateTags.add(plural);
+        candidateTags.add(baseTable);
+        candidateTags.add(DynamicXmlUnmarshaller.singularize(baseTable));
+        candidateTags.add(DynamicXmlUnmarshaller.pluralize(baseTable));
 
         // Strip entity prefixes (e.g. "person_name" -> "name", "personname" -> "name", "personcountry" -> "country")
-        for (String prefix : List.of(normEntity + "_", normEntity, defaultNorm + "_", defaultNorm, "person_", "person")) {
+        for (String prefix : List.of(normEntity + "_", normEntity, baseEntity + "_", baseEntity, defaultNorm + "_", defaultNorm, "person_", "person")) {
+            if (baseTable.startsWith(prefix) && baseTable.length() > prefix.length()) {
+                String stripped = baseTable.substring(prefix.length());
+                candidateTags.add(stripped);
+                candidateTags.add(DynamicXmlUnmarshaller.singularize(stripped));
+                candidateTags.add(DynamicXmlUnmarshaller.pluralize(stripped));
+            }
             if (normTable.startsWith(prefix) && normTable.length() > prefix.length()) {
                 String stripped = normTable.substring(prefix.length());
                 candidateTags.add(stripped);
@@ -536,27 +662,27 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         }
 
         // Special composite entity aliases
-        if (normTable.contains("name")) {
+        if (normTable.contains("name") || baseTable.contains("name")) {
             candidateTags.addAll(List.of("namevalue", "name", "names", "namedetails"));
-        } else if (normTable.contains("date")) {
+        } else if (normTable.contains("date") || baseTable.contains("date")) {
             candidateTags.addAll(List.of("datevalue", "date", "dates", "datedetails", "datetype", "datetypelist"));
-        } else if (normTable.contains("country")) {
+        } else if (normTable.contains("country") || baseTable.contains("country")) {
             candidateTags.addAll(List.of("countryvalue", "country", "countries", "countrydetails", "countrylist", "countryname"));
-        } else if (normTable.contains("role") || normTable.contains("occupation")) {
+        } else if (normTable.contains("role") || baseTable.contains("role") || normTable.contains("occupation") || baseTable.contains("occupation")) {
             candidateTags.addAll(List.of("occtitle", "roles", "role", "roledetail", "roledetails", "occupation", "occupationlist"));
-        } else if (normTable.contains("sanction") || normTable.contains("reference")) {
+        } else if (normTable.contains("sanction") || baseTable.contains("sanction") || normTable.contains("reference") || baseTable.contains("reference")) {
             candidateTags.addAll(List.of("reference", "references", "sanctionsreferences", "referencename", "sanctionsreferenceslist"));
-        } else if (normTable.contains("id") || normTable.contains("identification")) {
+        } else if (normTable.contains("id") || baseTable.contains("id") || normTable.contains("identification") || baseTable.contains("identification")) {
             candidateTags.addAll(List.of("idvalue", "id", "ids", "iddetails", "idnumbertypes"));
-        } else if (normTable.contains("source")) {
-            candidateTags.addAll(List.of("source", "sources", "sourcedetails"));
-        } else if (normTable.contains("image")) {
+        } else if (normTable.contains("source") || baseTable.contains("source")) {
+            candidateTags.addAll(List.of("source", "sources", "sourcedetails", "sourcedescription"));
+        } else if (normTable.contains("image") || baseTable.contains("image")) {
             candidateTags.addAll(List.of("image", "images"));
-        } else if (normTable.contains("description")) {
+        } else if (normTable.contains("description") || baseTable.contains("description")) {
             candidateTags.addAll(List.of("description", "descriptions", "description1name", "description2name", "description3name"));
-        } else if (normTable.contains("address")) {
+        } else if (normTable.contains("address") || baseTable.contains("address")) {
             candidateTags.addAll(List.of("address", "addresses"));
-        } else if (normTable.contains("relation")) {
+        } else if (normTable.contains("relation") || baseTable.contains("relation")) {
             candidateTags.addAll(List.of("relationship", "relationshiplist"));
         }
 
@@ -567,7 +693,8 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 String clean = f.replace("@", "").toLowerCase();
                 String[] parts = clean.split("/");
                 for (String part : parts) {
-                    if (!part.equals(normEntity) && !part.equals(defaultNorm) && !part.isEmpty()) {
+                    if (!part.equals(normEntity) && !part.equals(baseEntity) && !part.equals(defaultNorm) && !part.isEmpty()
+                            && !part.equals("pfa") && !part.equals("records") && !part.equals("canopyapp")) {
                         candidateTags.add(part);
                         candidateTags.add(DynamicXmlUnmarshaller.singularize(part));
                         candidateTags.add(DynamicXmlUnmarshaller.pluralize(part));
@@ -847,8 +974,10 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 String normEnt = entityTag.toLowerCase();
                 String singEnt = DynamicXmlUnmarshaller.singularize(normEnt);
                 String plurEnt = DynamicXmlUnmarshaller.pluralize(normEnt);
+                String baseEnt = normEnt.replaceFirst("^gs_", "");
                 for (String part : xmlField.replace("@", "").toLowerCase().split("/")) {
-                    if (part.equals(normEnt) || part.equals(singEnt) || part.equals(plurEnt)) {
+                    if (part.equals(normEnt) || part.equals(singEnt) || part.equals(plurEnt)
+                            || part.equals(baseEnt) || part.equals(DynamicXmlUnmarshaller.singularize(baseEnt))) {
                         tagMatches = true;
                         break;
                     }

@@ -29,6 +29,9 @@ public class SavedJobConfig {
     private String lastRunStatus;
     private Long lastJobExecutionId;
     private Boolean stagedPipeline = true;
+    private String vendorName = "DEFAULT_VENDOR";
+    private String vendorId = "VND-DEFAULT";
+    private String triggeredBy = "USER";
 
     public SavedJobConfig() {}
 
@@ -135,4 +138,13 @@ public class SavedJobConfig {
 
     public String getRejectionReason() { return rejectionReason; }
     public void setRejectionReason(String rejectionReason) { this.rejectionReason = rejectionReason; }
+
+    public String getVendorName() { return vendorName; }
+    public void setVendorName(String vendorName) { this.vendorName = vendorName; }
+
+    public String getVendorId() { return vendorId; }
+    public void setVendorId(String vendorId) { this.vendorId = vendorId; }
+
+    public String getTriggeredBy() { return triggeredBy; }
+    public void setTriggeredBy(String triggeredBy) { this.triggeredBy = triggeredBy; }
 }

@@ -63,9 +63,19 @@ public class StagingXmlStreamingService {
             long elapsedTimeMs
     ) {}
 
-    public StagingXmlStreamingService(DynamicXmlUnmarshaller dynamicXmlUnmarshaller, ObjectMapper objectMapper) {
+    private final SystemLoggingService systemLoggingService;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public StagingXmlStreamingService(DynamicXmlUnmarshaller dynamicXmlUnmarshaller,
+                                      ObjectMapper objectMapper,
+                                      @org.springframework.beans.factory.annotation.Autowired(required = false) SystemLoggingService systemLoggingService) {
         this.dynamicXmlUnmarshaller = dynamicXmlUnmarshaller;
         this.objectMapper = objectMapper;
+        this.systemLoggingService = systemLoggingService;
+    }
+
+    public StagingXmlStreamingService(DynamicXmlUnmarshaller dynamicXmlUnmarshaller, ObjectMapper objectMapper) {
+        this(dynamicXmlUnmarshaller, objectMapper, null);
     }
 
     @FunctionalInterface
@@ -138,6 +148,20 @@ public class StagingXmlStreamingService {
                                             long resumeFromRecordIndex,
                                             java.util.function.BooleanSupplier cancellationChecker,
                                             StreamingProgressCallback progressCallback) throws Exception {
+        return streamXmlToStaging(sourceXmlPath, recordRootElements, xmlVersion, schemaVersion, jobExecutionId, null, targetDataSource, chunkSize, resumeFromRecordIndex, cancellationChecker, progressCallback);
+    }
+
+    public StagingSummary streamXmlToStaging(String sourceXmlPath,
+                                            List<String> recordRootElements,
+                                            String xmlVersion,
+                                            String schemaVersion,
+                                            Long jobExecutionId,
+                                            String fileId,
+                                            DataSource targetDataSource,
+                                            int chunkSize,
+                                            long resumeFromRecordIndex,
+                                            java.util.function.BooleanSupplier cancellationChecker,
+                                            StreamingProgressCallback progressCallback) throws Exception {
         long startTime = System.currentTimeMillis();
         clearColumnCache();
         String docRoot = detectDocRoot(sourceXmlPath);
@@ -165,12 +189,29 @@ public class StagingXmlStreamingService {
         for (String r : effectiveRoots) {
             String norm = r.trim().toLowerCase();
             rootTagLookup.put(norm, r.trim());
-            String singular = DynamicXmlUnmarshaller.singularize(norm);
+            String stripped = norm.replaceFirst("^gs_", "");
+            rootTagLookup.put(stripped, r.trim());
+            String singular = DynamicXmlUnmarshaller.singularize(stripped);
             if (!singular.isEmpty() && !XmlSchemaDiscoveryService.isWrapperContainerTag(singular, docRoot)) {
                 rootTagLookup.put(singular, r.trim());
             }
-            if (norm.contains("country")) {
+            if (norm.contains("country") || stripped.contains("country")) {
                 rootTagLookup.put("countryname", r.trim());
+                rootTagLookup.put("country", r.trim());
+            }
+            if (norm.contains("sanction") || stripped.contains("sanction") || norm.contains("reference") || stripped.contains("reference")) {
+                rootTagLookup.put("referencename", r.trim());
+                rootTagLookup.put("sanctionsreference", r.trim());
+                rootTagLookup.put("reference", r.trim());
+            }
+            if (norm.contains("occupation") || stripped.contains("occupation")) {
+                rootTagLookup.put("occupation", r.trim());
+            }
+            if (norm.contains("relationship") || stripped.contains("relation")) {
+                rootTagLookup.put("relationship", r.trim());
+            }
+            if (norm.contains("person") || stripped.contains("person")) {
+                rootTagLookup.put("person", r.trim());
             }
         }
         if (rootTagLookup.isEmpty()) {
@@ -300,6 +341,10 @@ public class StagingXmlStreamingService {
                                         payloadHash
                                 );
                                 record.setBnppId(bnppId);
+                                record.setSourceBnppId(bnppId);
+                                record.setStagingBnppId(bnppId);
+                                record.setHistoryIds("[" + bnppId + "]");
+                                record.setFileId(fileId);
                                 record.setTagName(matchedRoot);
                                 record.setVersionNumber(batchVer);
                                 record.setXmlVersion(recXmlVersion);
@@ -345,6 +390,13 @@ public class StagingXmlStreamingService {
                             log.error("Failed to unmarshal XML fragment #{} for element '{}': {}. Skipping to next record...", currentTotal, matchedRoot, ex.getMessage());
                             recordMigrationError(jdbcTemplate, jobExecutionId, "STAGE_1_UNMARSHAL",
                                     "{\"recordNumber\": " + currentTotal + ", \"element\": \"" + matchedRoot + "\", \"error\": \"" + ex.getMessage().replace("\"", "\\\"") + "\"}", ex);
+                            if (systemLoggingService != null) {
+                                try {
+                                    systemLoggingService.logError(targetDataSource, fileId, jobExecutionId, matchedRoot, String.valueOf(currentTotal),
+                                            "ERROR", "XML_UNMARSHAL_ERROR", ex.getMessage(), ex,
+                                            "{\"recordNumber\": " + currentTotal + ", \"element\": \"" + matchedRoot + "\"}");
+                                } catch (Exception ignored) {}
+                            }
                         }
                         continue;
                     }
@@ -708,15 +760,26 @@ public class StagingXmlStreamingService {
     }
 
     private void flushToSpecificFlatTables(JdbcTemplate jdbcTemplate, List<StagingXmlRecord> records) {
-        Map<String, List<StagingXmlRecord>> byEntity = new HashMap<>();
+        Map<String, List<StagingXmlRecord>> byEntity = new LinkedHashMap<>();
         for (StagingXmlRecord r : records) {
             if (r.getEntityType() != null) {
                 byEntity.computeIfAbsent(r.getEntityType(), k -> new ArrayList<>()).add(r);
             }
         }
 
-        for (Map.Entry<String, List<StagingXmlRecord>> entry : byEntity.entrySet()) {
-            String entityType = entry.getKey();
+        List<String> entityOrder = new ArrayList<>(byEntity.keySet());
+        entityOrder.sort((e1, e2) -> {
+            String n1 = e1.toLowerCase();
+            String n2 = e2.toLowerCase();
+            if (n1.contains("list") && !n2.contains("list")) return -1;
+            if (!n1.contains("list") && n2.contains("list")) return 1;
+            if (n1.equals("person") && n2.startsWith("person") && !n2.equals("person")) return -1;
+            if (n2.equals("person") && n1.startsWith("person") && !n1.equals("person")) return 1;
+            return 0;
+        });
+
+        for (String entityType : entityOrder) {
+            List<StagingXmlRecord> group = byEntity.get(entityType);
             String norm = entityType.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
             String singular = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(norm);
             String plural = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.pluralize(norm);
@@ -735,7 +798,6 @@ public class StagingXmlStreamingService {
                 continue;
             }
 
-            List<StagingXmlRecord> group = entry.getValue();
             for (String flatTable : targetFlatTables) {
                 Set<String> tableCols = getTableColumns(jdbcTemplate, flatTable);
                 if (tableCols.isEmpty()) tableCols = getTableColumns(jdbcTemplate, flatTable.toUpperCase());
@@ -748,8 +810,8 @@ public class StagingXmlStreamingService {
     private void flushRecordsToTargetFlatTable(JdbcTemplate jdbcTemplate, String flatTable, Set<String> effectiveCols, List<StagingXmlRecord> group) {
         try {
             List<String> insertCols = new ArrayList<>(List.of(
-                    "job_execution_id", "bnpp_id", "tag_name", "version_number",
-                    "record_identifier", "record_action", "record_date",
+                    "job_execution_id", "file_id", "bnpp_id", "source_bnpp_id", "staging_bnpp_id", "history_ids",
+                    "tag_name", "version_number", "record_identifier", "record_action", "record_date",
                     "xml_version", "schema_version", "payload_hash", "status", "raw_payload"
             ));
             insertCols.removeIf(c -> !effectiveCols.contains(c.toLowerCase()));
@@ -800,7 +862,11 @@ public class StagingXmlStreamingService {
                             if (r.getJobExecutionId() != null) ps.setLong(idx++, r.getJobExecutionId());
                             else ps.setNull(idx++, java.sql.Types.BIGINT);
                         }
+                        case "file_id" -> ps.setString(idx++, r.getFileId());
                         case "bnpp_id" -> ps.setString(idx++, r.getBnppId());
+                        case "source_bnpp_id" -> ps.setString(idx++, r.getSourceBnppId() != null ? r.getSourceBnppId() : r.getBnppId());
+                        case "staging_bnpp_id" -> ps.setString(idx++, r.getStagingBnppId() != null ? r.getStagingBnppId() : r.getBnppId());
+                        case "history_ids" -> ps.setString(idx++, r.getHistoryIds() != null ? r.getHistoryIds() : ("[" + r.getBnppId() + "]"));
                         case "tag_name" -> ps.setString(idx++, r.getTagName() != null ? r.getTagName() : r.getEntityType());
                         case "version_number" -> ps.setInt(idx++, r.getVersionNumber() != null ? r.getVersionNumber() : 1);
                         case "record_identifier" -> ps.setString(idx++, r.getRecordIdentifier());
@@ -1202,7 +1268,7 @@ public class StagingXmlStreamingService {
     }
 
     public static String generateBnppId(String entityType, String recordIdentifier, Map<String, Object> map) {
-        return UUID.randomUUID().toString();
+        return com.enterprise.xmldbtool.util.BnppIdGenerator.generateId("BNPP");
     }
 
     public static int extractVersionNumber(String... candidates) {

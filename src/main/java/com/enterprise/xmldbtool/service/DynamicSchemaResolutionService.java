@@ -7,6 +7,7 @@ import com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller;
 import com.enterprise.xmldbtool.model.DatabaseRowPayload;
 import com.enterprise.xmldbtool.model.FieldMapping;
 import com.enterprise.xmldbtool.model.StagingXmlRecord;
+import com.enterprise.xmldbtool.util.BnppIdGenerator;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -52,10 +53,57 @@ public class DynamicSchemaResolutionService {
             long elapsedTimeMs
     ) {}
 
-    public record ExistingRecordInfo(String bnppId, String payloadHash, Integer versionNumber) {}
+    public record ExistingRecordInfo(String bnppId, String payloadHash, Integer versionNumber, String historyIds, String sourceBnppId) {
+        public ExistingRecordInfo(String bnppId, String payloadHash, Integer versionNumber, String historyIds) {
+            this(bnppId, payloadHash, versionNumber, historyIds, null);
+        }
+    }
+
+    private final SystemLoggingService systemLoggingService;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public DynamicSchemaResolutionService(ObjectMapper objectMapper,
+                                          @org.springframework.beans.factory.annotation.Autowired(required = false) SystemLoggingService systemLoggingService) {
+        this.objectMapper = objectMapper;
+        this.systemLoggingService = systemLoggingService;
+    }
 
     public DynamicSchemaResolutionService(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
+        this(objectMapper, null);
+    }
+
+    public static String appendHistoryId(String existingHistoryIds, String newId) {
+        if (newId == null || newId.trim().isEmpty()) return existingHistoryIds;
+        List<String> list = new ArrayList<>();
+        if (existingHistoryIds != null && !existingHistoryIds.trim().isEmpty()) {
+            String s = existingHistoryIds.trim();
+            if (s.startsWith("[") && s.endsWith("]")) {
+                s = s.substring(1, s.length() - 1);
+                for (String item : s.split(",")) {
+                    String clean = item.trim().replace("\"", "").replace("'", "");
+                    if (!clean.isEmpty() && !list.contains(clean)) {
+                        list.add(clean);
+                    }
+                }
+            } else {
+                for (String item : s.split(",")) {
+                    String clean = item.trim().replace("\"", "").replace("'", "");
+                    if (!clean.isEmpty() && !list.contains(clean)) {
+                        list.add(clean);
+                    }
+                }
+            }
+        }
+        if (!list.contains(newId.trim())) {
+            list.add(newId.trim());
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append("\"").append(list.get(i)).append("\"");
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     @FunctionalInterface
@@ -160,7 +208,11 @@ public class DynamicSchemaResolutionService {
 
                 String selected = null;
                 for (String candidate : List.of(gsPrefixDirect, gsPrefixSingular, gsPrefixPlural, directGs, singularGs, pluralGs, directFlat, singularFlat, pluralFlat)) {
-                    if (candidate.equalsIgnoreCase("gs_error_records") || candidate.equalsIgnoreCase("migration_errors") || candidate.equalsIgnoreCase("staging_xml_records")) {
+                    if (candidate.equalsIgnoreCase("gs_error_records") || candidate.equalsIgnoreCase("migration_errors")
+                            || candidate.equalsIgnoreCase("staging_xml_records") || candidate.equalsIgnoreCase("gs_file_history")
+                            || candidate.equalsIgnoreCase("gs_audit_log") || candidate.equalsIgnoreCase("gs_error_log")
+                            || candidate.equalsIgnoreCase("file_history") || candidate.equalsIgnoreCase("audit_log")
+                            || candidate.equalsIgnoreCase("error_log")) {
                         continue;
                     }
                     if (tableExists(jdbcTemplate, candidate)) {
@@ -491,6 +543,13 @@ public class DynamicSchemaResolutionService {
                 if (skipListener != null) {
                     skipListener.recordError("STAGE_2_PROJECTION", record.getRawPayload(), ex);
                 }
+                if (systemLoggingService != null) {
+                    try {
+                        systemLoggingService.logError(jdbcTemplate.getDataSource(), record.getFileId(), record.getJobExecutionId(),
+                                record.getEntityType(), record.getRecordIdentifier(), "ERROR", "STAGE_2_PROJECTION_ERROR",
+                                ex.getMessage(), ex, record.getRawPayload());
+                    } catch (Exception ignored) {}
+                }
             }
         }
 
@@ -535,6 +594,13 @@ public class DynamicSchemaResolutionService {
                             if (skipListener != null) {
                                 skipListener.recordError("STAGE_2_CANONICAL_WRITE", rec.getRawPayload(), singleEx);
                             }
+                            if (systemLoggingService != null) {
+                                try {
+                                    systemLoggingService.logError(jdbcTemplate.getDataSource(), rec.getFileId(), rec.getJobExecutionId(),
+                                            rec.getEntityType(), rec.getRecordIdentifier(), "ERROR", "CANONICAL_WRITE_ERROR",
+                                            singleEx.getMessage(), singleEx, rec.getRawPayload());
+                                } catch (Exception ignored) {}
+                            }
                         }
                     }
                 }
@@ -569,16 +635,35 @@ public class DynamicSchemaResolutionService {
             for (Map<String, Object> row : rows) {
                 if (row == null) continue;
 
-                // 1. Resolve bnpp_id: each canonical destination table row gets its own unique UUID
+                // 1. Resolve bnpp_id: each canonical destination table row gets its own sequential alphanumeric ID
                 String existingBnpp = (String) row.get("bnpp_id");
                 if (existingBnpp == null || existingBnpp.trim().isEmpty()) {
-                    row.put("bnpp_id", UUID.randomUUID().toString());
+                    row.put("bnpp_id", BnppIdGenerator.generateId("BNPP"));
                 }
 
-                // 1b. Reference flat/staging table's bnpp_id UUID
-                if (record != null && record.getBnppId() != null) {
-                    row.put("source_bnpp_id", record.getBnppId());
-                    row.put("staging_bnpp_id", record.getBnppId());
+                // 1b. Reference flat/staging table's bnpp_id and file_id
+                String sourceBnpp = (record != null && record.getSourceBnppId() != null) ? record.getSourceBnppId()
+                        : (record != null && record.getBnppId() != null) ? record.getBnppId()
+                        : (String) row.get("source_bnpp_id");
+                if (sourceBnpp == null) sourceBnpp = (String) row.get("bnpp_id");
+
+                String stagingBnpp = (record != null && record.getStagingBnppId() != null) ? record.getStagingBnppId()
+                        : (record != null && record.getBnppId() != null) ? record.getBnppId()
+                        : (String) row.get("staging_bnpp_id");
+                if (stagingBnpp == null) stagingBnpp = (String) row.get("bnpp_id");
+
+                row.put("source_bnpp_id", sourceBnpp);
+                row.put("staging_bnpp_id", stagingBnpp);
+
+                // Backtracking: seed history_ids with source staging bnpp_id
+                String existingHist = (String) row.get("history_ids");
+                if (existingHist == null && record != null) {
+                    existingHist = record.getHistoryIds();
+                }
+                row.put("history_ids", appendHistoryId(existingHist, stagingBnpp));
+
+                if (record != null && record.getFileId() != null) {
+                    row.put("file_id", record.getFileId());
                 }
 
                 // 2. Set tag_name
@@ -608,7 +693,7 @@ public class DynamicSchemaResolutionService {
                                    Map<String, Object> row,
                                    StagingXmlRecord record,
                                    List<FieldMapping> mappings) {
-        return UUID.randomUUID().toString();
+        return BnppIdGenerator.generateId("BNPP");
     }
 
     /**
@@ -656,13 +741,24 @@ public class DynamicSchemaResolutionService {
                         continue;
                     } else {
                         // Case 2: Changed record in delta upload
-                        // Retain existing canonical UUID bnpp_id so row identity is stable
+                        // Retain existing canonical sequential bnpp_id so row identity is stable
                         if (existing.bnppId() != null) {
                             row.put("bnpp_id", existing.bnppId());
+                        }
+                        // Preserve original starting bnpp_id across updates
+                        String startingBnpp = existing.sourceBnppId() != null ? existing.sourceBnppId() : existing.bnppId();
+                        if (startingBnpp != null) {
+                            row.put("source_bnpp_id", startingBnpp);
                         }
                         int nextVersion = (existing.versionNumber() != null ? existing.versionNumber() : 1) + 1;
                         row.put("version_number", nextVersion);
                         row.put("updated_at", new Timestamp(System.currentTimeMillis()));
+
+                        // Backtracking: append new historical bnpp_id to history_ids
+                        String histId = (String) row.get("staging_bnpp_id");
+                        if (histId == null) histId = (String) row.get("bnpp_id");
+                        String updatedHistory = appendHistoryId(existing.historyIds(), histId);
+                        row.put("history_ids", updatedHistory);
 
                         String dedupeKey = lookupKey != null ? lookupKey : (String) row.get("bnpp_id");
                         if (dedupeKey != null && keyToIndex.containsKey(dedupeKey)) {
@@ -674,7 +770,7 @@ public class DynamicSchemaResolutionService {
 
                         if (lookupKey != null) {
                             String activeBnpp = (row.get("bnpp_id") != null) ? (String) row.get("bnpp_id") : existing.bnppId();
-                            existingMap.put(lookupKey, new ExistingRecordInfo(activeBnpp, incomingHash, nextVersion));
+                            existingMap.put(lookupKey, new ExistingRecordInfo(activeBnpp, incomingHash, nextVersion, updatedHistory, startingBnpp));
                         }
                     }
                 } else {
@@ -682,6 +778,17 @@ public class DynamicSchemaResolutionService {
                     row.put("version_number", 1);
                     row.put("created_at", new Timestamp(System.currentTimeMillis()));
                     row.put("updated_at", new Timestamp(System.currentTimeMillis()));
+
+                    // Backtracking: seed history_ids with source staging bnpp_id
+                    String histId = (String) row.get("source_bnpp_id");
+                    if (histId == null) histId = (String) row.get("staging_bnpp_id");
+                    if (histId == null) histId = (String) row.get("bnpp_id");
+                    row.put("source_bnpp_id", histId);
+                    if (row.get("staging_bnpp_id") == null) {
+                        row.put("staging_bnpp_id", histId);
+                    }
+                    String newHistory = appendHistoryId((String) row.get("history_ids"), histId);
+                    row.put("history_ids", newHistory);
 
                     String dedupeKey = lookupKey != null ? lookupKey : (String) row.get("bnpp_id");
                     if (dedupeKey != null && keyToIndex.containsKey(dedupeKey)) {
@@ -693,7 +800,7 @@ public class DynamicSchemaResolutionService {
 
                     if (lookupKey != null) {
                         String assignedBnpp = (String) row.get("bnpp_id");
-                        existingMap.put(lookupKey, new ExistingRecordInfo(assignedBnpp, incomingHash, 1));
+                        existingMap.put(lookupKey, new ExistingRecordInfo(assignedBnpp, incomingHash, 1, newHistory, histId));
                     }
                 }
             }
@@ -790,7 +897,7 @@ public class DynamicSchemaResolutionService {
         for (int i = 0; i < valList.size(); i += batchSize) {
             List<Object> subList = valList.subList(i, Math.min(valList.size(), i + batchSize));
             String inClause = String.join(",", Collections.nCopies(subList.size(), "?"));
-            String sql = "SELECT " + matchCol + ", bnpp_id, payload_hash, version_number FROM " + tableName + " WHERE " + matchCol + " IN (" + inClause + ")";
+            String sql = "SELECT " + matchCol + ", bnpp_id, payload_hash, version_number, history_ids, source_bnpp_id FROM " + tableName + " WHERE " + matchCol + " IN (" + inClause + ")";
             try {
                 jdbcTemplate.query(sql, rs -> {
                     java.sql.ResultSetMetaData md = rs.getMetaData();
@@ -798,33 +905,41 @@ public class DynamicSchemaResolutionService {
                     String bid = null;
                     String hash = null;
                     int ver = 1;
+                    String hist = null;
+                    String srcBid = null;
                     for (int c = 1; c <= md.getColumnCount(); c++) {
                         String cn = md.getColumnName(c);
                         if (cn.equalsIgnoreCase("bnpp_id")) bid = rs.getString(c);
                         else if (cn.equalsIgnoreCase("payload_hash")) hash = rs.getString(c);
                         else if (cn.equalsIgnoreCase("version_number")) ver = rs.getInt(c);
+                        else if (cn.equalsIgnoreCase("history_ids")) hist = rs.getString(c);
+                        else if (cn.equalsIgnoreCase("source_bnpp_id")) srcBid = rs.getString(c);
                     }
                     if (key != null) {
-                        map.put(key, new ExistingRecordInfo(bid, hash, ver));
+                        map.put(key, new ExistingRecordInfo(bid, hash, ver, hist, srcBid));
                     }
                 }, subList.toArray());
             } catch (Exception qEx) {
                 try {
-                    String quotedSql = "SELECT \"" + matchCol + "\", bnpp_id, payload_hash, version_number FROM \"" + tableName + "\" WHERE \"" + matchCol + "\" IN (" + inClause + ")";
+                    String quotedSql = "SELECT \"" + matchCol + "\", bnpp_id, payload_hash, version_number, history_ids, source_bnpp_id FROM \"" + tableName + "\" WHERE \"" + matchCol + "\" IN (" + inClause + ")";
                     jdbcTemplate.query(quotedSql, rs -> {
                         java.sql.ResultSetMetaData md = rs.getMetaData();
                         String key = rs.getString(1);
                         String bid = null;
                         String hash = null;
                         int ver = 1;
+                        String hist = null;
+                        String srcBid = null;
                         for (int c = 1; c <= md.getColumnCount(); c++) {
                             String cn = md.getColumnName(c);
                             if (cn.equalsIgnoreCase("bnpp_id")) bid = rs.getString(c);
                             else if (cn.equalsIgnoreCase("payload_hash")) hash = rs.getString(c);
                             else if (cn.equalsIgnoreCase("version_number")) ver = rs.getInt(c);
+                            else if (cn.equalsIgnoreCase("history_ids")) hist = rs.getString(c);
+                            else if (cn.equalsIgnoreCase("source_bnpp_id")) srcBid = rs.getString(c);
                         }
                         if (key != null) {
-                            map.put(key, new ExistingRecordInfo(bid, hash, ver));
+                            map.put(key, new ExistingRecordInfo(bid, hash, ver, hist, srcBid));
                         }
                     }, subList.toArray());
                 } catch (Exception ignored) {}
@@ -918,8 +1033,19 @@ public class DynamicSchemaResolutionService {
             StagingXmlRecord r = new StagingXmlRecord();
             r.setId(rs.getLong("id"));
             try { r.setJobExecutionId(rs.getLong("job_execution_id")); } catch (Exception ignored) {}
+            try { r.setFileId(rs.getString("file_id")); } catch (Exception ignored) {}
             try { r.setBnppId(rs.getString("bnpp_id")); } catch (Exception ignored) {}
+            try { r.setSourceBnppId(rs.getString("source_bnpp_id")); } catch (Exception ignored) {}
+            try { r.setStagingBnppId(rs.getString("staging_bnpp_id")); } catch (Exception ignored) {}
+            try { r.setHistoryIds(rs.getString("history_ids")); } catch (Exception ignored) {}
             try { r.setTagName(rs.getString("tag_name")); } catch (Exception ignored) {}
+            try {
+                if (r.getTagName() == null || r.getTagName().isEmpty()) r.setTagName(rs.getString("entity_type"));
+            } catch (Exception ignored) {}
+            try { r.setEntityType(rs.getString("entity_type")); } catch (Exception ignored) {}
+            try {
+                if (r.getEntityType() == null || r.getEntityType().isEmpty()) r.setEntityType(rs.getString("tag_name"));
+            } catch (Exception ignored) {}
             try { r.setVersionNumber(rs.getInt("version_number")); } catch (Exception ignored) {}
             try { r.setRecordIdentifier(rs.getString("record_identifier")); } catch (Exception ignored) {}
             try { r.setRecordAction(rs.getString("record_action")); } catch (Exception ignored) {}
@@ -1093,6 +1219,13 @@ public class DynamicSchemaResolutionService {
         }
     }
 
+    private static final Set<String> SYSTEM_METADATA_TABLES = Set.of(
+            "file_history", "audit_log", "error_log", "users", "app_users",
+            "saved_job_configs", "job_details", "job_checkpoints",
+            "schema_registry_versions", "migration_errors", "staging_xml_records",
+            "gs_error_records"
+    );
+
     private List<FieldMapping> autoDeriveMappingsFromTargetTables(JdbcTemplate jdbcTemplate, List<String> tableOrder, String masterTable) {
         List<FieldMapping> generated = new ArrayList<>();
         if (jdbcTemplate == null || jdbcTemplate.getDataSource() == null) return generated;
@@ -1109,15 +1242,30 @@ public class DynamicSchemaResolutionService {
                         String t = rs.getString("TABLE_NAME");
                         if (t != null) {
                             String norm = t.toLowerCase();
-                            if (!norm.startsWith("gs_") && !norm.endsWith("_flat") && !norm.endsWith("_gs") && !norm.startsWith("staging_") && !norm.startsWith("batch_")) {
+                            if (!norm.startsWith("gs_") && !norm.endsWith("_flat") && !norm.endsWith("_gs")
+                                    && !norm.startsWith("staging_") && !norm.startsWith("batch_")
+                                    && !SYSTEM_METADATA_TABLES.contains(norm)) {
                                 tables.add(t);
                             }
                         }
                     }
                 }
             } catch (Exception ignored) {}
-            if (tables.isEmpty() && masterTable != null) {
-                tables.add(masterTable);
+            if (masterTable != null && !masterTable.trim().isEmpty()) {
+                String mNorm = masterTable.trim().toLowerCase();
+                String found = null;
+                for (String t : tables) {
+                    if (t.equalsIgnoreCase(mNorm)) {
+                        found = t;
+                        break;
+                    }
+                }
+                if (found != null) {
+                    tables.remove(found);
+                    tables.add(0, found);
+                } else {
+                    tables.add(0, masterTable.trim());
+                }
             }
         }
 
@@ -1141,7 +1289,9 @@ public class DynamicSchemaResolutionService {
                                     && !colName.equalsIgnoreCase("staging_bnpp_id")
                                     && !colName.equalsIgnoreCase("version_number")
                                     && !colName.equalsIgnoreCase("tag_name")
-                                    && !colName.equalsIgnoreCase("payload_hash")) {
+                                    && !colName.equalsIgnoreCase("payload_hash")
+                                    && !colName.equalsIgnoreCase("history_ids")
+                                    && !colName.equalsIgnoreCase("file_id")) {
 
                                 boolean isPk = colName.equalsIgnoreCase("id") || colName.equalsIgnoreCase(tbl + "_id");
                                 boolean isFk = !isPk && colName.toLowerCase().endsWith("_id");

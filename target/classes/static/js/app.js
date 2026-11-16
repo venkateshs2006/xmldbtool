@@ -551,6 +551,41 @@ function initStepHandlers() {
         });
     }
 
+    // Step 2: XML File Upload & Root Detection
+    const step2XmlFileInput = document.getElementById('step2-xml-file-input');
+    if (step2XmlFileInput) {
+        step2XmlFileInput.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            showToast(`Uploading XML file '${file.name}'...`, 'info', 'File Upload');
+            try {
+                const response = await fetch('/api/files/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    const xmlInput = document.getElementById('xml-file-path');
+                    if (xmlInput) xmlInput.value = result.filePath;
+                    AppState.source.filePath = result.filePath;
+                    AppState.source.xmlFileName = result.fileName;
+                    AppState.source.fileSizeKb = result.fileSizeKb;
+                    showToast(`XML file uploaded successfully (${result.fileSizeKb} KB)`, 'success', 'XML Ready');
+                    clearTimeout(detectRootsDebounceTimer);
+                    detectCandidateRootsFromInput(true);
+                } else {
+                    showToast(result.message || 'Failed to upload XML file.', 'error', 'Upload Error');
+                }
+            } catch (err) {
+                showToast(err.message || 'Network error uploading XML file.', 'error', 'Upload Error');
+            } finally {
+                e.target.value = '';
+            }
+        });
+    }
+
     const btnDetectRoots = document.getElementById('btn-detect-xml-roots');
     if (btnDetectRoots) {
         btnDetectRoots.addEventListener('click', () => {
@@ -1636,6 +1671,13 @@ async function createTargetTablesInDb() {
         btn.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i> Creating Tables...`;
     }
 
+    const distinctMappedTables = Array.from(new Set(mappings.map(m => m.targetTable).filter(Boolean)));
+    const entityRoots = new Set(distinctMappedTables);
+    if (AppState.source.rootElement) {
+        AppState.source.rootElement.split(',').map(s => s.trim()).filter(Boolean).forEach(r => entityRoots.add(r));
+    }
+    if (entityRoots.size === 0) entityRoots.add('record');
+
     const payload = {
         dbConfig: {
             engine: AppState.dbConnection.engine,
@@ -1648,8 +1690,8 @@ async function createTargetTablesInDb() {
             url: AppState.dbConnection.url
         },
         sourceXmlPath: AppState.source.filePath,
-        recordRootElement: AppState.source.rootElement,
-        recordRootElements: AppState.source.rootElement ? AppState.source.rootElement.split(',').map(s => s.trim()).filter(Boolean) : ['record'],
+        recordRootElement: Array.from(entityRoots).join(', '),
+        recordRootElements: Array.from(entityRoots),
         xmlVersion: AppState.source.xmlVersion,
         schemaVersion: AppState.source.schemaVersion,
         sampleLinesLimit: 1000,
@@ -1672,8 +1714,10 @@ async function createTargetTablesInDb() {
             AppState.schema.stagingTables = result.stagingTables || [];
             renderFlattenedTablesBanner(result.createdFlatTables || []);
             renderDiscoveredSchema();
+            updateStep2IngestionStatus();
             const count = AppState.schema.tables.length;
-            showToast(`Successfully created ${count} canonical tables and flat table gs_<entity> based strictly on ingestion.json.`, 'success', 'Tables Provisioned');
+            const flatCount = (result.createdFlatTables || []).length;
+            showToast(`Successfully created ${count} canonical tables and ${flatCount} matching gs_<entity> flat tables strictly from ingestion.json.`, 'success', 'Tables Provisioned');
         } else {
             showToast(result.message || 'Failed to create tables.', 'error', 'Creation Error');
         }
@@ -1741,6 +1785,12 @@ function autoAlignMappings() {
 
     // 1. Based on ingestion file, define mapping and auto assign xml tags, target table, and destination columns
     if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
+        const distinctTables = Array.from(new Set(AppState.mapping.fieldMappings.map(m => m.targetTable).filter(Boolean)));
+        distinctTables.forEach(t => {
+            if (!AppState.schema.tables.some(st => st.tableName.toLowerCase() === t.toLowerCase())) {
+                AppState.schema.tables.push({ tableName: t, columns: [] });
+            }
+        });
         container.innerHTML = '';
         AppState.mapping.fieldMappings.forEach(m => {
             addMappingRow(
@@ -2012,10 +2062,13 @@ function updateTableSequenceBanner() {
 
     let html = '';
     sortedTables.forEach((tbl, idx) => {
+        const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+        const gsName = cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl;
         html += `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white border border-gray-300 text-gray-800 text-[11px] font-bold shadow-xs">
                 <span class="w-4 h-4 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${idx + 1}</span>
                 <span>${escapeHtml(tbl)}</span>
+                <span class="text-gray-500 font-mono text-[9px]">(${escapeHtml(gsName)})</span>
             </span>
         `;
         if (idx < sortedTables.length - 1) {
@@ -2024,7 +2077,7 @@ function updateTableSequenceBanner() {
     });
 
     badgesContainer.innerHTML = html;
-    summaryText.textContent = `${rows.length} mappings configured across ${sortedTables.length} tables (FK parent-first sequence)`;
+    summaryText.textContent = `${rows.length} mappings configured across ${sortedTables.length} tables from ingestion.json (Canonical & gs_<entity> pairs)`;
 }
 
 function sortTablesByFkDependencies(tables, mappedColsByTable) {
@@ -2189,7 +2242,7 @@ function showJobConfigurationOverview() {
     // 4. Mapping count badge
     const mappingBadge = document.getElementById('review-mapping-count-badge');
     if (mappingBadge) {
-        mappingBadge.textContent = `${mappings.length} Mapped Fields across ${mappedTables.length} Canonical Tables`;
+        mappingBadge.textContent = `${mappings.length} Mapped Fields across ${mappedTables.length} Tables (from ingestion.json)`;
     }
 
     // 5. Populate flat staging tables list (<entity>_flat)
@@ -2197,15 +2250,18 @@ function showJobConfigurationOverview() {
     if (flatListContainer) {
         flatListContainer.innerHTML = '';
         const flatTableNames = new Set();
-        const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
-        rootTokens.forEach(rt => {
-            const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-            flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
-        });
-        mappedTables.forEach(mt => {
-            const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-            flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
-        });
+        if (mappedTables.length > 0) {
+            mappedTables.forEach(mt => {
+                const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+                flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
+            });
+        } else {
+            const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
+            rootTokens.forEach(rt => {
+                const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+                flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
+            });
+        }
 
         flatTableNames.forEach(ft => {
             const pill = document.createElement('span');
@@ -2288,9 +2344,13 @@ async function saveJobConfiguration(runImmediately = false, isSubmitApproval = f
         approvalStatus = 'DRAFT';
     }
 
+    const vendorNameInput = document.getElementById('vendor-name-input');
+    const vendorName = vendorNameInput ? vendorNameInput.value.trim() : 'VENDOR_A';
+
     const payload = {
         jobName,
         description,
+        vendorName: vendorName || 'VENDOR_A',
         sourceXmlPath: AppState.source.filePath,
         recordRootElement: AppState.source.rootElement,
         recordRootElements: rootTags,
@@ -2484,12 +2544,25 @@ function updateStep2IngestionStatus() {
     }
 
     if (flatList) {
-        const flatTags = rootTokens.length > 0 ? rootTokens : (distinctTables.length > 0 ? distinctTables : ['record']);
-        flatList.innerHTML = flatTags.map(t => {
-            const clean = t.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-            const gsName = clean.startsWith('gs_') ? clean : 'gs_' + clean;
-            return `<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 font-bold">${escapeHtml(gsName)}</span>`;
-        }).join(' ');
+        if (distinctTables.length > 0) {
+            flatList.innerHTML = distinctTables.map(t => {
+                const clean = t.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+                const gsName = clean.startsWith('gs_') ? clean : 'gs_' + clean;
+                return `<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 font-bold">${escapeHtml(gsName)}</span>`;
+            }).join(' ');
+        } else {
+            flatList.innerHTML = '<span class="text-gray-400 italic">Defined in ingestion.json (e.g. gs_&lt;entity&gt;)</span>';
+        }
+    }
+
+    // Keep XML Root input aligned with distinct entities from ingestion.json
+    if (distinctTables.length > 0) {
+        const rootInput = document.getElementById('xml-root-element');
+        if (rootInput && (!rootInput.value.trim() || rootInput.value === 'record')) {
+            const joinedRoots = distinctTables.map(t => t.toLowerCase()).join(', ');
+            rootInput.value = joinedRoots;
+            AppState.source.rootElement = joinedRoots;
+        }
     }
 }
 
@@ -2627,10 +2700,24 @@ function handleIngestionJsonFileUpload(file, autoApply = true) {
             const textarea = document.getElementById('json-mapping-textarea');
             if (textarea) textarea.value = text;
 
+            const distinctTables = Array.from(new Set(mappings.map(m => m.targetTable).filter(Boolean)));
+            distinctTables.forEach(t => {
+                if (!AppState.schema.tables.some(st => st.tableName.toLowerCase() === t.toLowerCase())) {
+                    AppState.schema.tables.push({ tableName: t, columns: [] });
+                }
+            });
+
             if (rootElem) {
                 const rootInput = document.getElementById('xml-root-element');
                 if (rootInput) rootInput.value = rootElem;
                 AppState.source.rootElement = rootElem;
+            } else if (distinctTables.length > 0) {
+                const joinedRoots = distinctTables.map(t => t.toLowerCase()).join(', ');
+                const rootInput = document.getElementById('xml-root-element');
+                if (rootInput && (!rootInput.value.trim() || rootInput.value === 'record')) {
+                    rootInput.value = joinedRoots;
+                }
+                AppState.source.rootElement = joinedRoots;
             }
             if (chunkSize) {
                 const chunkInput = document.getElementById('batch-chunk-size');
@@ -2639,6 +2726,8 @@ function handleIngestionJsonFileUpload(file, autoApply = true) {
             }
             if (tableOrder && tableOrder.length > 0) {
                 AppState.mapping.tableOrder = tableOrder;
+            } else if (distinctTables.length > 0) {
+                AppState.mapping.tableOrder = distinctTables;
             }
 
             AppState.ingestionJsonUploadedOrModified = true;
@@ -2769,6 +2858,26 @@ function applyJsonMapping() {
                 AppState.ingestionJsonFileName = 'Custom Ingestion JSON';
             }
             AppState.ingestionJsonSource = 'editor';
+
+            const distinctTables = Array.from(new Set(mappings.map(m => m.targetTable).filter(Boolean)));
+            distinctTables.forEach(t => {
+                if (!AppState.schema.tables.some(st => st.tableName.toLowerCase() === t.toLowerCase())) {
+                    AppState.schema.tables.push({ tableName: t, columns: [] });
+                }
+            });
+            if (distinctTables.length > 0) {
+                if (!tableOrder || tableOrder.length === 0) {
+                    AppState.mapping.tableOrder = distinctTables;
+                }
+                if (!rootElem) {
+                    const joinedRoots = distinctTables.map(t => t.toLowerCase()).join(', ');
+                    const rootInput = document.getElementById('xml-root-element');
+                    if (rootInput && (!rootInput.value.trim() || rootInput.value === 'record')) {
+                        rootInput.value = joinedRoots;
+                    }
+                    AppState.source.rootElement = joinedRoots;
+                }
+            }
 
             const container = document.getElementById('mapping-rows-container');
             if (container) {
@@ -3251,12 +3360,17 @@ function openReviewModal(job) {
     // Table order badges
     const tableOrderDiv = document.getElementById('review-modal-table-order');
     if (job.tableOrder && job.tableOrder.length > 0) {
-        tableOrderDiv.innerHTML = job.tableOrder.map((tbl, i) => `
-            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-bnp-emerald font-bold text-xs">
+        tableOrderDiv.innerHTML = job.tableOrder.map((tbl, i) => {
+            const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+            const gsName = cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl;
+            return `
+            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-bnp-emerald font-bold text-xs">
                 <span class="w-3.5 h-3.5 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${i + 1}</span>
                 <span>${escapeHtml(tbl)}</span>
+                <span class="text-gray-500 font-mono text-[9px] font-normal">(${escapeHtml(gsName)})</span>
             </span>
-        `).join('<i class="fas fa-arrow-right text-[10px] text-gray-400 self-center"></i>');
+        `;
+        }).join('<i class="fas fa-arrow-right text-[10px] text-gray-400 self-center"></i>');
     } else {
         tableOrderDiv.innerHTML = `<span class="text-gray-400 italic">Single Table (${escapeHtml(job.targetTable || 'Primary')})</span>`;
     }
@@ -3494,6 +3608,8 @@ function initExecutionSummaryHandlers() {
                     startUnifiedLiveTelemetryEngine();
                 }
                 pollJobTelemetry(selectedVal);
+                fetchAuditLogs(selectedVal);
+                fetchSystemErrorLogs(selectedVal);
             } else {
                 const anyRunning = (AppState.executionHistory || []).some(e => e.status === 'RUNNING' || e.status === 'STARTED');
                 if (!anyRunning) {
@@ -3501,9 +3617,37 @@ function initExecutionSummaryHandlers() {
                     const latest = (AppState.executionHistory && AppState.executionHistory.length > 0) ? AppState.executionHistory[0].status : 'COMPLETED';
                     setStaticTelemetryIndicator(latest);
                 }
+                fetchAuditLogs(null);
+                fetchSystemErrorLogs(null);
             }
         });
     }
+
+    // 6. System Tracking Tables Refresh Handlers
+    const btnRefFiles = document.getElementById('btn-refresh-file-history');
+    if (btnRefFiles) btnRefFiles.addEventListener('click', () => fetchFileHistory());
+
+    const btnRefAudit = document.getElementById('btn-refresh-audit-log');
+    if (btnRefAudit) btnRefAudit.addEventListener('click', () => {
+        const dd = document.getElementById('history-job-dropdown');
+        fetchAuditLogs(dd ? dd.value : null);
+    });
+
+    const btnRefErrors = document.getElementById('btn-refresh-error-log');
+    if (btnRefErrors) btnRefErrors.addEventListener('click', () => {
+        const dd = document.getElementById('history-job-dropdown');
+        fetchSystemErrorLogs(dd ? dd.value : null);
+    });
+
+    const btnCloseErr = document.getElementById('btn-close-error-modal');
+    if (btnCloseErr) btnCloseErr.addEventListener('click', () => {
+        document.getElementById('errorDetailsModal')?.classList.add('hidden');
+    });
+
+    const btnCloseErrB = document.getElementById('btn-close-error-modal-bottom');
+    if (btnCloseErrB) btnCloseErrB.addEventListener('click', () => {
+        document.getElementById('errorDetailsModal')?.classList.add('hidden');
+    });
 }
 
 function startUnifiedLiveTelemetryEngine() {
@@ -3558,6 +3702,11 @@ async function runLiveTelemetryCycle(isManualOneOff = false) {
     if (targetJobId) {
         await pollJobTelemetry(targetJobId);
     }
+
+    // 4b. Refresh system tracking tables (file_history, audit_log, error_log)
+    await fetchFileHistory();
+    await fetchAuditLogs(targetJobId);
+    await fetchSystemErrorLogs(targetJobId);
 
     // 5. If no job is actively running anywhere in the system, stop sending frequent update signals!
     if (!running && !AppState.activeJobExecutionId) {
@@ -4319,14 +4468,21 @@ function updateTableBreakdown(data) {
         const pct = totalWrittenAll > 0 ? Math.min(100, Math.round((written / totalWrittenAll) * 100)) : 0;
         const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
         const streamState = data.streamingState || (isRunning ? 'STREAMING' : (data.status || 'COMMITTED'));
+        const isGs = tableName.startsWith('gs_');
+        const entityBadge = isGs
+            ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">HISTORICAL gs_</span>`
+            : `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">CANONICAL</span>`;
 
         html += `
             <tr class="hover:bg-slate-50/80 transition">
                 <td class="px-4 py-2.5 font-bold text-gray-900 font-sans flex items-center gap-2">
-                    <span class="w-6 h-6 rounded bg-emerald-50 text-bnp-emerald flex items-center justify-center text-[10px]">
-                        <i class="fas fa-table"></i>
+                    <span class="w-6 h-6 rounded ${isGs ? 'bg-blue-50 text-blue-600' : 'bg-emerald-50 text-bnp-emerald'} flex items-center justify-center text-[10px]">
+                        <i class="fas ${isGs ? 'fa-layer-group' : 'fa-table'}"></i>
                     </span>
-                    <span>${escapeHtml(tableName)}</span>
+                    <span class="flex items-center gap-1.5">
+                        <span>${escapeHtml(tableName)}</span>
+                        ${entityBadge}
+                    </span>
                 </td>
                 <td class="px-4 py-2.5 font-mono font-bold text-emerald-700">
                     ${written.toLocaleString()}
@@ -4525,6 +4681,171 @@ function updateErrorsTable(errors) {
         tbody.appendChild(tr);
     });
 }
+
+// =========================================================================
+// SYSTEM TRACKING TABLES (file_history, audit_log, error_log)
+// =========================================================================
+let currentSystemErrorsCache = [];
+
+async function fetchFileHistory() {
+    const tbody = document.getElementById('file-history-tbody');
+    const badge = document.getElementById('file-history-count-badge');
+    if (!tbody) return;
+    try {
+        const res = await fetch('/api/jobs/file-history?limit=50');
+        if (!res.ok) return;
+        const files = await res.json();
+        if (badge) badge.textContent = `${files.length} Files`;
+        if (!files || files.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="9" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No file uploads logged yet.</td></tr>`;
+            return;
+        }
+        let html = '';
+        files.forEach(f => {
+            const status = (f.processing_status || 'READY').toUpperCase();
+            const statusBadge = status === 'COMPLETED'
+                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                : status === 'RUNNING'
+                    ? 'bg-blue-50 text-blue-700 border border-blue-200 animate-pulse'
+                    : 'bg-red-50 text-red-700 border border-red-200';
+            const sha = f.sha256_hash ? escapeHtml(f.sha256_hash.substring(0, 16) + '...') : '--';
+            const uploadDate = f.upload_date ? escapeHtml(String(f.upload_date).replace('T', ' ')) : '--';
+            html += `
+                <tr class="hover:bg-slate-50 transition">
+                    <td class="px-4 py-2.5 font-bold text-gray-800">${escapeHtml(f.file_id || '--')}</td>
+                    <td class="px-4 py-2.5 text-blue-700 font-semibold">${escapeHtml(f.vendor_name || '--')}</td>
+                    <td class="px-4 py-2.5 font-medium text-gray-900 truncate max-w-xs" title="${escapeHtml(f.file_name || '')}">${escapeHtml(f.file_name || '--')}</td>
+                    <td class="px-4 py-2.5 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-800 border border-slate-200">v${f.version_number ?? 1}</span></td>
+                    <td class="px-4 py-2.5 text-right font-mono">${(f.file_size_kb || 0).toLocaleString()}</td>
+                    <td class="px-4 py-2.5 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${statusBadge}">${escapeHtml(status)}</span></td>
+                    <td class="px-4 py-2.5 text-right font-mono text-emerald-700 font-bold">${(f.record_count || 0).toLocaleString()}</td>
+                    <td class="px-4 py-2.5 text-gray-500 text-[11px]">${uploadDate}</td>
+                    <td class="px-4 py-2.5 text-gray-400 font-mono text-[11px]" title="${escapeHtml(f.sha256_hash || '')}">${sha}</td>
+                </tr>
+            `;
+        });
+        tbody.innerHTML = html;
+    } catch (e) {
+        console.error('Error fetching file history:', e);
+    }
+}
+
+async function fetchAuditLogs(jobExecutionId = null) {
+    const tbody = document.getElementById('audit-log-tbody');
+    const badge = document.getElementById('audit-log-count-badge');
+    if (!tbody) return;
+    try {
+        let url = '/api/jobs/audit-log?limit=100';
+        if (jobExecutionId && jobExecutionId !== 'ALL') {
+            url += `&jobExecutionId=${encodeURIComponent(jobExecutionId)}`;
+        }
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const audits = await res.json();
+        if (badge) badge.textContent = `${audits.length} Events`;
+        if (!audits || audits.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="9" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No audit events logged yet.</td></tr>`;
+            return;
+        }
+        let html = '';
+        audits.forEach(a => {
+            const evt = a.event_type || 'INFO';
+            const evtBadge = evt.includes('COMPLETED')
+                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                : evt.includes('FAILED')
+                    ? 'bg-red-50 text-red-700 border border-red-200'
+                    : 'bg-blue-50 text-blue-700 border border-blue-200';
+            const status = a.status || 'SUCCESS';
+            const statusBadge = status === 'SUCCESS' ? 'text-emerald-700' : 'text-red-600 font-bold';
+            const eventTime = a.event_time ? escapeHtml(String(a.event_time).replace('T', ' ')) : '--';
+            html += `
+                <tr class="hover:bg-slate-50 transition">
+                    <td class="px-4 py-2.5 font-bold text-gray-800 text-[11px]">${escapeHtml(a.audit_id || '--')}</td>
+                    <td class="px-4 py-2.5 text-gray-500 font-mono text-[11px]">${escapeHtml(a.file_id || '--')}</td>
+                    <td class="px-4 py-2.5 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${evtBadge}">${escapeHtml(evt)}</span></td>
+                    <td class="px-4 py-2.5 text-purple-700 font-semibold font-mono text-[11px]">${escapeHtml(a.entity_name || '--')}</td>
+                    <td class="px-4 py-2.5 text-gray-700 max-w-xs truncate" title="${escapeHtml(a.action_details || '')}">${escapeHtml(a.action_details || '--')}</td>
+                    <td class="px-4 py-2.5 text-right font-mono text-emerald-700 font-bold">${(a.records_affected || 0).toLocaleString()}</td>
+                    <td class="px-4 py-2.5 text-gray-500">${escapeHtml(a.triggered_by || 'SYSTEM')}</td>
+                    <td class="px-4 py-2.5 text-center text-[10px] font-bold ${statusBadge}">${escapeHtml(status)}</td>
+                    <td class="px-4 py-2.5 text-gray-500 text-[11px]">${eventTime}</td>
+                </tr>
+            `;
+        });
+        tbody.innerHTML = html;
+    } catch (e) {
+        console.error('Error fetching audit logs:', e);
+    }
+}
+
+async function fetchSystemErrorLogs(jobExecutionId = null) {
+    const tbody = document.getElementById('system-error-log-tbody');
+    const badge = document.getElementById('system-error-count-badge');
+    if (!tbody) return;
+    try {
+        let url = '/api/jobs/error-log?limit=100';
+        if (jobExecutionId && jobExecutionId !== 'ALL') {
+            url += `&jobExecutionId=${encodeURIComponent(jobExecutionId)}`;
+        }
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const errs = await res.json();
+        currentSystemErrorsCache = errs;
+        if (badge) badge.textContent = `${errs.length} Errors Logged`;
+        if (!errs || errs.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="8" class="px-4 py-6 text-center text-gray-400 font-sans text-xs">No execution errors logged. All batches committed cleanly.</td></tr>`;
+            return;
+        }
+        let html = '';
+        errs.forEach((e, idx) => {
+            const sev = (e.error_severity || 'ERROR').toUpperCase();
+            const sevBadge = sev === 'FATAL'
+                ? 'bg-red-700 text-white'
+                : sev === 'ERROR'
+                    ? 'bg-red-50 text-red-700 border border-red-200'
+                    : 'bg-amber-50 text-amber-800 border border-amber-200';
+            const errorTime = e.error_time ? escapeHtml(String(e.error_time).replace('T', ' ')) : '--';
+            html += `
+                <tr class="hover:bg-red-50/40 transition">
+                    <td class="px-4 py-2.5 font-bold text-red-700 text-[11px]">${escapeHtml(e.error_id || '--')}</td>
+                    <td class="px-4 py-2.5 text-gray-500 font-mono text-[11px]">${escapeHtml(e.file_id || '--')}</td>
+                    <td class="px-4 py-2.5 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${sevBadge}">${escapeHtml(sev)}</span></td>
+                    <td class="px-4 py-2.5 text-red-800 font-medium font-mono text-[11px]">${escapeHtml(e.error_type || '--')}</td>
+                    <td class="px-4 py-2.5 text-gray-700 font-mono text-[11px]">${escapeHtml(e.entity_name || '--')}</td>
+                    <td class="px-4 py-2.5 text-red-900 max-w-sm truncate" title="${escapeHtml(e.error_message || '')}">${escapeHtml(e.error_message || '--')}</td>
+                    <td class="px-4 py-2.5 text-gray-500 text-[11px]">${errorTime}</td>
+                    <td class="px-4 py-2.5 text-center">
+                        <button type="button" class="btn btn-secondary text-[10px] py-1 px-2 text-red-700 hover:text-red-900" onclick="viewSystemErrorDetails(${idx})">
+                            <i class="fas fa-search-plus mr-1"></i> Inspect
+                        </button>
+                    </td>
+                </tr>
+            `;
+        });
+        tbody.innerHTML = html;
+    } catch (e) {
+        console.error('Error fetching system error logs:', e);
+    }
+}
+
+function viewSystemErrorDetails(index) {
+    const item = currentSystemErrorsCache[index];
+    if (!item) return;
+    const modal = document.getElementById('errorDetailsModal');
+    if (!modal) return;
+    const idEl = document.getElementById('error-modal-id');
+    const msgEl = document.getElementById('error-modal-message');
+    const payloadEl = document.getElementById('error-modal-payload');
+    const stackEl = document.getElementById('error-modal-stacktrace');
+
+    if (idEl) idEl.textContent = `${item.error_id || 'ERR'} [${item.error_type || 'EXCEPTION'}] (Job #${item.job_execution_id || '--'}, File: ${item.file_id || '--'})`;
+    if (msgEl) msgEl.textContent = item.error_message || 'No message provided';
+    if (payloadEl) payloadEl.textContent = item.failed_payload || 'No failed payload captured';
+    if (stackEl) stackEl.textContent = item.stack_trace || 'No stack trace available';
+
+    modal.classList.remove('hidden');
+}
+window.viewSystemErrorDetails = viewSystemErrorDetails;
 
 // Chart.js updates
 function initCharts() {

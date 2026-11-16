@@ -1,2 +1,3 @@
 /home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/DynamicXmlIngestionTest.java
 /home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/RoleGovernanceAndApprovalTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/SchemaHistoryAndLoggingIntegrationTest.java

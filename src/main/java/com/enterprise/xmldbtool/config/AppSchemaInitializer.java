@@ -233,6 +233,8 @@ public class AppSchemaInitializer {
                 jdbcTemplate.execute("ALTER TABLE saved_job_configs ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP");
                 jdbcTemplate.execute("ALTER TABLE job_details ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(1000)");
                 jdbcTemplate.execute("ALTER TABLE saved_job_configs ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(1000)");
+                jdbcTemplate.execute("ALTER TABLE job_details ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(128) DEFAULT 'DEFAULT_VENDOR'");
+                jdbcTemplate.execute("ALTER TABLE saved_job_configs ADD COLUMN IF NOT EXISTS vendor_name VARCHAR(128) DEFAULT 'DEFAULT_VENDOR'");
 
                 // Ensure existing ready jobs are marked APPROVED so they remain functional
                 jdbcTemplate.execute("UPDATE job_details SET approval_status = 'APPROVED' WHERE approval_status IS NULL OR approval_status = 'READY'");

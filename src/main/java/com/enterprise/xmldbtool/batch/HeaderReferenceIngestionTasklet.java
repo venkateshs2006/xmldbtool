@@ -43,6 +43,7 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
     private final List<FieldMapping> mappings;
     private final DataSource dataSource;
     private final ResourceLoader resourceLoader = new DefaultResourceLoader();
+    private String fileId;
 
     private StepExecution stepExecution;
 
@@ -50,10 +51,23 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
                                           String recordRootElement,
                                           List<FieldMapping> mappings,
                                           DataSource dataSource) {
+        this(sourceXmlPath, recordRootElement, mappings, dataSource, null);
+    }
+
+    public HeaderReferenceIngestionTasklet(String sourceXmlPath,
+                                          String recordRootElement,
+                                          List<FieldMapping> mappings,
+                                          DataSource dataSource,
+                                          String fileId) {
         this.sourceXmlPath = sourceXmlPath;
         this.recordRootElement = recordRootElement != null ? recordRootElement : "record";
         this.mappings = mappings != null ? mappings : Collections.emptyList();
         this.dataSource = dataSource;
+        this.fileId = fileId;
+    }
+
+    public void setFileId(String fileId) {
+        this.fileId = fileId;
     }
 
     @Override
@@ -80,10 +94,11 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
             String tbl = m.getTargetTable();
             if (tbl == null || tbl.trim().isEmpty()) continue;
             String norm = tbl.trim().toLowerCase();
-            String rootNorm = recordRootElement != null ? recordRootElement.toLowerCase() : "record";
-            boolean isLookup = norm.endsWith("list") || norm.endsWith("lists")
-                    || (!norm.equals(rootNorm) && !norm.startsWith(rootNorm)
-                        && !norm.equals("record"));
+            String normBase = norm.replaceFirst("^gs_", "");
+            String rootNorm = recordRootElement != null ? recordRootElement.toLowerCase().replaceFirst("^gs_", "") : "record";
+            boolean isChildOfMaster = normBase.startsWith(rootNorm) && !normBase.equals(rootNorm);
+            boolean isLookup = !isChildOfMaster && (normBase.endsWith("list") || normBase.endsWith("lists")
+                    || (!normBase.equals(rootNorm) && !normBase.equals("record")));
             if (isLookup) {
                 lookupTables.add(tbl);
                 lookupMappings.computeIfAbsent(tbl, k -> new ArrayList<>()).add(m);
@@ -191,6 +206,40 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
         DatabaseRowPayload payload = new DatabaseRowPayload();
         for (Map.Entry<String, List<Map<String, Object>>> entry : extractedTableRows.entrySet()) {
             if (!entry.getValue().isEmpty()) {
+                for (Map<String, Object> r : entry.getValue()) {
+                    String bid = (String) r.get("bnpp_id");
+                    if (bid == null || bid.trim().isEmpty()) {
+                        bid = com.enterprise.xmldbtool.util.BnppIdGenerator.generateId("BNPP");
+                        r.put("bnpp_id", bid);
+                    }
+                    if (r.get("source_bnpp_id") == null) {
+                        r.put("source_bnpp_id", bid);
+                    }
+                    if (r.get("staging_bnpp_id") == null) {
+                        r.put("staging_bnpp_id", bid);
+                    }
+                    if (r.get("history_ids") == null) {
+                        r.put("history_ids", "[" + bid + "]");
+                    }
+                    if (r.get("file_id") == null && this.fileId != null) {
+                        r.put("file_id", this.fileId);
+                    }
+                    if (r.get("tag_name") == null) {
+                        r.put("tag_name", entry.getKey().toLowerCase());
+                    }
+                    if (r.get("payload_hash") == null) {
+                        r.put("payload_hash", com.enterprise.xmldbtool.service.StagingXmlStreamingService.computeSha256(r.toString()));
+                    }
+                    if (r.get("version_number") == null) {
+                        r.put("version_number", 1);
+                    }
+                    if (r.get("created_at") == null) {
+                        r.put("created_at", new java.sql.Timestamp(System.currentTimeMillis()));
+                    }
+                    if (r.get("updated_at") == null) {
+                        r.put("updated_at", new java.sql.Timestamp(System.currentTimeMillis()));
+                    }
+                }
                 payload.setTableRecords(entry.getKey(), entry.getValue());
                 totalHeaderRows += entry.getValue().size();
                 log.info("Extracted {} records for header lookup table '{}'", entry.getValue().size(), entry.getKey());
@@ -224,6 +273,7 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
         String normTbl = tableName.toLowerCase();
         String cleanEl = normEl.replace("_", "").replace("-", "");
         String cleanTbl = normTbl.replace("_", "").replace("-", "");
+        String baseTbl = cleanTbl.startsWith("gs") ? cleanTbl.substring(2) : cleanTbl;
         String cleanContainer = containerTag != null ? containerTag.toLowerCase().replace("_", "").replace("-", "") : "";
 
         // 1. Check if mappings explicitly reference elementTag
@@ -231,20 +281,28 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
             String f = m.getXmlField();
             if (f != null) {
                 String normF = f.toLowerCase().replace("_", "").replace("-", "");
-                if (normF.startsWith(cleanEl + "/") || normF.startsWith(cleanEl + "/@") || normF.equals(cleanEl)) {
+                if (normF.contains("/" + cleanEl + "/") || normF.contains("/" + cleanEl + "/@")
+                        || normF.endsWith("/" + cleanEl) || normF.startsWith(cleanEl + "/")
+                        || normF.equals(cleanEl)) {
                     return true;
                 }
             }
         }
 
-        // 2. Container name match (e.g. container CountryList -> table CountryList or country_list)
-        if (!cleanContainer.isEmpty() && (cleanContainer.equals(cleanTbl) || cleanTbl.contains(cleanContainer) || cleanContainer.contains(cleanTbl))) {
-            return true;
+        // 2. Container name match (e.g. container CountryList -> table CountryList, gs_country, or country_list)
+        if (!cleanContainer.isEmpty()) {
+            String baseContainer = cleanContainer.replace("list", "").replace("lists", "");
+            String baseT = baseTbl.replace("list", "").replace("lists", "");
+            if (cleanContainer.equals(cleanTbl) || cleanContainer.equals(baseTbl)
+                    || (!baseContainer.isEmpty() && (baseContainer.equals(baseT) || baseT.contains(baseContainer) || baseContainer.contains(baseT)))) {
+                return true;
+            }
         }
 
-        // 3. Name similarity (e.g. CountryName -> CountryList, Occupation -> OccupationList)
-        String tblBase = cleanTbl.replace("list", "").replace("lists", "");
-        if (cleanTbl.contains(cleanEl) || (!tblBase.isEmpty() && cleanEl.contains(tblBase))) {
+        // 3. Name similarity (e.g. CountryName -> CountryList, Occupation -> OccupationList, ReferenceName -> SanctionsReference)
+        String tblBase = baseTbl.replace("list", "").replace("lists", "");
+        if (baseTbl.contains(cleanEl) || cleanEl.contains(baseTbl)
+                || (!tblBase.isEmpty() && (cleanEl.contains(tblBase) || tblBase.contains(cleanEl.replace("name", ""))))) {
             return true;
         }
 

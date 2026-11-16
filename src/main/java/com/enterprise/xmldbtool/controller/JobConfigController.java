@@ -157,6 +157,7 @@ public class JobConfigController {
 
         // Construct JobLaunchRequest from saved configuration
         JobLaunchRequest launchRequest = new JobLaunchRequest();
+        launchRequest.setVendorName(config.getVendorName());
         launchRequest.setSourceXmlPath(config.getSourceXmlPath());
         launchRequest.setRecordRootElement(config.getRecordRootElement());
         launchRequest.setTargetTable(config.getTargetTable());

@@ -121,6 +121,13 @@ public class JobConfigService {
                 config.setRejectionReason(rs.getString("rejection_reason"));
             } catch (Exception ignored) {}
 
+            try {
+                String vn = rs.getString("vendor_name");
+                if (vn != null && !vn.trim().isEmpty()) {
+                    config.setVendorName(vn.trim());
+                }
+            } catch (Exception ignored) {}
+
             return config;
         }
     };
@@ -188,12 +195,14 @@ public class JobConfigService {
 
             String approvalStatus = config.getApprovalStatus() != null && !config.getApprovalStatus().trim().isEmpty()
                     ? config.getApprovalStatus().trim().toUpperCase() : "PENDING_APPROVAL";
+            String vendorName = config.getVendorName() != null && !config.getVendorName().trim().isEmpty()
+                    ? config.getVendorName().trim() : "DEFAULT_VENDOR";
 
             try {
                 String sqlJobDetails = "INSERT INTO job_details (" +
                         "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
-                        "db_config_json, mappings_json, cron_expression, status, created_by, staged_pipeline, approval_status, reviewed_by, rejection_reason) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                        "db_config_json, mappings_json, cron_expression, status, created_by, staged_pipeline, approval_status, reviewed_by, rejection_reason, vendor_name) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
                 jdbcTemplate.update(
                         sqlJobDetails,
@@ -212,14 +221,15 @@ public class JobConfigService {
                         isStaged,
                         approvalStatus,
                         config.getReviewedBy(),
-                        config.getRejectionReason()
+                        config.getRejectionReason(),
+                        vendorName
                 );
             } catch (Exception ex) {
                 try {
                     String sqlJobDetails = "INSERT INTO job_details (" +
                             "job_name, description, source_xml_path, record_root_element, target_table, table_order_json, chunk_size, " +
-                            "db_config_json, mappings_json, cron_expression, status, created_by, staged_pipeline) " +
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                            "db_config_json, mappings_json, cron_expression, status, created_by, staged_pipeline, vendor_name) " +
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
                     jdbcTemplate.update(
                             sqlJobDetails,
@@ -235,7 +245,8 @@ public class JobConfigService {
                             config.getCronExpression(),
                             approvalStatus,
                             config.getCreatedBy() != null ? config.getCreatedBy() : "admin",
-                            isStaged
+                            isStaged,
+                            vendorName
                     );
                 } catch (Exception ex2) {
                     String sqlJobDetails = "INSERT INTO job_details (" +
@@ -314,12 +325,14 @@ public class JobConfigService {
                     ? config.getApprovalStatus().trim().toUpperCase() : existing.getApprovalStatus();
             String reviewedBy = config.getReviewedBy() != null ? config.getReviewedBy() : existing.getReviewedBy();
             String rejectionReason = config.getRejectionReason() != null ? config.getRejectionReason() : existing.getRejectionReason();
+            String vendorName = config.getVendorName() != null && !config.getVendorName().trim().isEmpty()
+                    ? config.getVendorName().trim() : existing.getVendorName();
 
             try {
                 String sql = "UPDATE job_details SET " +
                         "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
                         "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
-                        "mappings_json = ?, cron_expression = ?, staged_pipeline = ?, approval_status = ?, reviewed_by = ?, rejection_reason = ?, updated_at = CURRENT_TIMESTAMP " +
+                        "mappings_json = ?, cron_expression = ?, staged_pipeline = ?, approval_status = ?, reviewed_by = ?, rejection_reason = ?, vendor_name = ?, updated_at = CURRENT_TIMESTAMP " +
                         "WHERE id = ?";
 
                 jdbcTemplate.update(
@@ -338,13 +351,14 @@ public class JobConfigService {
                         approvalStatus,
                         reviewedBy,
                         rejectionReason,
+                        vendorName,
                         id
                 );
             } catch (Exception ex) {
                 String sql = "UPDATE job_details SET " +
                         "job_name = ?, description = ?, source_xml_path = ?, record_root_element = ?, " +
                         "target_table = ?, table_order_json = ?, chunk_size = ?, db_config_json = ?, " +
-                        "mappings_json = ?, cron_expression = ?, updated_at = CURRENT_TIMESTAMP " +
+                        "mappings_json = ?, cron_expression = ?, vendor_name = ?, updated_at = CURRENT_TIMESTAMP " +
                         "WHERE id = ?";
 
                 jdbcTemplate.update(
@@ -359,6 +373,7 @@ public class JobConfigService {
                         dbJson,
                         mappingsJson,
                         config.getCronExpression() != null ? config.getCronExpression() : existing.getCronExpression(),
+                        vendorName,
                         id
                 );
             }

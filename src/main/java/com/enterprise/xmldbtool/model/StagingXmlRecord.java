@@ -18,6 +18,10 @@ public class StagingXmlRecord {
     private String rawPayload;
     private String payloadHash;
     private String bnppId;
+    private String sourceBnppId;
+    private String stagingBnppId;
+    private String historyIds;
+    private String fileId;
     private String tagName;
     private Integer versionNumber = 1;
     private String xmlVersion;
@@ -70,6 +74,18 @@ public class StagingXmlRecord {
 
     public String getBnppId() { return bnppId; }
     public void setBnppId(String bnppId) { this.bnppId = bnppId; }
+
+    public String getSourceBnppId() { return sourceBnppId; }
+    public void setSourceBnppId(String sourceBnppId) { this.sourceBnppId = sourceBnppId; }
+
+    public String getStagingBnppId() { return stagingBnppId; }
+    public void setStagingBnppId(String stagingBnppId) { this.stagingBnppId = stagingBnppId; }
+
+    public String getHistoryIds() { return historyIds; }
+    public void setHistoryIds(String historyIds) { this.historyIds = historyIds; }
+
+    public String getFileId() { return fileId; }
+    public void setFileId(String fileId) { this.fileId = fileId; }
 
     public String getTagName() { return tagName; }
     public void setTagName(String tagName) { this.tagName = tagName; }

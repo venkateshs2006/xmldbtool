@@ -19,8 +19,24 @@ public class JobLaunchRequest {
     private Long resumeFromJobExecutionId;
     private boolean resumeFromCheckpoint = false;
     private boolean retryFailedRecords = true;
+    private String vendorName = "DEFAULT_VENDOR";
+    private String vendorId = "VND-DEFAULT";
+    private String triggeredBy = "USER";
+    private String fileId;
 
     public JobLaunchRequest() {}
+
+    public String getVendorName() { return vendorName; }
+    public void setVendorName(String vendorName) { this.vendorName = vendorName; }
+
+    public String getVendorId() { return vendorId; }
+    public void setVendorId(String vendorId) { this.vendorId = vendorId; }
+
+    public String getTriggeredBy() { return triggeredBy; }
+    public void setTriggeredBy(String triggeredBy) { this.triggeredBy = triggeredBy; }
+
+    public String getFileId() { return fileId; }
+    public void setFileId(String fileId) { this.fileId = fileId; }
 
     public Long getResumeFromJobExecutionId() { return resumeFromJobExecutionId; }
     public void setResumeFromJobExecutionId(Long resumeFromJobExecutionId) { this.resumeFromJobExecutionId = resumeFromJobExecutionId; }
