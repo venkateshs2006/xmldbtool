@@ -53,9 +53,12 @@ public class DynamicSchemaResolutionService {
             long elapsedTimeMs
     ) {}
 
-    public record ExistingRecordInfo(String bnppId, String payloadHash, Integer versionNumber, String historyIds, String sourceBnppId) {
+    public record ExistingRecordInfo(String bnppId, String payloadHash, Integer versionNumber, String historyIds, String sourceBnppId, String currentId, String sourceId) {
+        public ExistingRecordInfo(String bnppId, String payloadHash, Integer versionNumber, String historyIds, String sourceBnppId) {
+            this(bnppId, payloadHash, versionNumber, historyIds, sourceBnppId, bnppId, sourceBnppId);
+        }
         public ExistingRecordInfo(String bnppId, String payloadHash, Integer versionNumber, String historyIds) {
-            this(bnppId, payloadHash, versionNumber, historyIds, null);
+            this(bnppId, payloadHash, versionNumber, historyIds, null, bnppId, null);
         }
     }
 
@@ -109,6 +112,276 @@ public class DynamicSchemaResolutionService {
     @FunctionalInterface
     public interface NormalizationProgressCallback {
         void onProgress(long totalProcessed, long normalizedCount, long failedCount, Map<String, Long> tableWriteCounts, String currentTable);
+    }
+
+    /**
+     * Directly moves data from flat staging tables gs_<entitytable> to canonical destination tables
+     * selecting the LATEST VERSION of the data for each record.
+     * Updates:
+     * - source_id / source_bnpp_id: Root originating identifier
+     * - current_id / bnpp_id: Active latest version identifier
+     * - history_ids: Full chronological audit trail of identifiers across all historical versions
+     * Marks all processed records in gs_<entitytable> as NORMALIZED.
+     */
+    public NormalizationSummary moveGsToCanonical(DataSource targetDataSource, List<FieldMapping> mappings) throws Exception {
+        return moveGsToCanonical(null, targetDataSource, mappings, null, null, 1000, null);
+    }
+
+    public NormalizationSummary moveGsToCanonical(Long jobExecutionId,
+                                                  DataSource targetDataSource,
+                                                  List<FieldMapping> mappings,
+                                                  List<String> tableOrder,
+                                                  String targetMasterTable,
+                                                  int batchChunkSize,
+                                                  NormalizationProgressCallback progressCallback) throws Exception {
+        long startTime = System.currentTimeMillis();
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(targetDataSource);
+        int chunkSize = batchChunkSize > 0 ? batchChunkSize : 1000;
+
+        List<String> resolvedTableOrder = DynamicJdbcBatchWriter.determineTableOrder(
+                tableOrder,
+                mappings,
+                targetMasterTable != null ? targetMasterTable : "record"
+        );
+
+        List<FieldMapping> effectiveMappings = (mappings != null && !mappings.isEmpty())
+                ? new ArrayList<>(mappings)
+                : autoDeriveMappingsFromTargetTables(jdbcTemplate, tableOrder, targetMasterTable);
+
+        if ((tableOrder == null || tableOrder.isEmpty()) && !effectiveMappings.isEmpty()) {
+            resolvedTableOrder = DynamicJdbcBatchWriter.determineTableOrder(
+                    null,
+                    effectiveMappings,
+                    targetMasterTable != null ? targetMasterTable : "record"
+            );
+        }
+
+        DatabaseErrorSkipListener skipListener = new DatabaseErrorSkipListener(targetDataSource, System.currentTimeMillis(), "moveGsToCanonicalStep");
+        DynamicJdbcBatchWriter batchWriter = new DynamicJdbcBatchWriter(targetDataSource, resolvedTableOrder, skipListener);
+        batchWriter.setWriteToHistoricalGsTables(false);
+        if (!effectiveMappings.isEmpty()) {
+            Map<String, Set<String>> explicitPks = new HashMap<>();
+            for (FieldMapping m : effectiveMappings) {
+                if ("PK".equalsIgnoreCase(m.getConstraintType()) && m.getTargetTable() != null && m.getTargetColumn() != null) {
+                    explicitPks.computeIfAbsent(m.getTargetTable().toLowerCase(), k -> new LinkedHashSet<>())
+                            .add(m.getTargetColumn().toLowerCase());
+                }
+            }
+            if (!explicitPks.isEmpty()) {
+                batchWriter.setExplicitPrimaryKeys(explicitPks);
+            }
+        }
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor(
+                targetMasterTable != null ? targetMasterTable : "record",
+                effectiveMappings,
+                Collections.emptyMap(),
+                resolvedTableOrder
+        );
+
+        // Find candidate gs_<entity> flat tables
+        Set<String> candidateFlatTables = new LinkedHashSet<>();
+        Set<String> processedEntities = new HashSet<>();
+        if (resolvedTableOrder != null) {
+            for (String tbl : resolvedTableOrder) {
+                String norm = tbl.replaceAll("[^a-zA-Z0-9_]", "_").toLowerCase();
+                String singNorm = DynamicXmlUnmarshaller.singularize(norm);
+                String plurNorm = DynamicXmlUnmarshaller.pluralize(norm);
+                if (processedEntities.contains(norm) || processedEntities.contains(singNorm) || processedEntities.contains(plurNorm)) continue;
+
+                for (String candidate : List.of("gs_" + norm, "gs_" + singNorm, "gs_" + plurNorm, norm + "_gs", singNorm + "_gs", plurNorm + "_gs", norm + "_flat", singNorm + "_flat", plurNorm + "_flat")) {
+                    if (candidate.equalsIgnoreCase("gs_error_records") || candidate.equalsIgnoreCase("migration_errors")
+                            || candidate.equalsIgnoreCase("staging_xml_records") || candidate.equalsIgnoreCase("file_history")
+                            || candidate.equalsIgnoreCase("audit_log") || candidate.equalsIgnoreCase("error_log")) {
+                        continue;
+                    }
+                    if (tableExists(jdbcTemplate, candidate)) {
+                        candidateFlatTables.add(candidate);
+                        processedEntities.add(norm);
+                        processedEntities.add(singNorm);
+                        processedEntities.add(plurNorm);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Also discover any other existing gs_* tables
+        for (String flat : findExistingFlatTables(jdbcTemplate)) {
+            String normFlat = flat.toLowerCase();
+            String entityBase = normFlat.startsWith("gs_") ? normFlat.substring(3) : normFlat.replaceFirst("(?i)_(gs|flat)$", "");
+            String singBase = DynamicXmlUnmarshaller.singularize(entityBase);
+            String plurBase = DynamicXmlUnmarshaller.pluralize(entityBase);
+            if (!normFlat.equals("staging_xml_records") && !normFlat.equals("gs_error_records") && !normFlat.equals("migration_errors")
+                    && !processedEntities.contains(entityBase) && !processedEntities.contains(singBase) && !processedEntities.contains(plurBase)
+                    && !candidateFlatTables.contains(normFlat)) {
+                candidateFlatTables.add(normFlat);
+                processedEntities.add(entityBase);
+                processedEntities.add(singBase);
+                processedEntities.add(plurBase);
+            }
+        }
+
+        long totalProcessed = 0;
+        long normalizedCount = 0;
+        long failedCount = 0;
+
+        for (String flatTable : candidateFlatTables) {
+            log.info("Moving latest version records from flat table '{}' to canonical table(s)...", flatTable);
+
+            String selectSql = "SELECT * FROM " + flatTable + " ORDER BY id ASC";
+            List<StagingXmlRecord> allFlatRecords = jdbcTemplate.query(selectSql, (rs, rowNum) -> {
+                StagingXmlRecord r = new StagingXmlRecord();
+                r.setId(rs.getLong("id"));
+                try { r.setJobExecutionId(rs.getLong("job_execution_id")); } catch (Exception ignored) {}
+                try { r.setFileId(rs.getString("file_id")); } catch (Exception ignored) {}
+                try { r.setBnppId(rs.getString("bnpp_id")); } catch (Exception ignored) {}
+                try { r.setCurrentId(rs.getString("current_id")); } catch (Exception ignored) {}
+                try { if (r.getCurrentId() == null) r.setCurrentId(r.getBnppId()); } catch (Exception ignored) {}
+                try { r.setSourceId(rs.getString("source_id")); } catch (Exception ignored) {}
+                try { r.setSourceBnppId(rs.getString("source_bnpp_id")); } catch (Exception ignored) {}
+                try { if (r.getSourceId() == null) r.setSourceId(r.getSourceBnppId()); } catch (Exception ignored) {}
+                try { r.setStagingBnppId(rs.getString("staging_bnpp_id")); } catch (Exception ignored) {}
+                try { r.setHistoryIds(rs.getString("history_ids")); } catch (Exception ignored) {}
+                try { r.setTagName(rs.getString("tag_name")); } catch (Exception ignored) {}
+                try {
+                    if (r.getTagName() == null || r.getTagName().isEmpty()) r.setTagName(rs.getString("entity_type"));
+                } catch (Exception ignored) {}
+                try { r.setEntityType(rs.getString("entity_type")); } catch (Exception ignored) {}
+                try {
+                    if (r.getEntityType() == null || r.getEntityType().isEmpty()) r.setEntityType(rs.getString("tag_name"));
+                } catch (Exception ignored) {}
+                try { r.setVersionNumber(rs.getInt("version_number")); } catch (Exception ignored) {}
+                try { r.setRecordIdentifier(rs.getString("record_identifier")); } catch (Exception ignored) {}
+                try { r.setRecordAction(rs.getString("record_action")); } catch (Exception ignored) {}
+                try { r.setRecordDate(rs.getString("record_date")); } catch (Exception ignored) {}
+                try { r.setRawPayload(rs.getString("raw_payload")); } catch (Exception ignored) {}
+                try { r.setPayloadHash(rs.getString("payload_hash")); } catch (Exception ignored) {}
+                try { r.setStatus(rs.getString("status")); } catch (Exception ignored) {}
+
+                try {
+                    java.sql.ResultSetMetaData md = rs.getMetaData();
+                    Map<String, Object> colMap = new LinkedHashMap<>();
+                    for (int i = 1; i <= md.getColumnCount(); i++) {
+                        String cName = md.getColumnName(i);
+                        Object val = rs.getObject(i);
+                        if (val != null) {
+                            colMap.put(cName, val);
+                            colMap.put(cName.toLowerCase(), val);
+                        }
+                    }
+                    r.setCachedMap(colMap);
+                } catch (Exception ignored) {}
+                return r;
+            });
+
+            if (allFlatRecords.isEmpty()) {
+                continue;
+            }
+
+            // Group records by business recordIdentifier (or fallback to id/bnpp_id)
+            Map<String, List<StagingXmlRecord>> recordsByEntityKey = new LinkedHashMap<>();
+            for (StagingXmlRecord rec : allFlatRecords) {
+                String key = rec.getRecordIdentifier();
+                if (key == null || key.trim().isEmpty()) {
+                    if (rec.getCachedMap() != null) {
+                        for (String candidateCol : List.of("person_id", "id", "@id", "code", "record_identifier")) {
+                            Object val = rec.getCachedMap().get(candidateCol);
+                            if (val != null && !String.valueOf(val).trim().isEmpty()) {
+                                key = String.valueOf(val).trim();
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (key == null || key.trim().isEmpty()) {
+                    key = rec.getBnppId() != null ? rec.getBnppId() : ("REC_" + rec.getId());
+                }
+                recordsByEntityKey.computeIfAbsent(key, k -> new ArrayList<>()).add(rec);
+            }
+
+            List<StagingXmlRecord> latestVersionRecords = new ArrayList<>();
+            List<StagingXmlRecord> allProcessedRecords = new ArrayList<>();
+
+            for (Map.Entry<String, List<StagingXmlRecord>> entry : recordsByEntityKey.entrySet()) {
+                List<StagingXmlRecord> historyList = entry.getValue();
+                // Sort by version_number ASC, id ASC
+                historyList.sort(Comparator.comparingInt((StagingXmlRecord r) -> r.getVersionNumber() != null ? r.getVersionNumber() : 1)
+                        .thenComparingLong(r -> r.getId() != null ? r.getId() : 0L));
+
+                allProcessedRecords.addAll(historyList);
+
+                // Originating source ID is from the first version
+                StagingXmlRecord firstRec = historyList.get(0);
+                String sourceId = firstRec.getSourceId();
+                if (sourceId == null) sourceId = firstRec.getSourceBnppId();
+                if (sourceId == null) sourceId = firstRec.getCurrentId();
+                if (sourceId == null) sourceId = firstRec.getBnppId();
+
+                // Latest version record
+                StagingXmlRecord latestRec = historyList.get(historyList.size() - 1);
+                String currentId = latestRec.getCurrentId();
+                if (currentId == null) currentId = latestRec.getBnppId();
+                if (currentId == null) currentId = BnppIdGenerator.generateId("BNPP");
+
+                int maxVer = latestRec.getVersionNumber() != null ? latestRec.getVersionNumber() : historyList.size();
+
+                // Aggregate complete history of IDs across all historical versions
+                String aggregatedHistory = null;
+                for (StagingXmlRecord h : historyList) {
+                    String hid = h.getCurrentId() != null ? h.getCurrentId() : h.getBnppId();
+                    if (hid != null) {
+                        aggregatedHistory = appendHistoryId(aggregatedHistory, hid);
+                    }
+                    if (h.getHistoryIds() != null) {
+                        aggregatedHistory = appendHistoryId(aggregatedHistory, h.getHistoryIds());
+                    }
+                }
+                if (aggregatedHistory == null) {
+                    aggregatedHistory = "[" + (sourceId != null ? "\"" + sourceId + "\"" : "") + "]";
+                }
+
+                latestRec.setSourceId(sourceId);
+                latestRec.setSourceBnppId(sourceId);
+                latestRec.setCurrentId(currentId);
+                latestRec.setBnppId(currentId);
+                latestRec.setHistoryIds(aggregatedHistory);
+                latestRec.setVersionNumber(maxVer);
+
+                latestVersionRecords.add(latestRec);
+            }
+
+            // Now project and write the latest records in chunks to canonical tables
+            for (int i = 0; i < latestVersionRecords.size(); i += chunkSize) {
+                List<StagingXmlRecord> subBatch = latestVersionRecords.subList(i, Math.min(latestVersionRecords.size(), i + chunkSize));
+                NormalizationBatchResult batchResult = processStagedBatch(
+                        subBatch, processor, effectiveMappings, jdbcTemplate, batchWriter, skipListener, true
+                );
+
+                totalProcessed += batchResult.processed();
+                normalizedCount += batchResult.written();
+                failedCount += batchResult.failed();
+            }
+
+            // Update status of ALL processed records in gs_<entity> table to NORMALIZED
+            updateFlatTableStatus(jdbcTemplate, flatTable, allProcessedRecords, "NORMALIZED", null);
+            updateStagingStatus(jdbcTemplate, allProcessedRecords, "NORMALIZED", null);
+
+            if (progressCallback != null) {
+                progressCallback.onProgress(totalProcessed, normalizedCount, failedCount,
+                        new LinkedHashMap<>(batchWriter.getTableWriteCounts()), flatTable);
+            }
+        }
+
+        if (progressCallback != null) {
+            progressCallback.onProgress(totalProcessed, normalizedCount, failedCount,
+                    new LinkedHashMap<>(batchWriter.getTableWriteCounts()), "COMPLETED");
+        }
+
+        long elapsed = System.currentTimeMillis() - startTime;
+        log.info("moveGsToCanonical completed: stagedProcessed={}, normalized={}, failed={}, tableWrites={}, elapsedMs={}",
+                totalProcessed, normalizedCount, failedCount, batchWriter.getTableWriteCounts(), elapsed);
+
+        return new NormalizationSummary(totalProcessed, normalizedCount, failedCount, batchWriter.getTableWriteCounts(), elapsed);
     }
 
     /**
@@ -167,6 +440,7 @@ public class DynamicSchemaResolutionService {
 
         DatabaseErrorSkipListener skipListener = new DatabaseErrorSkipListener(targetDataSource, System.currentTimeMillis(), "stagingNormalizationStep");
         DynamicJdbcBatchWriter batchWriter = new DynamicJdbcBatchWriter(targetDataSource, resolvedTableOrder, skipListener);
+        batchWriter.setWriteToHistoricalGsTables(false);
         if (!effectiveMappings.isEmpty()) {
             Map<String, Set<String>> explicitPks = new HashMap<>();
             for (FieldMapping m : effectiveMappings) {
@@ -466,6 +740,16 @@ public class DynamicSchemaResolutionService {
                                                         JdbcTemplate jdbcTemplate,
                                                         DynamicJdbcBatchWriter batchWriter,
                                                         DatabaseErrorSkipListener skipListener) {
+        return processStagedBatch(stagedBatch, processor, mappings, jdbcTemplate, batchWriter, skipListener, false);
+    }
+
+    private NormalizationBatchResult processStagedBatch(List<StagingXmlRecord> stagedBatch,
+                                                        DynamicXmlItemProcessor processor,
+                                                        List<FieldMapping> mappings,
+                                                        JdbcTemplate jdbcTemplate,
+                                                        DynamicJdbcBatchWriter batchWriter,
+                                                        DatabaseErrorSkipListener skipListener,
+                                                        boolean preserveVersion) {
         long processed = 0;
         long written = 0;
         long failed = 0;
@@ -556,7 +840,7 @@ public class DynamicSchemaResolutionService {
         // Perform per-table deduplication, delta versioning, and batch write
         if (!chunkPayloads.isEmpty()) {
             DatabaseRowPayload filteredCombinedPayload = applyDeduplicationAndVersioning(
-                    chunkPayloads, mappings, jdbcTemplate
+                    chunkPayloads, mappings, jdbcTemplate, preserveVersion
             );
 
             if (filteredCombinedPayload != null && !filteredCombinedPayload.getMultiTableRecords().isEmpty()) {
@@ -635,32 +919,44 @@ public class DynamicSchemaResolutionService {
             for (Map<String, Object> row : rows) {
                 if (row == null) continue;
 
-                // 1. Resolve bnpp_id: each canonical destination table row gets its own sequential alphanumeric ID
-                String existingBnpp = (String) row.get("bnpp_id");
-                if (existingBnpp == null || existingBnpp.trim().isEmpty()) {
-                    row.put("bnpp_id", BnppIdGenerator.generateId("BNPP"));
-                }
-
-                // 1b. Reference flat/staging table's bnpp_id and file_id
-                String sourceBnpp = (record != null && record.getSourceBnppId() != null) ? record.getSourceBnppId()
+                // 1. Resolve bnpp_id & current_id: prioritize staging record's currentId/bnppId
+                String existingCurr = (record != null && record.getCurrentId() != null) ? record.getCurrentId()
                         : (record != null && record.getBnppId() != null) ? record.getBnppId()
-                        : (String) row.get("source_bnpp_id");
-                if (sourceBnpp == null) sourceBnpp = (String) row.get("bnpp_id");
+                        : (String) row.get("current_id");
+                if (existingCurr == null || existingCurr.trim().isEmpty()) {
+                    existingCurr = (String) row.get("bnpp_id");
+                }
+                if (existingCurr == null || existingCurr.trim().isEmpty()) {
+                    existingCurr = BnppIdGenerator.generateId("BNPP");
+                }
+                row.put("bnpp_id", existingCurr);
+                row.put("current_id", existingCurr);
+
+                // 1b. Reference flat/staging table's source_id & bnpp_id and file_id
+                String sourceBnpp = (record != null && record.getSourceId() != null) ? record.getSourceId()
+                        : (record != null && record.getSourceBnppId() != null) ? record.getSourceBnppId()
+                        : (record != null && record.getBnppId() != null) ? record.getBnppId()
+                        : (String) row.get("source_id");
+                if (sourceBnpp == null) sourceBnpp = (String) row.get("source_bnpp_id");
+                if (sourceBnpp == null) sourceBnpp = existingCurr;
 
                 String stagingBnpp = (record != null && record.getStagingBnppId() != null) ? record.getStagingBnppId()
                         : (record != null && record.getBnppId() != null) ? record.getBnppId()
                         : (String) row.get("staging_bnpp_id");
-                if (stagingBnpp == null) stagingBnpp = (String) row.get("bnpp_id");
+                if (stagingBnpp == null) stagingBnpp = existingCurr;
 
+                row.put("source_id", sourceBnpp);
                 row.put("source_bnpp_id", sourceBnpp);
                 row.put("staging_bnpp_id", stagingBnpp);
 
-                // Backtracking: seed history_ids with source staging bnpp_id
-                String existingHist = (String) row.get("history_ids");
-                if (existingHist == null && record != null) {
-                    existingHist = record.getHistoryIds();
+                // Backtracking: seed history_ids with source staging bnpp_id or history from record
+                String existingHist = (record != null && record.getHistoryIds() != null) ? record.getHistoryIds() : (String) row.get("history_ids");
+                if (existingHist == null) {
+                    existingHist = "[" + stagingBnpp + "]";
+                } else {
+                    existingHist = appendHistoryId(existingHist, stagingBnpp);
                 }
-                row.put("history_ids", appendHistoryId(existingHist, stagingBnpp));
+                row.put("history_ids", existingHist);
 
                 if (record != null && record.getFileId() != null) {
                     row.put("file_id", record.getFileId());
@@ -705,6 +1001,13 @@ public class DynamicSchemaResolutionService {
     private DatabaseRowPayload applyDeduplicationAndVersioning(List<DatabaseRowPayload> chunkPayloads,
                                                                List<FieldMapping> mappings,
                                                                JdbcTemplate jdbcTemplate) {
+        return applyDeduplicationAndVersioning(chunkPayloads, mappings, jdbcTemplate, false);
+    }
+
+    private DatabaseRowPayload applyDeduplicationAndVersioning(List<DatabaseRowPayload> chunkPayloads,
+                                                               List<FieldMapping> mappings,
+                                                               JdbcTemplate jdbcTemplate,
+                                                               boolean preserveVersion) {
         Map<String, List<Map<String, Object>>> filteredMultiRecords = new LinkedHashMap<>();
 
         // Group rows across all payloads by table
@@ -741,22 +1044,37 @@ public class DynamicSchemaResolutionService {
                         continue;
                     } else {
                         // Case 2: Changed record in delta upload
-                        // Retain existing canonical sequential bnpp_id so row identity is stable
+                        // Preserve original starting source_id / source_bnpp_id across updates
+                        String startingBnpp = existing.sourceId() != null ? existing.sourceId()
+                                : (existing.sourceBnppId() != null ? existing.sourceBnppId() : existing.bnppId());
+                        if (startingBnpp == null) {
+                            startingBnpp = (String) row.get("source_id");
+                            if (startingBnpp == null) startingBnpp = (String) row.get("source_bnpp_id");
+                            if (startingBnpp == null) startingBnpp = (String) row.get("bnpp_id");
+                        }
+                        row.put("source_id", startingBnpp);
+                        row.put("source_bnpp_id", startingBnpp);
+
+                        // Backtracking: append new historical ID from staging to history_ids
+                        String histId = (String) row.get("staging_bnpp_id");
+                        if (histId == null) histId = (String) row.get("current_id");
+                        if (histId == null) histId = (String) row.get("bnpp_id");
+                        if (histId == null) histId = BnppIdGenerator.generateId("BNPP");
+
+                        row.put("current_id", histId);
                         if (existing.bnppId() != null) {
                             row.put("bnpp_id", existing.bnppId());
+                        } else {
+                            row.put("bnpp_id", histId);
                         }
-                        // Preserve original starting bnpp_id across updates
-                        String startingBnpp = existing.sourceBnppId() != null ? existing.sourceBnppId() : existing.bnppId();
-                        if (startingBnpp != null) {
-                            row.put("source_bnpp_id", startingBnpp);
-                        }
-                        int nextVersion = (existing.versionNumber() != null ? existing.versionNumber() : 1) + 1;
+
+                        int incomingVer = row.get("version_number") instanceof Number num ? num.intValue() : 1;
+                        int nextVersion = preserveVersion
+                                ? Math.max(incomingVer, existing.versionNumber() != null ? existing.versionNumber() : 1)
+                                : Math.max(incomingVer, (existing.versionNumber() != null ? existing.versionNumber() : 1) + 1);
                         row.put("version_number", nextVersion);
                         row.put("updated_at", new Timestamp(System.currentTimeMillis()));
 
-                        // Backtracking: append new historical bnpp_id to history_ids
-                        String histId = (String) row.get("staging_bnpp_id");
-                        if (histId == null) histId = (String) row.get("bnpp_id");
                         String updatedHistory = appendHistoryId(existing.historyIds(), histId);
                         row.put("history_ids", updatedHistory);
 
@@ -770,27 +1088,36 @@ public class DynamicSchemaResolutionService {
 
                         if (lookupKey != null) {
                             String activeBnpp = (row.get("bnpp_id") != null) ? (String) row.get("bnpp_id") : existing.bnppId();
-                            existingMap.put(lookupKey, new ExistingRecordInfo(activeBnpp, incomingHash, nextVersion, updatedHistory, startingBnpp));
+                            existingMap.put(lookupKey, new ExistingRecordInfo(activeBnpp, incomingHash, nextVersion, updatedHistory, startingBnpp, histId, startingBnpp));
                         }
                     }
                 } else {
                     // Case 3: New record
-                    row.put("version_number", 1);
+                    int incomingVer = row.get("version_number") instanceof Number num ? num.intValue() : 1;
+                    int finalVer = preserveVersion ? incomingVer : 1;
+                    row.put("version_number", finalVer);
                     row.put("created_at", new Timestamp(System.currentTimeMillis()));
                     row.put("updated_at", new Timestamp(System.currentTimeMillis()));
 
-                    // Backtracking: seed history_ids with source staging bnpp_id
-                    String histId = (String) row.get("source_bnpp_id");
-                    if (histId == null) histId = (String) row.get("staging_bnpp_id");
-                    if (histId == null) histId = (String) row.get("bnpp_id");
-                    row.put("source_bnpp_id", histId);
+                    String currId = (String) row.get("current_id");
+                    if (currId == null) currId = (String) row.get("bnpp_id");
+                    if (currId == null) currId = (String) row.get("staging_bnpp_id");
+                    if (currId == null) currId = BnppIdGenerator.generateId("BNPP");
+                    row.put("current_id", currId);
+                    row.put("bnpp_id", currId);
+
+                    String srcId = (String) row.get("source_id");
+                    if (srcId == null) srcId = (String) row.get("source_bnpp_id");
+                    if (srcId == null) srcId = currId;
+                    row.put("source_id", srcId);
+                    row.put("source_bnpp_id", srcId);
                     if (row.get("staging_bnpp_id") == null) {
-                        row.put("staging_bnpp_id", histId);
+                        row.put("staging_bnpp_id", currId);
                     }
-                    String newHistory = appendHistoryId((String) row.get("history_ids"), histId);
+                    String newHistory = appendHistoryId((String) row.get("history_ids"), currId);
                     row.put("history_ids", newHistory);
 
-                    String dedupeKey = lookupKey != null ? lookupKey : (String) row.get("bnpp_id");
+                    String dedupeKey = lookupKey != null ? lookupKey : currId;
                     if (dedupeKey != null && keyToIndex.containsKey(dedupeKey)) {
                         writeList.set(keyToIndex.get(dedupeKey), row);
                     } else {
@@ -799,8 +1126,7 @@ public class DynamicSchemaResolutionService {
                     }
 
                     if (lookupKey != null) {
-                        String assignedBnpp = (String) row.get("bnpp_id");
-                        existingMap.put(lookupKey, new ExistingRecordInfo(assignedBnpp, incomingHash, 1, newHistory, histId));
+                        existingMap.put(lookupKey, new ExistingRecordInfo(currId, incomingHash, finalVer, newHistory, srcId, currId, srcId));
                     }
                 }
             }
@@ -897,49 +1223,65 @@ public class DynamicSchemaResolutionService {
         for (int i = 0; i < valList.size(); i += batchSize) {
             List<Object> subList = valList.subList(i, Math.min(valList.size(), i + batchSize));
             String inClause = String.join(",", Collections.nCopies(subList.size(), "?"));
-            String sql = "SELECT " + matchCol + ", bnpp_id, payload_hash, version_number, history_ids, source_bnpp_id FROM " + tableName + " WHERE " + matchCol + " IN (" + inClause + ")";
+            String sql = "SELECT * FROM " + tableName + " WHERE " + matchCol + " IN (" + inClause + ")";
             try {
                 jdbcTemplate.query(sql, rs -> {
                     java.sql.ResultSetMetaData md = rs.getMetaData();
-                    String key = rs.getString(1);
+                    String key = null;
                     String bid = null;
+                    String currId = null;
                     String hash = null;
                     int ver = 1;
                     String hist = null;
                     String srcBid = null;
+                    String srcId = null;
                     for (int c = 1; c <= md.getColumnCount(); c++) {
                         String cn = md.getColumnName(c);
-                        if (cn.equalsIgnoreCase("bnpp_id")) bid = rs.getString(c);
+                        if (cn.equalsIgnoreCase(matchCol)) key = rs.getString(c);
+                        else if (cn.equalsIgnoreCase("bnpp_id")) bid = rs.getString(c);
+                        else if (cn.equalsIgnoreCase("current_id")) currId = rs.getString(c);
                         else if (cn.equalsIgnoreCase("payload_hash")) hash = rs.getString(c);
                         else if (cn.equalsIgnoreCase("version_number")) ver = rs.getInt(c);
                         else if (cn.equalsIgnoreCase("history_ids")) hist = rs.getString(c);
+                        else if (cn.equalsIgnoreCase("source_id")) srcId = rs.getString(c);
                         else if (cn.equalsIgnoreCase("source_bnpp_id")) srcBid = rs.getString(c);
                     }
+                    if (currId == null) currId = bid;
+                    if (srcId == null) srcId = srcBid;
+                    if (srcBid == null) srcBid = srcId;
                     if (key != null) {
-                        map.put(key, new ExistingRecordInfo(bid, hash, ver, hist, srcBid));
+                        map.put(key, new ExistingRecordInfo(bid != null ? bid : currId, hash, ver, hist, srcBid, currId, srcId));
                     }
                 }, subList.toArray());
             } catch (Exception qEx) {
                 try {
-                    String quotedSql = "SELECT \"" + matchCol + "\", bnpp_id, payload_hash, version_number, history_ids, source_bnpp_id FROM \"" + tableName + "\" WHERE \"" + matchCol + "\" IN (" + inClause + ")";
+                    String quotedSql = "SELECT * FROM \"" + tableName + "\" WHERE \"" + matchCol + "\" IN (" + inClause + ")";
                     jdbcTemplate.query(quotedSql, rs -> {
                         java.sql.ResultSetMetaData md = rs.getMetaData();
-                        String key = rs.getString(1);
+                        String key = null;
                         String bid = null;
+                        String currId = null;
                         String hash = null;
                         int ver = 1;
                         String hist = null;
                         String srcBid = null;
+                        String srcId = null;
                         for (int c = 1; c <= md.getColumnCount(); c++) {
                             String cn = md.getColumnName(c);
-                            if (cn.equalsIgnoreCase("bnpp_id")) bid = rs.getString(c);
+                            if (cn.equalsIgnoreCase(matchCol)) key = rs.getString(c);
+                            else if (cn.equalsIgnoreCase("bnpp_id")) bid = rs.getString(c);
+                            else if (cn.equalsIgnoreCase("current_id")) currId = rs.getString(c);
                             else if (cn.equalsIgnoreCase("payload_hash")) hash = rs.getString(c);
                             else if (cn.equalsIgnoreCase("version_number")) ver = rs.getInt(c);
                             else if (cn.equalsIgnoreCase("history_ids")) hist = rs.getString(c);
+                            else if (cn.equalsIgnoreCase("source_id")) srcId = rs.getString(c);
                             else if (cn.equalsIgnoreCase("source_bnpp_id")) srcBid = rs.getString(c);
                         }
+                        if (currId == null) currId = bid;
+                        if (srcId == null) srcId = srcBid;
+                        if (srcBid == null) srcBid = srcId;
                         if (key != null) {
-                            map.put(key, new ExistingRecordInfo(bid, hash, ver, hist, srcBid));
+                            map.put(key, new ExistingRecordInfo(bid != null ? bid : currId, hash, ver, hist, srcBid, currId, srcId));
                         }
                     }, subList.toArray());
                 } catch (Exception ignored) {}
@@ -1035,7 +1377,11 @@ public class DynamicSchemaResolutionService {
             try { r.setJobExecutionId(rs.getLong("job_execution_id")); } catch (Exception ignored) {}
             try { r.setFileId(rs.getString("file_id")); } catch (Exception ignored) {}
             try { r.setBnppId(rs.getString("bnpp_id")); } catch (Exception ignored) {}
+            try { r.setCurrentId(rs.getString("current_id")); } catch (Exception ignored) {}
+            try { if (r.getCurrentId() == null) r.setCurrentId(r.getBnppId()); } catch (Exception ignored) {}
+            try { r.setSourceId(rs.getString("source_id")); } catch (Exception ignored) {}
             try { r.setSourceBnppId(rs.getString("source_bnpp_id")); } catch (Exception ignored) {}
+            try { if (r.getSourceId() == null) r.setSourceId(r.getSourceBnppId()); } catch (Exception ignored) {}
             try { r.setStagingBnppId(rs.getString("staging_bnpp_id")); } catch (Exception ignored) {}
             try { r.setHistoryIds(rs.getString("history_ids")); } catch (Exception ignored) {}
             try { r.setTagName(rs.getString("tag_name")); } catch (Exception ignored) {}
@@ -1275,7 +1621,8 @@ public class DynamicSchemaResolutionService {
             try { schema = conn.getSchema(); } catch (Throwable ignored) {}
             for (String tbl : tables) {
                 if (tbl == null || tbl.trim().isEmpty()) continue;
-                for (String tName : List.of(tbl, tbl.toUpperCase(), tbl.toLowerCase())) {
+                Set<String> candidateNames = new LinkedHashSet<>(List.of(tbl, tbl.toUpperCase(), tbl.toLowerCase()));
+                for (String tName : candidateNames) {
                     try (ResultSet rs = meta.getColumns(null, schema, tName, null)) {
                         boolean foundAny = false;
                         while (rs.next()) {
@@ -1285,6 +1632,8 @@ public class DynamicSchemaResolutionService {
                                     && !colName.equalsIgnoreCase("updated_at")
                                     && !colName.equalsIgnoreCase("extra_attributes")
                                     && !colName.equalsIgnoreCase("bnpp_id")
+                                    && !colName.equalsIgnoreCase("current_id")
+                                    && !colName.equalsIgnoreCase("source_id")
                                     && !colName.equalsIgnoreCase("source_bnpp_id")
                                     && !colName.equalsIgnoreCase("staging_bnpp_id")
                                     && !colName.equalsIgnoreCase("version_number")

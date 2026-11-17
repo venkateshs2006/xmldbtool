@@ -348,9 +348,32 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         return true;
     }
 
+    private static Object getCaseInsensitive(Map<String, Object> map, String key) {
+        if (map == null || key == null) return null;
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(key)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private static void putCaseInsensitive(Map<String, Object> map, String key, Object value) {
+        if (map == null || key == null) return;
+        for (String existingKey : map.keySet()) {
+            if (existingKey.equalsIgnoreCase(key)) {
+                map.put(existingKey, value);
+                return;
+            }
+        }
+        map.put(key, value);
+    }
+
     /**
      * Enriches a table row with complete enterprise traceability identifiers:
      * - bnpp_id: Sequential alphanumeric unique identifier
+     * - current_id: Active/latest version identifier
+     * - source_id: Originating/root version identifier
      * - source_bnpp_id: Originating/parent BNPP ID
      * - staging_bnpp_id: Staging BNPP ID linking back to the historical/staging source row
      * - history_ids: History backtracking array/reference
@@ -358,56 +381,72 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
     private void enrichRowEnterpriseIdentity(Map<String, Object> rowMap, String tableName, Map<String, Object> xmlRecord) {
         if (rowMap == null) return;
 
-        // 1. bnpp_id
-        String bid = (String) rowMap.get("bnpp_id");
+        // 1. bnpp_id and current_id
+        String bid = (String) getCaseInsensitive(rowMap, "current_id");
+        if (bid == null || bid.trim().isEmpty()) {
+            bid = (String) getCaseInsensitive(rowMap, "bnpp_id");
+        }
+        if ((bid == null || bid.trim().isEmpty()) && xmlRecord != null) {
+            bid = (String) getCaseInsensitive(xmlRecord, "current_id");
+            if (bid == null) bid = (String) getCaseInsensitive(xmlRecord, "bnpp_id");
+            if (bid == null) bid = (String) getCaseInsensitive(xmlRecord, "_bnpp_id");
+        }
         if (bid == null || bid.trim().isEmpty()) {
             bid = com.enterprise.xmldbtool.util.BnppIdGenerator.generateId("BNPP");
-            rowMap.put("bnpp_id", bid);
         }
+        putCaseInsensitive(rowMap, "bnpp_id", bid);
+        putCaseInsensitive(rowMap, "current_id", bid);
 
         // 2. Resolve source / staging bnpp_id from parent entity or record's bnpp_id
-        String parentBnpp = (xmlRecord != null) ? (String) xmlRecord.get("_parent_bnpp_id") : null;
-        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("bnpp_id");
-        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("_bnpp_id");
-        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("source_bnpp_id");
-        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) xmlRecord.get("staging_bnpp_id");
+        String parentBnpp = (xmlRecord != null) ? (String) getCaseInsensitive(xmlRecord, "_parent_bnpp_id") : null;
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) getCaseInsensitive(xmlRecord, "source_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) getCaseInsensitive(xmlRecord, "source_bnpp_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) getCaseInsensitive(xmlRecord, "current_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) getCaseInsensitive(xmlRecord, "bnpp_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) getCaseInsensitive(xmlRecord, "_bnpp_id");
+        if (parentBnpp == null && xmlRecord != null) parentBnpp = (String) getCaseInsensitive(xmlRecord, "staging_bnpp_id");
 
-        if (rowMap.get("source_bnpp_id") == null) {
-            rowMap.put("source_bnpp_id", parentBnpp != null ? parentBnpp : bid);
+        String effectiveSource = parentBnpp != null ? parentBnpp : bid;
+        if (getCaseInsensitive(rowMap, "source_id") == null) {
+            putCaseInsensitive(rowMap, "source_id", effectiveSource);
         }
-        if (rowMap.get("staging_bnpp_id") == null) {
-            rowMap.put("staging_bnpp_id", parentBnpp != null ? parentBnpp : bid);
+        if (getCaseInsensitive(rowMap, "source_bnpp_id") == null) {
+            putCaseInsensitive(rowMap, "source_bnpp_id", effectiveSource);
+        }
+        if (getCaseInsensitive(rowMap, "staging_bnpp_id") == null) {
+            putCaseInsensitive(rowMap, "staging_bnpp_id", effectiveSource);
         }
 
-        // 3. history_ids: seed with source_bnpp_id or current bnpp_id
-        if (rowMap.get("history_ids") == null) {
-            String histId = (String) rowMap.get("source_bnpp_id");
+        // 3. history_ids: seed with source_id or current_id
+        if (getCaseInsensitive(rowMap, "history_ids") == null) {
+            String histId = (String) getCaseInsensitive(rowMap, "source_id");
+            if (histId == null) histId = (String) getCaseInsensitive(rowMap, "source_bnpp_id");
             if (histId == null) histId = bid;
-            rowMap.put("history_ids", "[" + histId + "]");
+            putCaseInsensitive(rowMap, "history_ids", "[" + histId + "]");
         }
 
         // 4. file_id
-        if (rowMap.get("file_id") == null && xmlRecord != null && xmlRecord.get("file_id") != null) {
-            rowMap.put("file_id", xmlRecord.get("file_id"));
+        if (getCaseInsensitive(rowMap, "file_id") == null && xmlRecord != null && getCaseInsensitive(xmlRecord, "file_id") != null) {
+            putCaseInsensitive(rowMap, "file_id", getCaseInsensitive(xmlRecord, "file_id"));
         }
 
         // 5. version_number
-        if (rowMap.get("version_number") == null) {
-            Object ver = (xmlRecord != null) ? xmlRecord.get("version_number") : null;
-            rowMap.put("version_number", ver != null ? ver : 1);
+        if (getCaseInsensitive(rowMap, "version_number") == null) {
+            Object ver = (xmlRecord != null) ? getCaseInsensitive(xmlRecord, "version_number") : null;
+            putCaseInsensitive(rowMap, "version_number", ver != null ? ver : 1);
         }
 
         // 6. tag_name
-        if (rowMap.get("tag_name") == null) {
-            rowMap.put("tag_name", tableName != null ? tableName.toLowerCase() : "record");
+        if (getCaseInsensitive(rowMap, "tag_name") == null) {
+            putCaseInsensitive(rowMap, "tag_name", tableName != null ? tableName.toLowerCase() : "record");
         }
 
         // 7. created_at & updated_at
-        if (rowMap.get("created_at") == null) {
-            rowMap.put("created_at", new java.sql.Timestamp(System.currentTimeMillis()));
+        if (getCaseInsensitive(rowMap, "created_at") == null) {
+            putCaseInsensitive(rowMap, "created_at", new java.sql.Timestamp(System.currentTimeMillis()));
         }
-        if (rowMap.get("updated_at") == null) {
-            rowMap.put("updated_at", new java.sql.Timestamp(System.currentTimeMillis()));
+        if (getCaseInsensitive(rowMap, "updated_at") == null) {
+            putCaseInsensitive(rowMap, "updated_at", new java.sql.Timestamp(System.currentTimeMillis()));
         }
     }
 
@@ -526,14 +565,18 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
 
         if (tblMappings != null) {
             for (FieldMapping m : tblMappings) {
+                String tgt = m.getTargetColumn();
+                if (tgt == null) continue;
+                String tgtLower = tgt.toLowerCase();
+                if (tgtLower.equals("current_id") || tgtLower.equals("source_id") || tgtLower.equals("bnpp_id")
+                        || tgtLower.equals("source_bnpp_id") || tgtLower.equals("staging_bnpp_id")
+                        || tgtLower.equals("history_ids") || tgtLower.equals("file_id")) {
+                    continue;
+                }
                 if ("FK".equalsIgnoreCase(m.getConstraintType()) || m.getForeignKeyTable() != null) {
-                    if (m.getTargetColumn() != null) {
-                        fkCols.add(m.getTargetColumn().toLowerCase());
-                    }
-                } else if (m.getTargetColumn() != null && m.getTargetColumn().toLowerCase().endsWith("_id")
-                        && !m.getTargetColumn().equalsIgnoreCase("id")
-                        && !"PK".equalsIgnoreCase(m.getConstraintType())) {
-                    fkCols.add(m.getTargetColumn().toLowerCase());
+                    fkCols.add(tgtLower);
+                } else if (tgtLower.endsWith("_id") && !tgtLower.equals("id") && !"PK".equalsIgnoreCase(m.getConstraintType())) {
+                    fkCols.add(tgtLower);
                 }
             }
         }
@@ -549,10 +592,11 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         if (parentId != null) {
             Object cleanRefId = cleanDataFormat(parentId);
             for (String fkCol : fkCols) {
-                if (!rowMap.containsKey(fkCol) || rowMap.get(fkCol) == null || String.valueOf(rowMap.get(fkCol)).trim().isEmpty()) {
-                    rowMap.put(fkCol, cleanRefId);
+                Object existingVal = getCaseInsensitive(rowMap, fkCol);
+                if (existingVal == null || String.valueOf(existingVal).trim().isEmpty()) {
+                    putCaseInsensitive(rowMap, fkCol, cleanRefId);
                 } else {
-                    rowMap.put(fkCol, cleanDataFormat(rowMap.get(fkCol)));
+                    putCaseInsensitive(rowMap, fkCol, cleanDataFormat(existingVal));
                 }
             }
         }
@@ -733,6 +777,17 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                     }
                 } else if (val instanceof List<?> l && !l.isEmpty() && l.get(0) instanceof Map) {
                     return (List<Map<String, Object>>) val;
+                } else if (val instanceof Map<?, ?> m) {
+                    for (String sub : List.of(tag, singular, plural, "item", "entry", "record")) {
+                        Object subVal = m.get(sub);
+                        if (subVal == null) subVal = m.get(sub.toLowerCase());
+                        if (subVal == null) subVal = m.get(sub.toUpperCase());
+                        if (subVal instanceof List<?> sl && !sl.isEmpty() && sl.get(0) instanceof Map) {
+                            return (List<Map<String, Object>>) sl;
+                        } else if (subVal instanceof Map<?, ?> sm) {
+                            return List.of((Map<String, Object>) sm);
+                        }
+                    }
                 }
             }
         }
@@ -949,43 +1004,82 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
 
         // 3. Qualified path match (e.g. "Person/NameDetails/Name/@NameType", "descriptionlist2/@id")
         if (xmlField.contains("/")) {
-            String tagPrefix = xmlField.substring(0, xmlField.indexOf("/"));
+            String[] segments = xmlField.split("/");
+            String immediateParent = segments.length >= 2 ? segments[segments.length - 2] : segments[0];
+            String tagPrefix = segments[0];
 
-            // Check if xmlRecord has qualified tagPrefix/@rawLeaf or tagPrefix/rawLeaf
+            // 3a. Check relative sub-paths from most specific to least specific
+            // (e.g. for "person/addresses/address/@id": "addresses/address/@id", "address/@id", "@id")
+            for (int i = 1; i < segments.length; i++) {
+                StringBuilder rel = new StringBuilder();
+                for (int j = i; j < segments.length; j++) {
+                    if (rel.length() > 0) rel.append("/");
+                    rel.append(segments[j]);
+                }
+                String relPath = rel.toString();
+
+                // When relPath is just the leaf (i == segments.length - 1), only match if the record's entity tag matches immediateParent
+                if (i == segments.length - 1) {
+                    String entityTag = (String) xmlRecord.get("_entity_tag");
+                    if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
+                    boolean matches = (entityTag == null)
+                            || entityTag.equalsIgnoreCase(immediateParent)
+                            || DynamicXmlUnmarshaller.singularize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.singularize(immediateParent))
+                            || DynamicXmlUnmarshaller.pluralize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.pluralize(immediateParent));
+                    if (!matches) {
+                        continue;
+                    }
+                }
+
+                Object rVal = xmlRecord.get(relPath);
+                if (rVal != null) return rVal;
+                for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                    if (entry.getKey().equalsIgnoreCase(relPath)) return entry.getValue();
+                }
+            }
+
+            // Check if xmlRecord has qualified immediateParent/@rawLeaf or immediateParent/rawLeaf
             for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
                 String k = entry.getKey();
-                if (k.equalsIgnoreCase(tagPrefix + "/@" + rawLeaf) || k.equalsIgnoreCase(tagPrefix + "/" + rawLeaf)) {
+                if (k.equalsIgnoreCase(immediateParent + "/@" + rawLeaf) || k.equalsIgnoreCase(immediateParent + "/" + rawLeaf)) {
                     return entry.getValue();
                 }
             }
 
-            // Check if xmlRecord is an entity fragment matching tagPrefix or any path segment
+            // Check if xmlRecord has qualified tagPrefix/@rawLeaf or tagPrefix/rawLeaf (only when segments.length == 2)
+            if (segments.length == 2) {
+                for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                    String k = entry.getKey();
+                    if (k.equalsIgnoreCase(tagPrefix + "/@" + rawLeaf) || k.equalsIgnoreCase(tagPrefix + "/" + rawLeaf)) {
+                        return entry.getValue();
+                    }
+                }
+            }
+
+            // Check if xmlRecord is an entity fragment matching immediateParent or tagPrefix
             String entityTag = (String) xmlRecord.get("_entity_tag");
             if (entityTag == null) entityTag = (String) xmlRecord.get("_tag_name");
 
             boolean tagMatches = (entityTag == null)
-                    || entityTag.equalsIgnoreCase(tagPrefix)
-                    || DynamicXmlUnmarshaller.singularize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.singularize(tagPrefix))
-                    || DynamicXmlUnmarshaller.pluralize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.pluralize(tagPrefix))
-                    || tagPrefix.equalsIgnoreCase(this.defaultTargetTable)
-                    || tagPrefix.equalsIgnoreCase("record");
+                    || entityTag.equalsIgnoreCase(immediateParent)
+                    || DynamicXmlUnmarshaller.singularize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.singularize(immediateParent))
+                    || DynamicXmlUnmarshaller.pluralize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.pluralize(immediateParent))
+                    || (segments.length == 2 && (entityTag.equalsIgnoreCase(tagPrefix)
+                            || DynamicXmlUnmarshaller.singularize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.singularize(tagPrefix))
+                            || DynamicXmlUnmarshaller.pluralize(entityTag).equalsIgnoreCase(DynamicXmlUnmarshaller.pluralize(tagPrefix))))
+                    || immediateParent.equalsIgnoreCase(this.defaultTargetTable)
+                    || immediateParent.equalsIgnoreCase("record");
 
             if (!tagMatches && entityTag != null) {
                 String normEnt = entityTag.toLowerCase();
                 String singEnt = DynamicXmlUnmarshaller.singularize(normEnt);
                 String plurEnt = DynamicXmlUnmarshaller.pluralize(normEnt);
                 String baseEnt = normEnt.replaceFirst("^gs_", "");
-                for (String part : xmlField.replace("@", "").toLowerCase().split("/")) {
-                    if (part.equals(normEnt) || part.equals(singEnt) || part.equals(plurEnt)
-                            || part.equals(baseEnt) || part.equals(DynamicXmlUnmarshaller.singularize(baseEnt))) {
-                        tagMatches = true;
-                        break;
-                    }
+                if (normEnt.equalsIgnoreCase(immediateParent) || singEnt.equalsIgnoreCase(immediateParent)
+                        || plurEnt.equalsIgnoreCase(immediateParent) || baseEnt.equalsIgnoreCase(immediateParent)
+                        || DynamicXmlUnmarshaller.singularize(baseEnt).equalsIgnoreCase(immediateParent)) {
+                    tagMatches = true;
                 }
-            }
-
-            if (!tagMatches && (xmlRecord.containsKey("parent_id") || xmlRecord.containsKey("parent_@id"))) {
-                tagMatches = true;
             }
 
             if (tagMatches) {
@@ -993,7 +1087,7 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 val = xmlRecord.get(attrLeaf);
                 if (val != null) {
                     boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
-                            k.endsWith("/@" + rawLeaf) && !k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/"));
+                            k.endsWith("/@" + rawLeaf) && !k.toLowerCase().startsWith(immediateParent.toLowerCase() + "/"));
                     if (!hasOtherTagAttr) {
                         return val;
                     }
@@ -1002,25 +1096,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 val = xmlRecord.get(rawLeaf);
                 if (val != null) {
                     boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
-                            k.endsWith("/@" + rawLeaf) && !k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/"));
+                            k.endsWith("/@" + rawLeaf) && !k.toLowerCase().startsWith(immediateParent.toLowerCase() + "/"));
                     if (!hasOtherTagAttr) {
                         return val;
-                    }
-                }
-
-                // Check relative sub-paths (e.g. "NameValue/FirstName", "FirstName")
-                String[] segments = xmlField.split("/");
-                for (int i = 1; i < segments.length; i++) {
-                    StringBuilder rel = new StringBuilder();
-                    for (int j = i; j < segments.length; j++) {
-                        if (rel.length() > 0) rel.append("/");
-                        rel.append(segments[j]);
-                    }
-                    String relPath = rel.toString();
-                    Object rVal = xmlRecord.get(relPath);
-                    if (rVal != null) return rVal;
-                    for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
-                        if (entry.getKey().equalsIgnoreCase(relPath)) return entry.getValue();
                     }
                 }
 
@@ -1028,7 +1106,7 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
                     String k = entry.getKey();
                     if (k.equalsIgnoreCase(rawLeaf) || k.equalsIgnoreCase(attrLeaf)) {
-                        if (!k.contains("/") || k.toLowerCase().startsWith(tagPrefix.toLowerCase() + "/")) {
+                        if (!k.contains("/") || k.toLowerCase().startsWith(immediateParent.toLowerCase() + "/")) {
                             return entry.getValue();
                         }
                     }

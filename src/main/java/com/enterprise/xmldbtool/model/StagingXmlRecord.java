@@ -20,6 +20,8 @@ public class StagingXmlRecord {
     private String bnppId;
     private String sourceBnppId;
     private String stagingBnppId;
+    private String sourceId;
+    private String currentId;
     private String historyIds;
     private String fileId;
     private String tagName;
@@ -80,6 +82,12 @@ public class StagingXmlRecord {
 
     public String getStagingBnppId() { return stagingBnppId; }
     public void setStagingBnppId(String stagingBnppId) { this.stagingBnppId = stagingBnppId; }
+
+    public String getSourceId() { return sourceId != null ? sourceId : sourceBnppId; }
+    public void setSourceId(String sourceId) { this.sourceId = sourceId; if (this.sourceBnppId == null) this.sourceBnppId = sourceId; }
+
+    public String getCurrentId() { return currentId != null ? currentId : bnppId; }
+    public void setCurrentId(String currentId) { this.currentId = currentId; if (this.bnppId == null) this.bnppId = currentId; }
 
     public String getHistoryIds() { return historyIds; }
     public void setHistoryIds(String historyIds) { this.historyIds = historyIds; }

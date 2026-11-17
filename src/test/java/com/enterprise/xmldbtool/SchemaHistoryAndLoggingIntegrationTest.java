@@ -276,8 +276,203 @@ public class SchemaHistoryAndLoggingIntegrationTest {
         assertTrue(historyIds2.contains(gsBnppId1), "Canonical history_ids must track v1 bnpp_id: " + gsBnppId1);
         assertTrue(historyIds2.contains(gsBnppId2), "Canonical history_ids must track v2 bnpp_id: " + gsBnppId2);
 
+        // Verification of source_id and current_id tracking
+        assertEquals(gsBnppId1, can2.get("source_id"), "source_id must retain original v1 bnpp_id: " + gsBnppId1);
+        assertEquals(gsBnppId2, can2.get("current_id"), "current_id must reflect latest v2 bnpp_id: " + gsBnppId2);
+
         // Verify file_history auto-versioning: FINANICAL_CORP has v1 and v2 logged
         List<Map<String, Object>> files = loggingService.getFileHistory(testDataSource, 10);
         assertTrue(files.size() >= 2, "File history must have logged both uploaded files");
+    }
+
+    @Test
+    void testMoveDataFromGsTableToCanonicalWithLatestVersionAndTrackingIds() throws Exception {
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("person/@id", "Person", "person_id", "NONE", "PK"),
+                new FieldMapping("person/name", "Person", "name", "NONE", "NONE"),
+                new FieldMapping("person/city", "Person", "city", "NONE", "NONE")
+        );
+
+        // 1. Provision gs_person and Person tables in target DB
+        provisioningService.provisionDiscoveredTables(
+                dbConfig, null, List.of("person"), null, mappings, false
+        );
+
+        // 2. Insert multi-version historical records directly into gs_person
+        // P-200 has 3 versions: v1, v2, v3
+        String v1Id = "BNPP-20261117-000201";
+        String v2Id = "BNPP-20261117-000202";
+        String v3Id = "BNPP-20261117-000203";
+
+        jdbcTemplate.update("""
+            INSERT INTO gs_person (record_identifier, name, city, version_number, bnpp_id, current_id, source_id, source_bnpp_id, staging_bnpp_id, history_ids, status)
+            VALUES ('P-200', 'Charlie V1', 'Chicago', 1, ?, ?, ?, ?, ?, ?, 'STAGED')
+            """, v1Id, v1Id, v1Id, v1Id, v1Id, "[\"" + v1Id + "\"]");
+
+        jdbcTemplate.update("""
+            INSERT INTO gs_person (record_identifier, name, city, version_number, bnpp_id, current_id, source_id, source_bnpp_id, staging_bnpp_id, history_ids, status)
+            VALUES ('P-200', 'Charlie V2', 'Denver', 2, ?, ?, ?, ?, ?, ?, 'STAGED')
+            """, v2Id, v2Id, v1Id, v1Id, v2Id, "[\"" + v1Id + "\", \"" + v2Id + "\"]");
+
+        jdbcTemplate.update("""
+            INSERT INTO gs_person (record_identifier, name, city, version_number, bnpp_id, current_id, source_id, source_bnpp_id, staging_bnpp_id, history_ids, status)
+            VALUES ('P-200', 'Charlie Latest', 'Seattle', 3, ?, ?, ?, ?, ?, ?, 'STAGED')
+            """, v3Id, v3Id, v1Id, v1Id, v3Id, "[\"" + v1Id + "\", \"" + v2Id + "\", \"" + v3Id + "\"]");
+
+        // P-300 has 1 version: v1
+        String w1Id = "BNPP-20261117-000301";
+        jdbcTemplate.update("""
+            INSERT INTO gs_person (record_identifier, name, city, version_number, bnpp_id, current_id, source_id, source_bnpp_id, staging_bnpp_id, history_ids, status)
+            VALUES ('P-300', 'Diana Initial', 'Miami', 1, ?, ?, ?, ?, ?, ?, 'STAGED')
+            """, w1Id, w1Id, w1Id, w1Id, w1Id, "[\"" + w1Id + "\"]");
+
+        // 3. Move data from gs_<entitytable> to canonical table
+        JobLaunchRequest moveReq = new JobLaunchRequest();
+        moveReq.setDbConfig(dbConfig);
+        moveReq.setMappings(mappings);
+        moveReq.setTargetTable("Person");
+
+        JobLaunchResponse moveResp = batchJobService.moveGsDataToCanonical(moveReq);
+        assertTrue(moveResp.isSuccess(), "moveGsDataToCanonical must succeed: " + moveResp.getMessage());
+
+        // 4. Verify Canonical table Person for P-200: must have ONLY 1 row with LATEST VERSION data
+        Integer countP200 = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM Person WHERE person_id = 'P-200'", Integer.class);
+        assertEquals(1, countP200, "Canonical table Person must have exactly 1 record for P-200");
+
+        Map<String, Object> personP200 = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 'P-200'");
+        assertEquals("Charlie Latest", personP200.get("name"), "Canonical table must have latest version name");
+        assertEquals("Seattle", personP200.get("city"), "Canonical table must have latest version city");
+        assertEquals(3, ((Number) personP200.get("version_number")).intValue(), "Version number must reflect latest v3");
+
+        // Verify ID tracking on canonical Person table:
+        assertEquals(v1Id, personP200.get("source_id"), "source_id must track original v1 ID: " + v1Id);
+        assertEquals(v3Id, personP200.get("current_id"), "current_id must track latest v3 ID: " + v3Id);
+        String histP200 = (String) personP200.get("history_ids");
+        assertNotNull(histP200);
+        assertTrue(histP200.contains(v1Id), "history_ids must contain v1: " + v1Id);
+        assertTrue(histP200.contains(v2Id), "history_ids must contain v2: " + v2Id);
+        assertTrue(histP200.contains(v3Id), "history_ids must contain v3: " + v3Id);
+
+        // Verify Canonical table Person for P-300:
+        Map<String, Object> personP300 = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 'P-300'");
+        assertEquals("Diana Initial", personP300.get("name"));
+        assertEquals("Miami", personP300.get("city"));
+        assertEquals(1, ((Number) personP300.get("version_number")).intValue());
+        assertEquals(w1Id, personP300.get("source_id"));
+        assertEquals(w1Id, personP300.get("current_id"));
+        String histP300 = (String) personP300.get("history_ids");
+        assertTrue(histP300.contains(w1Id));
+
+        // Verify status in gs_person: all records marked as NORMALIZED
+        List<Map<String, Object>> gsP200 = jdbcTemplate.queryForList("SELECT * FROM gs_person WHERE record_identifier = 'P-200'");
+        assertEquals(3, gsP200.size());
+        for (Map<String, Object> row : gsP200) {
+            assertEquals("NORMALIZED", row.get("status"), "All processed records in gs_person must be NORMALIZED");
+        }
+
+        // 5. Delta test: insert version 4 for P-200 and move again
+        String v4Id = "BNPP-20261117-000204";
+        jdbcTemplate.update("""
+            INSERT INTO gs_person (record_identifier, name, city, version_number, bnpp_id, current_id, source_id, source_bnpp_id, staging_bnpp_id, history_ids, status)
+            VALUES ('P-200', 'Charlie Delta 4', 'San Francisco', 4, ?, ?, ?, ?, ?, ?, 'STAGED')
+            """, v4Id, v4Id, v1Id, v1Id, v4Id, "[\"" + v1Id + "\", \"" + v2Id + "\", \"" + v3Id + "\", \"" + v4Id + "\"]");
+
+        JobLaunchResponse deltaMoveResp = batchJobService.moveGsDataToCanonical(moveReq);
+        assertTrue(deltaMoveResp.isSuccess());
+
+        // Verify updated Canonical table Person:
+        Map<String, Object> updatedP200 = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 'P-200'");
+        assertEquals("Charlie Delta 4", updatedP200.get("name"), "Name must update to v4");
+        assertEquals("San Francisco", updatedP200.get("city"), "City must update to v4");
+        assertEquals(4, ((Number) updatedP200.get("version_number")).intValue(), "Version must update to 4");
+        assertEquals(v1Id, updatedP200.get("source_id"), "source_id must STILL retain original v1 ID: " + v1Id);
+        assertEquals(v4Id, updatedP200.get("current_id"), "current_id must update to latest v4 ID: " + v4Id);
+        String updatedHist = (String) updatedP200.get("history_ids");
+        assertTrue(updatedHist.contains(v1Id));
+        assertTrue(updatedHist.contains(v2Id));
+        assertTrue(updatedHist.contains(v3Id));
+        assertTrue(updatedHist.contains(v4Id));
+    }
+
+    @Test
+    void testEndToEndIngestionMovesXmlToGsEntityThenCanonicalWithLatestVersion() throws Exception {
+        // Sample XML with Person and nested Address
+        File xmlFile = File.createTempFile("vendor_person_address_", ".xml");
+        xmlFile.deleteOnExit();
+        Files.writeString(xmlFile.toPath(), """
+            <dataset>
+                <person id="P-500" status="active">
+                    <name>Edward Norton</name>
+                    <city>Chicago</city>
+                    <addresses>
+                        <address id="ADDR-501">
+                            <street>100 Michigan Ave</street>
+                            <city>Chicago</city>
+                        </address>
+                        <address id="ADDR-502">
+                            <street>200 Wacker Dr</street>
+                            <city>Chicago</city>
+                        </address>
+                    </addresses>
+                </person>
+            </dataset>
+            """);
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("person/@id", "Person", "person_id", "NONE", "PK"),
+                new FieldMapping("person/name", "Person", "name", "NONE", "NONE"),
+                new FieldMapping("person/city", "Person", "city", "NONE", "NONE"),
+                new FieldMapping("person/addresses/address/@id", "Address", "id", "NONE", "PK"),
+                new FieldMapping("person/@id", "Address", "person_id", "NONE", "FK"),
+                new FieldMapping("person/addresses/address/street", "Address", "street", "NONE", "NONE"),
+                new FieldMapping("person/addresses/address/city", "Address", "city", "NONE", "NONE")
+        );
+        mappings.get(4).setForeignKeyTable("Person");
+        mappings.get(4).setForeignKeyColumn("person_id");
+
+        // 1. Provision target tables
+        provisioningService.provisionDiscoveredTables(
+                dbConfig, xmlFile.getAbsolutePath(), List.of("person"), null, mappings, false
+        );
+
+        // 2. Launch Ingestion Job
+        JobLaunchRequest launchReq = new JobLaunchRequest();
+        launchReq.setDbConfig(dbConfig);
+        launchReq.setSourceXmlPath(xmlFile.getAbsolutePath());
+        launchReq.setRecordRootElement("person");
+        launchReq.setVendorName("CORP_TEST");
+        launchReq.setMappings(mappings);
+        launchReq.setStagedPipeline(false); // test standard Spring Batch direct pipeline with gs_ auto-population
+
+        JobLaunchResponse resp = batchJobService.launchIngestionJob(launchReq);
+        assertTrue(resp.isSuccess());
+
+        Thread.sleep(1500);
+
+        // 3. Verify gs_person is populated (historical data)
+        List<Map<String, Object>> gsPersonRows = jdbcTemplate.queryForList("SELECT * FROM gs_person WHERE record_identifier = 'P-500'");
+        assertFalse(gsPersonRows.isEmpty(), "gs_person table MUST NOT be empty! It must store historical XML data");
+        assertEquals("P-500", gsPersonRows.get(0).get("record_identifier"));
+        assertNotNull(gsPersonRows.get(0).get("bnpp_id"));
+
+        // 4. Verify gs_address is populated (historical child data)
+        List<Map<String, Object>> gsAddressRows = jdbcTemplate.queryForList("SELECT * FROM gs_address");
+        assertFalse(gsAddressRows.isEmpty(), "gs_address table MUST NOT be empty! It must store historical child address data");
+        assertTrue(gsAddressRows.size() >= 2, "gs_address must have captured both addresses from XML");
+
+        // 5. Verify canonical Person table (holds latest data)
+        Map<String, Object> canPerson = jdbcTemplate.queryForMap("SELECT * FROM Person WHERE person_id = 'P-500'");
+        assertEquals("Edward Norton", canPerson.get("name"));
+        assertEquals("Chicago", canPerson.get("city"));
+        assertNotNull(canPerson.get("bnpp_id"));
+        assertNotNull(canPerson.get("current_id"));
+        assertNotNull(canPerson.get("source_id"));
+        assertNotNull(canPerson.get("history_ids"));
+
+        // 6. Verify canonical Address table (holds latest data)
+        List<Map<String, Object>> canAddresses = jdbcTemplate.queryForList("SELECT * FROM Address");
+        List<Map<String, Object>> canPersonAddresses = jdbcTemplate.queryForList("SELECT * FROM Address WHERE person_id = 'P-500'");
+        assertEquals(2, canAddresses.size(), "Canonical Address table must contain normalized address records");
+        assertEquals(2, canPersonAddresses.size(), "Both address records must be linked to parent person_id 'P-500'");
     }
 }

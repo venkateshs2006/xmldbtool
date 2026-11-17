@@ -220,6 +220,13 @@ public class StagingXmlStreamingService {
 
         int batchSize = chunkSize > 0 ? chunkSize : 1000;
 
+        clearColumnCache();
+        if (targetDataSource != null) {
+            try (java.sql.Connection conn = targetDataSource.getConnection()) {
+                SchemaProvisioningService.prepareConnection(conn, null);
+            } catch (Exception ignored) {}
+        }
+
         JdbcTemplate jdbcTemplate = new JdbcTemplate(targetDataSource);
         ensureStagingTableExists(jdbcTemplate);
         ensureCheckpointTableExists(jdbcTemplate);
@@ -341,6 +348,8 @@ public class StagingXmlStreamingService {
                                         payloadHash
                                 );
                                 record.setBnppId(bnppId);
+                                record.setCurrentId(bnppId);
+                                record.setSourceId(bnppId);
                                 record.setSourceBnppId(bnppId);
                                 record.setStagingBnppId(bnppId);
                                 record.setHistoryIds("[" + bnppId + "]");
@@ -352,6 +361,13 @@ public class StagingXmlStreamingService {
                                 record.setCachedMap(recordMap);
 
                                 buffer.add(record);
+                                List<StagingXmlRecord> children = extractChildRecordsFromMap(
+                                        recordMap, matchedRoot, identifier, jobExecutionId, fileId,
+                                        recXmlVersion, recSchemaVersion, batchVer
+                                );
+                                if (!children.isEmpty()) {
+                                    buffer.addAll(children);
+                                }
                                 if (buffer.size() >= batchSize) {
                                     List<StagingXmlRecord> batchToFlush = new ArrayList<>(buffer);
                                     buffer.clear();
@@ -864,9 +880,11 @@ public class StagingXmlStreamingService {
                         }
                         case "file_id" -> ps.setString(idx++, r.getFileId());
                         case "bnpp_id" -> ps.setString(idx++, r.getBnppId());
-                        case "source_bnpp_id" -> ps.setString(idx++, r.getSourceBnppId() != null ? r.getSourceBnppId() : r.getBnppId());
+                        case "current_id" -> ps.setString(idx++, r.getCurrentId() != null ? r.getCurrentId() : r.getBnppId());
+                        case "source_id" -> ps.setString(idx++, r.getSourceId() != null ? r.getSourceId() : (r.getSourceBnppId() != null ? r.getSourceBnppId() : r.getBnppId()));
+                        case "source_bnpp_id" -> ps.setString(idx++, r.getSourceBnppId() != null ? r.getSourceBnppId() : (r.getSourceId() != null ? r.getSourceId() : r.getBnppId()));
                         case "staging_bnpp_id" -> ps.setString(idx++, r.getStagingBnppId() != null ? r.getStagingBnppId() : r.getBnppId());
-                        case "history_ids" -> ps.setString(idx++, r.getHistoryIds() != null ? r.getHistoryIds() : ("[" + r.getBnppId() + "]"));
+                        case "history_ids" -> ps.setString(idx++, r.getHistoryIds() != null ? r.getHistoryIds() : ("[" + (r.getCurrentId() != null ? r.getCurrentId() : r.getBnppId()) + "]"));
                         case "tag_name" -> ps.setString(idx++, r.getTagName() != null ? r.getTagName() : r.getEntityType());
                         case "version_number" -> ps.setInt(idx++, r.getVersionNumber() != null ? r.getVersionNumber() : 1);
                         case "record_identifier" -> ps.setString(idx++, r.getRecordIdentifier());
@@ -882,7 +900,14 @@ public class StagingXmlStreamingService {
                         case "raw_payload" -> ps.setString(idx++, r.getRawPayload());
                         case "extra_attributes" -> ps.setString(idx++, extractValue(map, "extra_attributes", "unmapped_attributes"));
                         default -> {
-                            String val = (map != null) ? resolveFlatColumnValue(map, col) : null;
+                            String val = null;
+                            if (map != null) {
+                                Object direct = map.get(col);
+                                if (direct == null) direct = map.get(col.toLowerCase());
+                                if (direct == null) direct = map.get(col.toUpperCase());
+                                if (direct != null) val = String.valueOf(direct);
+                                else val = resolveFlatColumnValue(map, col);
+                            }
                             ps.setString(idx++, val);
                         }
                     }
@@ -1072,7 +1097,144 @@ public class StagingXmlStreamingService {
                 return entry.getValue();
             }
         }
+        // If colName ends with _id (e.g. person_id), also check id, @id
+        if (lowerCol.endsWith("_id")) {
+            String prefix = lowerCol.substring(0, lowerCol.length() - 3);
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                String k = entry.getKey().toLowerCase();
+                if (k.equals("id") || k.equals("@id") || k.equals("code") || k.equals("@code")
+                        || k.equals(prefix) || k.equals("@" + prefix)
+                        || k.endsWith("/id") || k.endsWith("/@id")) {
+                    return entry.getValue();
+                }
+            }
+        }
+        // If colName is id, check @id, code, @code, or *_id
+        if (lowerCol.equals("id")) {
+            for (Map.Entry<String, Object> entry : map.entrySet()) {
+                String k = entry.getKey().toLowerCase();
+                if (k.equals("@id") || k.equals("code") || k.equals("@code") || k.endsWith("_id")) {
+                    return entry.getValue();
+                }
+            }
+        }
         return null;
+    }
+
+    private List<StagingXmlRecord> extractChildRecordsFromMap(Map<String, Object> parentMap,
+                                                             String parentRoot,
+                                                             String parentIdentifier,
+                                                             Long jobExecutionId,
+                                                             String fileId,
+                                                             String xmlVersion,
+                                                             String schemaVersion,
+                                                             int batchVer) {
+        List<StagingXmlRecord> children = new ArrayList<>();
+        if (parentMap == null || parentMap.isEmpty()) return children;
+
+        for (Map.Entry<String, Object> entry : parentMap.entrySet()) {
+            String key = entry.getKey();
+            if (key.startsWith("@") || key.startsWith("_") || key.equalsIgnoreCase("id")
+                    || key.equalsIgnoreCase("action") || key.equalsIgnoreCase("date")
+                    || key.equalsIgnoreCase("person_id")) {
+                continue;
+            }
+
+            Object val = entry.getValue();
+            if (val instanceof List<?> list && !list.isEmpty()) {
+                String childEntity = DynamicXmlUnmarshaller.singularize(key.toLowerCase());
+                if (XmlSchemaDiscoveryService.isWrapperContainerTag(childEntity, null)) continue;
+
+                int childIdx = 1;
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> rawChildMap) {
+                        Map<String, Object> childMap = new LinkedHashMap<>();
+                        for (Map.Entry<?, ?> me : rawChildMap.entrySet()) {
+                            if (me.getKey() != null) childMap.put(String.valueOf(me.getKey()), me.getValue());
+                        }
+                        String parentFkCol = parentRoot.toLowerCase() + "_id";
+                        childMap.putIfAbsent(parentFkCol, parentIdentifier);
+                        childMap.putIfAbsent("person_id", parentIdentifier);
+
+                        String childId = extractRecordIdentifier(childMap);
+                        if (childId == null || childId.trim().isEmpty()) {
+                            childId = parentIdentifier + "_" + childIdx++;
+                        }
+                        String childBnppId = generateBnppId(childEntity, childId, childMap);
+                        String childJson = "";
+                        try { childJson = objectMapper.writeValueAsString(childMap); } catch (Exception ignored) {}
+                        String childHash = computeSha256(childJson);
+
+                        StagingXmlRecord childRecord = new StagingXmlRecord(
+                                jobExecutionId,
+                                childEntity,
+                                childId,
+                                "add",
+                                null,
+                                childJson,
+                                childHash
+                        );
+                        childRecord.setBnppId(childBnppId);
+                        childRecord.setCurrentId(childBnppId);
+                        childRecord.setSourceId(childBnppId);
+                        childRecord.setSourceBnppId(childBnppId);
+                        childRecord.setStagingBnppId(childBnppId);
+                        childRecord.setHistoryIds("[" + childBnppId + "]");
+                        childRecord.setFileId(fileId);
+                        childRecord.setTagName(childEntity);
+                        childRecord.setVersionNumber(batchVer);
+                        childRecord.setXmlVersion(xmlVersion);
+                        childRecord.setSchemaVersion(schemaVersion);
+                        childRecord.setCachedMap(childMap);
+                        children.add(childRecord);
+                    }
+                }
+            } else if (val instanceof Map<?, ?> rawChildMap) {
+                String childEntity = DynamicXmlUnmarshaller.singularize(key.toLowerCase());
+                if (!XmlSchemaDiscoveryService.isWrapperContainerTag(childEntity, null)) {
+                    Map<String, Object> childMap = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> me : rawChildMap.entrySet()) {
+                        if (me.getKey() != null) childMap.put(String.valueOf(me.getKey()), me.getValue());
+                    }
+                    String parentFkCol = parentRoot.toLowerCase() + "_id";
+                    childMap.putIfAbsent(parentFkCol, parentIdentifier);
+                    childMap.putIfAbsent("person_id", parentIdentifier);
+
+                    String childId = extractRecordIdentifier(childMap);
+                    if (childId == null || childId.trim().isEmpty()) {
+                        childId = parentIdentifier + "_1";
+                    }
+                    String childBnppId = generateBnppId(childEntity, childId, childMap);
+                    String childJson = "";
+                    try { childJson = objectMapper.writeValueAsString(childMap); } catch (Exception ignored) {}
+                    String childHash = computeSha256(childJson);
+
+                    StagingXmlRecord childRecord = new StagingXmlRecord(
+                            jobExecutionId,
+                            childEntity,
+                            childId,
+                            "add",
+                            null,
+                            childJson,
+                            childHash
+                    );
+                    childRecord.setBnppId(childBnppId);
+                    childRecord.setCurrentId(childBnppId);
+                    childRecord.setSourceId(childBnppId);
+                    childRecord.setSourceBnppId(childBnppId);
+                    childRecord.setStagingBnppId(childBnppId);
+                    childRecord.setHistoryIds("[" + childBnppId + "]");
+                    childRecord.setFileId(fileId);
+                    childRecord.setTagName(childEntity);
+                    childRecord.setVersionNumber(batchVer);
+                    childRecord.setXmlVersion(xmlVersion);
+                    childRecord.setSchemaVersion(schemaVersion);
+                    childRecord.setCachedMap(childMap);
+                    children.add(childRecord);
+                }
+            }
+        }
+        return children;
     }
 
     public Integer getLatestRecordVersion(JdbcTemplate jdbcTemplate, String entityType, String recordIdentifier) {

@@ -12,7 +12,9 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.Statement;
+import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -41,6 +43,15 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
 
     private boolean continueOnTableError = true;
     private DatabaseErrorSkipListener skipListener;
+    private boolean writeToHistoricalGsTables = true;
+
+    public boolean isWriteToHistoricalGsTables() {
+        return writeToHistoricalGsTables;
+    }
+
+    public void setWriteToHistoricalGsTables(boolean writeToHistoricalGsTables) {
+        this.writeToHistoricalGsTables = writeToHistoricalGsTables;
+    }
 
     private final java.util.concurrent.atomic.AtomicLong totalRowsWritten = new java.util.concurrent.atomic.AtomicLong(0);
     private final Map<String, Long> tableWriteCounts = new ConcurrentHashMap<>();
@@ -352,7 +363,12 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             }
         }
 
-        // Execute batchUpdate for each target table strictly in the tag order sequence
+        // Step 1: Append all incoming XML records to their corresponding gs_<entity> historical tables
+        if (this.writeToHistoricalGsTables) {
+            writeToGsHistoricalTables(executionOrder, tableBatchMap, tableColumnsMap);
+        }
+
+        // Step 2: Execute batchUpdate / merge for each target table strictly in the tag order sequence
         for (int i = 0; i < executionOrder.size(); i++) {
             String tableName = executionOrder.get(i);
             List<MapSqlParameterSource> batchParams = tableBatchMap.get(tableName);
@@ -389,7 +405,14 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             for (MapSqlParameterSource paramSource : batchParams) {
                 for (String col : columnNames) {
                     if (!paramSource.hasValue(col)) {
-                        paramSource.addValue(col, null);
+                        Object val = null;
+                        for (String paramName : paramSource.getParameterNames()) {
+                            if (paramName.equalsIgnoreCase(col)) {
+                                val = paramSource.getValue(paramName);
+                                break;
+                            }
+                        }
+                        paramSource.addValue(col, val);
                     }
                 }
             }
@@ -932,10 +955,19 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             throw new IllegalArgumentException("Table name and columns cannot be empty");
         }
 
+        // Deduplicate column names case-insensitively to avoid duplicate columns in SQL statements
+        Set<String> uniqueCols = new LinkedHashSet<>();
+        Set<String> seenLower = new HashSet<>();
+        for (String col : columns) {
+            if (seenLower.add(col.toLowerCase())) {
+                uniqueCols.add(col);
+            }
+        }
+
         Set<String> matchedPks = new LinkedHashSet<>();
         Set<String> nonPkCols = new LinkedHashSet<>();
 
-        for (String col : columns) {
+        for (String col : uniqueCols) {
             if (pkColumns != null && (pkColumns.contains(col.toLowerCase()) || pkColumns.contains(col))) {
                 matchedPks.add(col);
             } else {
@@ -948,7 +980,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
         StringBuilder placeholders = new StringBuilder(" VALUES (");
 
         int idx = 0;
-        for (String col : columns) {
+        for (String col : uniqueCols) {
             if (idx > 0) {
                 insertSql.append(", ");
                 placeholders.append(", ");
@@ -988,7 +1020,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             StringBuilder mergeSql = new StringBuilder("MERGE INTO ").append(tableName).append(" (");
             StringBuilder mPlaceholders = new StringBuilder(" VALUES (");
             int mIdx = 0;
-            for (String col : columns) {
+            for (String col : uniqueCols) {
                 if (mIdx > 0) {
                     mergeSql.append(", ");
                     mPlaceholders.append(", ");
@@ -1033,6 +1065,223 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             }
 
         return insertSql.append(onConflict).toString();
+    }
+
+    private final Map<String, Set<String>> cachedExistingTableCols = new ConcurrentHashMap<>();
+
+    private Set<String> getExistingTableColumns(String tableName) {
+        if (tableName == null) return Collections.emptySet();
+        String key = tableName.toLowerCase();
+        Set<String> cached = cachedExistingTableCols.get(key);
+        if (cached != null) return cached;
+
+        Set<String> cols = new HashSet<>();
+        if (this.dataSource != null) {
+            try (Connection conn = this.dataSource.getConnection()) {
+                String schema = null;
+                try { schema = conn.getSchema(); } catch (Throwable ignored) {}
+                DatabaseMetaData meta = conn.getMetaData();
+                try (ResultSet rs = meta.getColumns(null, schema, tableName, "%")) {
+                    while (rs.next()) {
+                        String c = rs.getString("COLUMN_NAME");
+                        if (c != null) cols.add(c.toLowerCase());
+                    }
+                }
+                if (cols.isEmpty()) {
+                    try (ResultSet rs = meta.getColumns(null, schema, tableName.toUpperCase(), "%")) {
+                        while (rs.next()) {
+                            String c = rs.getString("COLUMN_NAME");
+                            if (c != null) cols.add(c.toLowerCase());
+                        }
+                    }
+                }
+                if (cols.isEmpty()) {
+                    try (ResultSet rs = meta.getColumns(null, schema, tableName.toLowerCase(), "%")) {
+                        while (rs.next()) {
+                            String c = rs.getString("COLUMN_NAME");
+                            if (c != null) cols.add(c.toLowerCase());
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+        if (cols.isEmpty() && this.jdbcTemplate != null) {
+            try {
+                this.jdbcTemplate.getJdbcTemplate().query("SELECT * FROM " + tableName + " WHERE 1=0", rs -> {
+                    ResultSetMetaData md = rs.getMetaData();
+                    for (int i = 1; i <= md.getColumnCount(); i++) {
+                        cols.add(md.getColumnName(i).toLowerCase());
+                    }
+                    return null;
+                });
+            } catch (Exception ignored) {}
+        }
+        if (!cols.isEmpty()) {
+            cachedExistingTableCols.put(key, cols);
+        }
+        return cols;
+    }
+
+    private void writeToGsHistoricalTables(List<String> executionOrder,
+                                          Map<String, List<MapSqlParameterSource>> tableBatchMap,
+                                          Map<String, Set<String>> tableColumnsMap) {
+        if (this.jdbcTemplate == null) return;
+        for (String canonicalTable : executionOrder) {
+            if (canonicalTable == null || canonicalTable.trim().isEmpty()) continue;
+            String lower = canonicalTable.trim().toLowerCase();
+            if (lower.startsWith("gs_") || lower.equals("staging_xml_records") || lower.equals("migration_errors")
+                    || lower.equals("file_history") || lower.equals("audit_log") || lower.equals("error_log")
+                    || lower.startsWith("batch_") || lower.startsWith("spring_")) {
+                continue;
+            }
+
+            List<MapSqlParameterSource> rows = tableBatchMap.get(canonicalTable);
+            if (rows == null || rows.isEmpty()) continue;
+
+            String norm = canonicalTable.trim().toLowerCase().replaceAll("[^a-zA-Z0-9_]", "_");
+            String singular = com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller.singularize(norm);
+
+            // Find matching historical table: gs_<entity>, <entity>_gs, <entity>_flat
+            String targetGsTable = null;
+            Set<String> gsCols = null;
+            for (String candidate : List.of("gs_" + norm, "gs_" + singular, norm + "_gs", singular + "_gs", norm + "_flat")) {
+                Set<String> cols = getExistingTableColumns(candidate);
+                if (!cols.isEmpty()) {
+                    targetGsTable = candidate;
+                    gsCols = cols;
+                    break;
+                }
+            }
+
+            if (targetGsTable == null || gsCols == null || gsCols.isEmpty()) {
+                continue;
+            }
+
+            try {
+                insertIntoGsHistoricalTable(targetGsTable, gsCols, canonicalTable, rows);
+                log.info("Appended {} historical records into '{}' from XML for entity '{}'",
+                        rows.size(), targetGsTable, canonicalTable);
+            } catch (Exception ex) {
+                log.warn("Notice appending historical records into '{}': {}", targetGsTable, ex.getMessage());
+            }
+        }
+    }
+
+    private void insertIntoGsHistoricalTable(String gsTable, Set<String> gsCols, String entityName, List<MapSqlParameterSource> rows) {
+        List<String> insertCols = new ArrayList<>();
+        // Standard audit & tracking columns if present in table
+        for (String c : List.of("job_execution_id", "file_id", "bnpp_id", "current_id", "source_id", "source_bnpp_id", "staging_bnpp_id",
+                "history_ids", "tag_name", "version_number", "record_identifier", "record_action", "record_date",
+                "xml_version", "schema_version", "payload_hash", "status", "raw_payload", "extra_attributes")) {
+            if (gsCols.contains(c)) {
+                insertCols.add(c);
+            }
+        }
+
+        // Add any business columns that exist in gsTable
+        for (String c : gsCols) {
+            if (!insertCols.contains(c) && !c.equalsIgnoreCase("id")
+                    && !c.equalsIgnoreCase("created_at") && !c.equalsIgnoreCase("updated_at")
+                    && !c.equalsIgnoreCase("error_message")) {
+                insertCols.add(c);
+            }
+        }
+
+        Set<String> reservedKeywords = Set.of(
+                "day", "month", "year", "date", "order", "group", "user", "value",
+                "key", "action", "role", "type", "desc", "asc", "limit", "table", "from", "select", "where"
+        );
+        List<String> quotedCols = insertCols.stream()
+                .map(c -> reservedKeywords.contains(c.toLowerCase()) ? "\"" + c + "\"" : c)
+                .toList();
+        String colList = String.join(", ", quotedCols);
+        String placeholders = String.join(", ", insertCols.stream().map(c -> ":" + c.replaceAll("[^a-zA-Z0-9_]", "_")).toList());
+        String sql = "INSERT INTO " + gsTable + " (" + colList + ") VALUES (" + placeholders + ")";
+
+        List<MapSqlParameterSource> gsBatchParams = new ArrayList<>();
+        for (MapSqlParameterSource row : rows) {
+            MapSqlParameterSource gsParam = new MapSqlParameterSource();
+            String bnppId = getParamString(row, "bnpp_id");
+            if (bnppId == null || bnppId.trim().isEmpty()) {
+                bnppId = com.enterprise.xmldbtool.util.BnppIdGenerator.generateId("BNPP");
+            }
+            String srcId = getParamString(row, "source_id");
+            if (srcId == null) srcId = getParamString(row, "source_bnpp_id");
+            if (srcId == null) srcId = bnppId;
+
+            String histIds = getParamString(row, "history_ids");
+            if (histIds == null) histIds = "[" + bnppId + "]";
+
+            for (String col : insertCols) {
+                String cLower = col.toLowerCase();
+                String paramKey = col.replaceAll("[^a-zA-Z0-9_]", "_");
+                switch (cLower) {
+                    case "bnpp_id" -> gsParam.addValue(paramKey, bnppId);
+                    case "current_id" -> gsParam.addValue(paramKey, bnppId);
+                    case "source_id", "source_bnpp_id" -> gsParam.addValue(paramKey, srcId);
+                    case "staging_bnpp_id" -> gsParam.addValue(paramKey, bnppId);
+                    case "history_ids" -> gsParam.addValue(paramKey, histIds);
+                    case "tag_name" -> gsParam.addValue(paramKey, entityName.toLowerCase());
+                    case "version_number" -> {
+                        Object ver = getParamValue(row, "version_number");
+                        gsParam.addValue(paramKey, ver != null ? ver : 1);
+                    }
+                    case "status" -> gsParam.addValue(paramKey, "STAGED");
+                    case "payload_hash" -> {
+                        Object h = getParamValue(row, "payload_hash");
+                        gsParam.addValue(paramKey, h != null ? h : com.enterprise.xmldbtool.service.StagingXmlStreamingService.computeSha256(row.getValues().toString()));
+                    }
+                    case "job_execution_id" -> gsParam.addValue(paramKey, getParamValue(row, "job_execution_id"));
+                    case "file_id" -> gsParam.addValue(paramKey, getParamValue(row, "file_id"));
+                    case "record_identifier" -> {
+                        Object rid = getParamValue(row, "record_identifier");
+                        if (rid == null) rid = getParamValue(row, entityName.toLowerCase() + "_id");
+                        if (rid == null) rid = getParamValue(row, "id");
+                        gsParam.addValue(paramKey, rid != null ? String.valueOf(rid) : bnppId);
+                    }
+                    case "record_action" -> {
+                        Object act = getParamValue(row, "record_action");
+                        if (act == null) act = getParamValue(row, "action");
+                        gsParam.addValue(paramKey, act != null ? String.valueOf(act) : "add");
+                    }
+                    case "record_date" -> {
+                        Object dt = getParamValue(row, "record_date");
+                        if (dt == null) dt = getParamValue(row, "date");
+                        gsParam.addValue(paramKey, dt != null ? String.valueOf(dt) : null);
+                    }
+                    case "xml_version" -> gsParam.addValue(paramKey, getParamValue(row, "xml_version"));
+                    case "schema_version" -> gsParam.addValue(paramKey, getParamValue(row, "schema_version"));
+                    case "raw_payload" -> {
+                        Object raw = getParamValue(row, "raw_payload");
+                        gsParam.addValue(paramKey, raw != null ? String.valueOf(raw) : row.getValues().toString());
+                    }
+                    case "extra_attributes" -> gsParam.addValue(paramKey, getParamValue(row, "extra_attributes"));
+                    default -> {
+                        Object val = getParamValue(row, col);
+                        gsParam.addValue(paramKey, autoConvertType(val, col));
+                    }
+                }
+            }
+            gsBatchParams.add(gsParam);
+        }
+
+        if (!gsBatchParams.isEmpty()) {
+            this.jdbcTemplate.batchUpdate(sql, gsBatchParams.toArray(new org.springframework.jdbc.core.namedparam.SqlParameterSource[0]));
+        }
+    }
+
+    private String getParamString(MapSqlParameterSource source, String colName) {
+        Object val = getParamValue(source, colName);
+        return val != null ? String.valueOf(val) : null;
+    }
+
+    private Object getParamValue(MapSqlParameterSource source, String colName) {
+        if (source == null || colName == null) return null;
+        if (source.hasValue(colName)) return source.getValue(colName);
+        for (String p : source.getParameterNames()) {
+            if (p.equalsIgnoreCase(colName)) return source.getValue(p);
+        }
+        return null;
     }
 
     public NamedParameterJdbcTemplate getJdbcTemplate() {

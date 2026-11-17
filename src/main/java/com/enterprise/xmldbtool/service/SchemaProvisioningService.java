@@ -379,7 +379,7 @@ public class SchemaProvisioningService {
             if (mappings != null && !mappings.isEmpty()) {
                 for (FieldMapping m : mappings) {
                     if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
-                        allEntityTargets.add(m.getTargetTable().trim());
+                        allEntityTargets.add(m.getTargetTable().trim().replaceFirst("(?i)^gs_", ""));
                     }
                 }
             }
@@ -428,13 +428,13 @@ public class SchemaProvisioningService {
                 applyForeignKeyRelationshipsOnGsTables(stmt, mappings, isOracle);
             }
 
-            // 3. Tables based on ingestion.json (canonical relational tables)
+            // 3. Tables based on ingestion.json (canonical relational tables - final landing of the data)
             boolean hasUserMappings = mappings != null && !mappings.isEmpty();
             if (hasUserMappings) {
-                // Provision mapped tables directly from mapping definitions
+                // Provision canonical destination tables directly from mapping definitions
                 createdTables.addAll(provisionMappedTables(stmt, mappings, effectiveElements, isOracle));
-            } else if (!strictIngestionJson) {
-                // Legacy fallback for tests that explicitly assert auto-derived tables without ingestion.json
+            } else {
+                // Fallback: provision canonical relational tables for each entity root
                 for (String rootTag : effectiveRoots) {
                     if (rootTag == null || rootTag.trim().isEmpty()) continue;
                     String norm = rootTag.trim().toLowerCase();
@@ -445,9 +445,6 @@ public class SchemaProvisioningService {
                     createdTables.addAll(provisionDynamicRelationalTables(stmt, rootTag, effectiveElements, isOracle));
                 }
                 createdTables.addAll(provisionLookupTables(stmt, effectiveElements, isOracle));
-            } else {
-                // Rule: Strictly provision only gs_<entity> tables based on ingestion.json
-                log.info("Strict Ingestion JSON mode: Provisioning strictly gs_<entity> tables with PK/FK relationships.");
             }
 
         } catch (Exception ex) {
@@ -470,7 +467,9 @@ public class SchemaProvisioningService {
         Map<String, List<FieldMapping>> byTable = new LinkedHashMap<>();
         for (FieldMapping m : mappings) {
             if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
-                byTable.computeIfAbsent(m.getTargetTable().trim(), k -> new ArrayList<>()).add(m);
+                String target = m.getTargetTable().trim();
+                String canonicalTarget = target.replaceFirst("(?i)^gs_", "");
+                byTable.computeIfAbsent(canonicalTarget, k -> new ArrayList<>()).add(m);
             }
         }
 
@@ -573,6 +572,10 @@ public class SchemaProvisioningService {
             // Enterprise traceability & versioning fields
             desiredCols.add("bnpp_id");
             colDefs.append(", bnpp_id VARCHAR(64)");
+            desiredCols.add("current_id");
+            colDefs.append(", current_id VARCHAR(64)");
+            desiredCols.add("source_id");
+            colDefs.append(", source_id VARCHAR(64)");
             desiredCols.add("source_bnpp_id");
             colDefs.append(", source_bnpp_id VARCHAR(64)");
             desiredCols.add("staging_bnpp_id");
@@ -604,6 +607,8 @@ public class SchemaProvisioningService {
             try {
                 if (!isOracle) {
                     stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_bnpp ON " + tableName + "(bnpp_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_curr_id ON " + tableName + "(current_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_src_id ON " + tableName + "(source_id)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_src_bnpp ON " + tableName + "(source_bnpp_id)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_hash ON " + tableName + "(payload_hash)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_ver ON " + tableName + "(version_number)");
@@ -621,9 +626,9 @@ public class SchemaProvisioningService {
                     && m.getTargetColumn() != null
                     && m.getForeignKeyTable() != null
                     && m.getForeignKeyColumn() != null) {
-                String targetTable = m.getTargetTable().trim();
+                String targetTable = m.getTargetTable().trim().replaceFirst("(?i)^gs_", "");
                 String targetCol = m.getTargetColumn().trim();
-                String refTable = m.getForeignKeyTable().trim();
+                String refTable = m.getForeignKeyTable().trim().replaceFirst("(?i)^gs_", "");
                 String refCol = m.getForeignKeyColumn().trim();
                 String fkName = "fk_" + targetTable.toLowerCase() + "_" + targetCol.toLowerCase() + "_" + refTable.toLowerCase();
                 if (fkName.length() > 30) {
@@ -655,7 +660,9 @@ public class SchemaProvisioningService {
         Map<String, List<FieldMapping>> byTable = new LinkedHashMap<>();
         for (FieldMapping m : mappings) {
             if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
-                byTable.computeIfAbsent(m.getTargetTable().trim(), k -> new ArrayList<>()).add(m);
+                String target = m.getTargetTable().trim();
+                String canonicalTarget = target.replaceFirst("(?i)^gs_", "");
+                byTable.computeIfAbsent(canonicalTarget, k -> new ArrayList<>()).add(m);
             }
         }
 
@@ -682,15 +689,15 @@ public class SchemaProvisioningService {
             entityToPkCol.put(normEntity, pkCol);
             entityToPkCol.put(normEntity.replaceFirst("^gs_", ""), pkCol);
 
-            // Ensure referenced PK/unique column has UNIQUE constraint/index so FK can reference it
+            // Ensure referenced PK/unique column has non-unique index on gs_<entity> for fast lookups across versions
             if (!pkCol.equalsIgnoreCase("id")) {
                 try {
-                    String uqName = ("uq_" + gsTable + "_" + pkCol).toLowerCase();
-                    if (uqName.length() > 30 && isOracle) uqName = uqName.substring(0, 30);
+                    String idxName = ("idx_" + gsTable + "_" + pkCol).toLowerCase();
+                    if (idxName.length() > 30 && isOracle) idxName = idxName.substring(0, 30);
                     if (!isOracle) {
-                        stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS " + uqName + " ON " + gsTable + "(" + pkCol + ")");
+                        stmt.execute("CREATE INDEX IF NOT EXISTS " + idxName + " ON " + gsTable + "(" + pkCol + ")");
                     } else {
-                        stmt.execute("ALTER TABLE " + gsTable + " ADD CONSTRAINT " + uqName + " UNIQUE (" + pkCol + ")");
+                        try { stmt.execute("CREATE INDEX " + idxName + " ON " + gsTable + "(" + pkCol + ")"); } catch (Exception ignored) {}
                     }
                 } catch (Exception ignored) {}
             }
@@ -828,6 +835,10 @@ public class SchemaProvisioningService {
         // Enterprise traceability & versioning fields
         masterCols.add("bnpp_id");
         masterColDefs.append(", bnpp_id VARCHAR(64)");
+        masterCols.add("current_id");
+        masterColDefs.append(", current_id VARCHAR(64)");
+        masterCols.add("source_id");
+        masterColDefs.append(", source_id VARCHAR(64)");
         masterCols.add("source_bnpp_id");
         masterColDefs.append(", source_bnpp_id VARCHAR(64)");
         masterCols.add("staging_bnpp_id");
@@ -941,6 +952,10 @@ public class SchemaProvisioningService {
                 // Enterprise traceability & versioning fields
                 childDesiredCols.add("bnpp_id");
                 childCols.append(", bnpp_id VARCHAR(64)");
+                childDesiredCols.add("current_id");
+                childCols.append(", current_id VARCHAR(64)");
+                childDesiredCols.add("source_id");
+                childCols.append(", source_id VARCHAR(64)");
                 childDesiredCols.add("source_bnpp_id");
                 childCols.append(", source_bnpp_id VARCHAR(64)");
                 childDesiredCols.add("staging_bnpp_id");
@@ -1069,6 +1084,10 @@ public class SchemaProvisioningService {
             // Enterprise traceability & versioning fields
             desiredCols.add("bnpp_id");
             colDefs.append(", bnpp_id VARCHAR(64)");
+            desiredCols.add("current_id");
+            colDefs.append(", current_id VARCHAR(64)");
+            desiredCols.add("source_id");
+            colDefs.append(", source_id VARCHAR(64)");
             desiredCols.add("source_bnpp_id");
             colDefs.append(", source_bnpp_id VARCHAR(64)");
             desiredCols.add("staging_bnpp_id");
@@ -1099,6 +1118,8 @@ public class SchemaProvisioningService {
             try {
                 if (!isOracle) {
                     stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_bnpp ON " + tableName + "(bnpp_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_curr_id ON " + tableName + "(current_id)");
+                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_src_id ON " + tableName + "(source_id)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_src_bnpp ON " + tableName + "(source_bnpp_id)");
                     stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + tableName.toLowerCase() + "_hash ON " + tableName + "(payload_hash)");
                 } else {
@@ -1275,7 +1296,7 @@ public class SchemaProvisioningService {
         }
 
         Set<String> desiredCols = new LinkedHashSet<>(List.of(
-                "job_execution_id", "file_id", "bnpp_id", "source_bnpp_id", "staging_bnpp_id", "history_ids",
+                "job_execution_id", "file_id", "bnpp_id", "current_id", "source_id", "source_bnpp_id", "staging_bnpp_id", "history_ids",
                 "tag_name", "version_number",
                 "record_identifier", "record_action", "record_date",
                 "xml_version", "schema_version", "payload_hash", "status",
@@ -1392,6 +1413,8 @@ public class SchemaProvisioningService {
                     "job_execution_id NUMBER(19), " +
                     "file_id VARCHAR2(64), " +
                     "bnpp_id VARCHAR2(64), " +
+                    "current_id VARCHAR2(64), " +
+                    "source_id VARCHAR2(64), " +
                     "source_bnpp_id VARCHAR2(64), " +
                     "staging_bnpp_id VARCHAR2(64), " +
                     "history_ids CLOB, " +
@@ -1416,6 +1439,8 @@ public class SchemaProvisioningService {
                     "job_execution_id BIGINT, " +
                     "file_id VARCHAR(64), " +
                     "bnpp_id VARCHAR(64), " +
+                    "current_id VARCHAR(64), " +
+                    "source_id VARCHAR(64), " +
                     "source_bnpp_id VARCHAR(64), " +
                     "staging_bnpp_id VARCHAR(64), " +
                     "history_ids TEXT, " +
@@ -1445,6 +1470,8 @@ public class SchemaProvisioningService {
                     stmt.execute("DROP INDEX IF EXISTS idx_" + flatTable + "_bnpp");
                 } catch (Exception ignored) {}
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_bnpp ON " + flatTable + "(bnpp_id)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_curr_id ON " + flatTable + "(current_id)");
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_src_id ON " + flatTable + "(source_id)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_rec_id ON " + flatTable + "(record_identifier)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_rec_ver ON " + flatTable + "(record_identifier, version_number)");
                 stmt.execute("CREATE INDEX IF NOT EXISTS idx_" + flatTable + "_hash ON " + flatTable + "(record_identifier, payload_hash)");

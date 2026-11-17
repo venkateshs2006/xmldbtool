@@ -60,6 +60,17 @@ public class JobTelemetryController {
         }
     }
 
+    @PostMapping("/move-to-canonical")
+    public ResponseEntity<?> moveGsToCanonical(@RequestBody(required = false) JobLaunchRequest request) {
+        if (request == null) request = new JobLaunchRequest();
+        JobLaunchResponse response = batchJobService.moveGsDataToCanonical(request);
+        if (response.isSuccess()) {
+            return ResponseEntity.ok(response);
+        } else {
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
     @GetMapping("/history")
     public ResponseEntity<java.util.List<com.enterprise.xmldbtool.model.JobExecutionSummary>> getJobHistory() {
         return ResponseEntity.ok(batchJobService.getAllJobExecutions());

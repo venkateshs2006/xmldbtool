@@ -1,6 +1,7 @@
 package com.enterprise.xmldbtool.service;
 
 import com.enterprise.xmldbtool.batch.DynamicXmlUnmarshaller;
+import com.enterprise.xmldbtool.model.ColumnMetadata;
 import com.enterprise.xmldbtool.model.DbConnectionConfig;
 import com.enterprise.xmldbtool.model.DiscoveredElement;
 import com.enterprise.xmldbtool.model.FieldMapping;
@@ -130,7 +131,8 @@ public class XmlSchemaDiscoveryService {
                                 .filter(t -> t.toLowerCase().endsWith("_stage") || t.equalsIgnoreCase("staging_xml_records"))
                                 .toList());
                         response.setCreatedFlatTables(created.stream()
-                                .filter(t -> t.toLowerCase().endsWith("_gs") || t.toLowerCase().endsWith("_flat") || t.equalsIgnoreCase("staging_xml_records"))
+                                .filter(t -> (t.toLowerCase().startsWith("gs_") || t.toLowerCase().endsWith("_gs") || t.toLowerCase().endsWith("_flat")) && !t.equalsIgnoreCase("gs_error_records"))
+                                .distinct()
                                 .toList());
                     } else {
                         List<String> staging = provisioningService.ensureStagingTable(request.getDbConfig());
@@ -152,14 +154,29 @@ public class XmlSchemaDiscoveryService {
                     for (FieldMapping m : effectiveMappings) {
                         if (m.getTargetTable() != null) {
                             String norm = m.getTargetTable().trim().toLowerCase();
-                            mappedTables.add(norm);
                             mappedTables.add(norm.replaceFirst("^gs_", ""));
-                            mappedTables.add("gs_" + norm.replaceFirst("^gs_", ""));
                         }
                     }
                     canonicalTables = canonicalTables.stream()
                             .filter(t -> mappedTables.contains(t.getTableName().toLowerCase()))
                             .toList();
+                }
+
+                // If DB query didn't return canonical tables yet, synthesize from effectiveMappings
+                if (canonicalTables.isEmpty() && effectiveMappings != null && !effectiveMappings.isEmpty()) {
+                    Map<String, List<ColumnMetadata>> colsByTable = new LinkedHashMap<>();
+                    for (FieldMapping m : effectiveMappings) {
+                        if (m.getTargetTable() != null && m.getTargetColumn() != null) {
+                            String canon = m.getTargetTable().trim().replaceFirst("(?i)^gs_", "");
+                            colsByTable.computeIfAbsent(canon, k -> new ArrayList<>())
+                                    .add(new ColumnMetadata(m.getTargetColumn().trim(), "VARCHAR", true, 255));
+                        }
+                    }
+                    List<TableMetadata> synthetic = new ArrayList<>();
+                    for (Map.Entry<String, List<ColumnMetadata>> entry : colsByTable.entrySet()) {
+                        synthetic.add(new TableMetadata(entry.getKey(), request.getDbConfig().getSchema(), entry.getValue()));
+                    }
+                    canonicalTables = synthetic;
                 }
 
                 response.setDiscoveredTables(canonicalTables);
@@ -254,14 +271,29 @@ public class XmlSchemaDiscoveryService {
                     for (FieldMapping m : effectiveMappings) {
                         if (m.getTargetTable() != null) {
                             String norm = m.getTargetTable().trim().toLowerCase();
-                            mappedTables.add(norm);
                             mappedTables.add(norm.replaceFirst("^gs_", ""));
-                            mappedTables.add("gs_" + norm.replaceFirst("^gs_", ""));
                         }
                     }
                     canonicalTables = canonicalTables.stream()
                             .filter(t -> mappedTables.contains(t.getTableName().toLowerCase()))
                             .toList();
+                }
+
+                // If DB query didn't return canonical tables yet, synthesize from effectiveMappings
+                if (canonicalTables.isEmpty() && effectiveMappings != null && !effectiveMappings.isEmpty()) {
+                    Map<String, List<ColumnMetadata>> colsByTable = new LinkedHashMap<>();
+                    for (FieldMapping m : effectiveMappings) {
+                        if (m.getTargetTable() != null && m.getTargetColumn() != null) {
+                            String canon = m.getTargetTable().trim().replaceFirst("(?i)^gs_", "");
+                            colsByTable.computeIfAbsent(canon, k -> new ArrayList<>())
+                                    .add(new ColumnMetadata(m.getTargetColumn().trim(), "VARCHAR", true, 255));
+                        }
+                    }
+                    List<TableMetadata> synthetic = new ArrayList<>();
+                    for (Map.Entry<String, List<ColumnMetadata>> entry : colsByTable.entrySet()) {
+                        synthetic.add(new TableMetadata(entry.getKey(), request.getDbConfig().getSchema(), entry.getValue()));
+                    }
+                    canonicalTables = synthetic;
                 }
 
                 response.setDiscoveredTables(canonicalTables);

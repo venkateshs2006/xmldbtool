@@ -15,6 +15,8 @@ import java.util.Map;
 public class SchemaDiscoveryController {
 
     private final XmlSchemaDiscoveryService discoveryService;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.enterprise.xmldbtool.service.DynamicBatchJobService batchJobService;
 
     public SchemaDiscoveryController(XmlSchemaDiscoveryService discoveryService) {
         this.discoveryService = discoveryService;
@@ -62,6 +64,24 @@ public class SchemaDiscoveryController {
                 "tableName", tableName,
                 "createdTables", created
         ));
+    }
+
+    /**
+     * Moves latest version data from gs_<entity> tables to canonical destination tables,
+     * updating source_id, current_id, and history_ids.
+     */
+    @PostMapping("/move-to-canonical")
+    public ResponseEntity<?> moveGsToCanonical(@RequestBody SchemaDiscoveryRequest request) {
+        if (batchJobService != null) {
+            com.enterprise.xmldbtool.model.JobLaunchRequest jobReq = new com.enterprise.xmldbtool.model.JobLaunchRequest();
+            jobReq.setDbConfig(request.getDbConfig());
+            jobReq.setSourceXmlPath(request.getSourceXmlPath());
+            jobReq.setRecordRootElement(request.getRecordRootElement());
+            jobReq.setRecordRootElements(request.getRecordRootElements());
+            jobReq.setIngestMappingJson(request.getMappingJson());
+            return ResponseEntity.ok(batchJobService.moveGsDataToCanonical(jobReq));
+        }
+        return ResponseEntity.ok(Map.of("success", true, "message", "DynamicBatchJobService not available"));
     }
 
     @PostMapping("/validate-mappings")

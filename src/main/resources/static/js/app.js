@@ -2510,7 +2510,10 @@ function updateStep2IngestionStatus() {
 
     const isLoaded = !!AppState.ingestionJsonUploadedOrModified;
     const mappings = AppState.mapping.fieldMappings || [];
-    const distinctTables = Array.from(new Set(mappings.map(m => m.targetTable).filter(Boolean)));
+    const distinctTables = Array.from(new Set(mappings.map(m => {
+        let t = (m.targetTable || '').trim();
+        return t.replace(/^gs_/i, '') || t;
+    }).filter(Boolean)));
     const rawRoots = document.getElementById('xml-root-element')?.value.trim() || AppState.source.rootElement || '';
     const rootTokens = rawRoots ? rawRoots.split(/[,;\s]+/).filter(Boolean) : [];
 

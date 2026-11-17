@@ -1692,6 +1692,72 @@ public class DynamicBatchJobService {
         return launchStagedPipelineJob(resumeReq);
     }
 
+    /**
+     * Directly moves data from flat gs_<entity> tables to canonical destination tables
+     * with the latest version of the data, updating source_id, current_id, and history_ids.
+     */
+    public JobLaunchResponse moveGsDataToCanonical(JobLaunchRequest request) {
+        try {
+            if (request == null) request = new JobLaunchRequest();
+            long timestamp = System.currentTimeMillis();
+
+            // Resolve target DataSource
+            DataSource targetDataSource = null;
+            if (request.getDbConfig() != null) {
+                targetDataSource = dataSourceService.getOrCreateDataSource(request.getDbConfig());
+            } else if (this.jdbcTemplate != null) {
+                targetDataSource = this.jdbcTemplate.getDataSource();
+            } else if (dataSourceService != null && !dataSourceService.getActivePools().isEmpty()) {
+                targetDataSource = dataSourceService.getActivePools().values().iterator().next();
+            }
+
+            if (targetDataSource == null) {
+                return new JobLaunchResponse(false, "Target database configuration must be provided.", null, "FAILED");
+            }
+
+            // Ensure schema and tables exist
+            if (request.getMappings() == null || request.getMappings().isEmpty()) {
+                if (request.getIngestionJsonPath() != null && !request.getIngestionJsonPath().trim().isEmpty()) {
+                    List<FieldMapping> loaded = discoveryService.loadMappingsFromFile(request.getIngestionJsonPath());
+                    if (loaded != null && !loaded.isEmpty()) request.setMappings(loaded);
+                } else if (request.getIngestMappingJson() != null && !request.getIngestMappingJson().trim().isEmpty()) {
+                    List<FieldMapping> loaded = discoveryService.parseMappingsFromJsonStringOrFile(request.getIngestMappingJson());
+                    if (loaded != null && !loaded.isEmpty()) request.setMappings(loaded);
+                }
+            }
+
+            verifyAndEnsureDatabaseAndTables(request, request.getRecordRootElements());
+
+            int chunkSize = request.getChunkSize() > 0 ? request.getChunkSize() : 1000;
+            List<String> tableOrder = DynamicJdbcBatchWriter.determineTableOrder(
+                    request.getTableOrder(),
+                    request.getMappings(),
+                    request.getTargetTable()
+            );
+
+            DynamicSchemaResolutionService.NormalizationSummary summary = resolutionService.moveGsToCanonical(
+                    timestamp,
+                    targetDataSource,
+                    request.getMappings(),
+                    tableOrder,
+                    request.getTargetTable(),
+                    chunkSize,
+                    null
+            );
+
+            log.info("moveGsDataToCanonical completed: normalized {} records into canonical tables.", summary.normalizedCount());
+            return new JobLaunchResponse(
+                    true,
+                    "Successfully moved data from gs_<entity> to canonical tables with latest versions. Normalized: " + summary.normalizedCount() + ", writes: " + summary.tableWriteCounts(),
+                    timestamp,
+                    "COMPLETED"
+            );
+        } catch (Exception ex) {
+            log.error("Failed to move data from gs_<entity> to canonical table: {}", ex.getMessage(), ex);
+            return new JobLaunchResponse(false, "Failed to move gs data to canonical: " + ex.getMessage(), null, "FAILED");
+        }
+    }
+
     private JobLaunchRequest copyJobLaunchRequest(JobLaunchRequest src) {
         JobLaunchRequest copy = new JobLaunchRequest();
         copy.setSourceXmlPath(src.getSourceXmlPath());

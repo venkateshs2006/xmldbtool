@@ -761,18 +761,31 @@
                             </button>
                         </div>
 
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                            <div class="bg-white p-3.5 rounded-lg border border-slate-200">
+                                <div class="font-bold text-emerald-800 flex items-center justify-between mb-1">
+                                    <div class="flex items-center gap-1.5">
+                                        <i class="fas fa-table-cells text-emerald-600"></i>
+                                        <span>Canonical Destination Tables</span>
+                                    </div>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">Final Landing</span>
+                                </div>
+                                <p class="text-[11px] text-gray-500 mb-2">Final landing of the data. Stores latest active version with <code>source_id</code>, <code>current_id</code>, and <code>history_ids</code> audit backtracking array.</p>
+                                <div id="step2-canonical-tables-list" class="flex flex-wrap gap-1 font-mono text-[11px]">
+                                    <span class="text-gray-400 italic">Defined in ingestion.json (e.g. Person, Address)</span>
+                                </div>
+                            </div>
                             <div class="bg-white p-3.5 rounded-lg border border-slate-200">
                                 <div class="font-bold text-blue-800 flex items-center justify-between mb-1">
                                     <div class="flex items-center gap-1.5">
-                                        <i class="fas fa-database text-blue-600"></i>
-                                        <span>Target Tables: Golden Source (<code>gs_&lt;entity&gt;</code>)</span>
+                                        <i class="fas fa-clock-rotate-left text-blue-600"></i>
+                                        <span>Historical Tables (<code>gs_&lt;entity&gt;</code>)</span>
                                     </div>
-                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">Strictly gs_ tables</span>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">Golden Source</span>
                                 </div>
-                                <p class="text-[11px] text-gray-500 mb-2">Created strictly from ingestion.json entities with <code>gs_</code> prefix. Each table includes Primary Keys, Foreign Key relationships, BNPP ID, and audit columns.</p>
+                                <p class="text-[11px] text-gray-500 mb-2">Historical data tracking tables (<code>gs_&lt;entity&gt;</code>). Stores full append-only version history across all incoming file batches.</p>
                                 <div id="step2-flat-tables-list" class="flex flex-wrap gap-1 font-mono text-[11px]">
-                                    <span class="text-gray-400 italic">Defined in ingestion.json (e.g. gs_&lt;entity&gt;)</span>
+                                    <span class="text-gray-400 italic">Defined in ingestion.json (e.g. gs_person)</span>
                                 </div>
                             </div>
                             <div class="bg-white p-3.5 rounded-lg border border-slate-200">
