@@ -484,9 +484,11 @@ public class DynamicSchemaResolutionService {
                 for (String candidate : List.of(gsPrefixDirect, gsPrefixSingular, gsPrefixPlural, directGs, singularGs, pluralGs, directFlat, singularFlat, pluralFlat)) {
                     if (candidate.equalsIgnoreCase("gs_error_records") || candidate.equalsIgnoreCase("migration_errors")
                             || candidate.equalsIgnoreCase("staging_xml_records") || candidate.equalsIgnoreCase("gs_file_history")
-                            || candidate.equalsIgnoreCase("gs_audit_log") || candidate.equalsIgnoreCase("gs_error_log")
+                            || candidate.equalsIgnoreCase("gs_audit_log") || candidate.equalsIgnoreCase("gs_audit_logs")
+                            || candidate.equalsIgnoreCase("gs_error_log") || candidate.equalsIgnoreCase("gs_error_logs")
                             || candidate.equalsIgnoreCase("file_history") || candidate.equalsIgnoreCase("audit_log")
-                            || candidate.equalsIgnoreCase("error_log")) {
+                            || candidate.equalsIgnoreCase("audit_logs") || candidate.equalsIgnoreCase("error_log")
+                            || candidate.equalsIgnoreCase("error_logs")) {
                         continue;
                     }
                     if (tableExists(jdbcTemplate, candidate)) {
@@ -1566,7 +1568,7 @@ public class DynamicSchemaResolutionService {
     }
 
     private static final Set<String> SYSTEM_METADATA_TABLES = Set.of(
-            "file_history", "audit_log", "error_log", "users", "app_users",
+            "file_history", "audit_log", "audit_logs", "error_log", "error_logs", "users", "app_users",
             "saved_job_configs", "job_details", "job_checkpoints",
             "schema_registry_versions", "migration_errors", "staging_xml_records",
             "gs_error_records"

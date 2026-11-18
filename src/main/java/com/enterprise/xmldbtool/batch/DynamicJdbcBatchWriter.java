@@ -1130,7 +1130,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, o
             if (canonicalTable == null || canonicalTable.trim().isEmpty()) continue;
             String lower = canonicalTable.trim().toLowerCase();
             if (lower.startsWith("gs_") || lower.equals("staging_xml_records") || lower.equals("migration_errors")
-                    || lower.equals("file_history") || lower.equals("audit_log") || lower.equals("error_log")
+                    || lower.equals("file_history") || lower.equals("audit_log") || lower.equals("audit_logs") || lower.equals("error_log") || lower.equals("error_logs")
                     || lower.startsWith("batch_") || lower.startsWith("spring_")) {
                 continue;
             }
