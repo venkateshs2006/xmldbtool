@@ -1217,7 +1217,7 @@ public class XmlSchemaDiscoveryService {
         if (tag == null || tag.trim().isEmpty()) return false;
         String norm = tag.trim().toLowerCase();
         if (docRoot != null && norm.equalsIgnoreCase(docRoot.trim())) return true;
-        if (Set.of("records", "items", "data", "dataset", "entries", "feed", "catalog", "root",
+        if (Set.of("records", "record", "items", "item", "data", "dataset", "entries", "entry", "feed", "catalog", "root",
                    "canopyapp", "pfa", "countries", "persons", "entities", "countrylists", "descriptionlists").contains(norm)) {
             return true;
         }

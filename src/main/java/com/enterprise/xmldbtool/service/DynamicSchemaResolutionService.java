@@ -97,6 +97,7 @@ public class DynamicSchemaResolutionService {
                 }
             }
         }
+
         if (!list.contains(newId.trim())) {
             list.add(newId.trim());
         }
@@ -204,6 +205,7 @@ public class DynamicSchemaResolutionService {
                 }
             }
         }
+
 
         // Also discover any other existing gs_* tables
         for (String flat : findExistingFlatTables(jdbcTemplate)) {
@@ -510,6 +512,7 @@ public class DynamicSchemaResolutionService {
             }
         }
 
+
         // Count already normalized records if resuming from a previous run
         long initialNormalized = 0;
         for (String flatTable : candidateFlatTables) {
@@ -557,11 +560,13 @@ public class DynamicSchemaResolutionService {
         boolean processedAnyFlat = false;
 
         String statusClause = retryFailedRecords
-                ? "(status = 'STAGED' OR status = 'RETRY' OR status = 'FAILED')"
+                ? "(status = 'STAGED' OR status = 'RETRY' OR status = 'FAILED' OR (status IS NOT NULL AND status != 'NORMALIZED' AND status != 'SKIPPED_UNCHANGED'))"
                 : "(status = 'STAGED' OR (status IS NOT NULL AND status != 'NORMALIZED' AND status != 'FAILED' AND status != 'SKIPPED_UNCHANGED'))";
 
         // Process each entity-specific flat table in dependency sequence using Java 21 Virtual Threads for high-speed parallel DB insertion
         int maxWorkers = Math.min(16, Math.max(4, Runtime.getRuntime().availableProcessors() * 2));
+
+        log.info("Candidate flat tables for Stage 2 normalization: {}", candidateFlatTables);
 
         for (String flatTable : candidateFlatTables) {
             long lastSeenId = 0;
@@ -583,7 +588,9 @@ public class DynamicSchemaResolutionService {
                     String selectSql = "SELECT * FROM " + flatTable + " WHERE id > ? AND " + statusClause + " ORDER BY id ASC " +
                             (isOracle ? "FETCH FIRST " + chunkSize + " ROWS ONLY" : "LIMIT " + chunkSize);
 
+                    log.info("Executing selectSql on {}: sql='{}', lastSeenId={}", flatTable, selectSql, lastSeenId);
                     List<StagingXmlRecord> stagedBatch = fetchStagedRecordsWithKeyset(jdbcTemplate, selectSql, lastSeenId);
+                    log.info("Flat table: {}, fetched stagedBatch size: {}, lastSeenId: {}", flatTable, stagedBatch.size(), lastSeenId);
                     if (stagedBatch.isEmpty()) {
                         break;
                     }
@@ -819,6 +826,9 @@ public class DynamicSchemaResolutionService {
                     enrichPayloadWithEnterpriseIdentity(payload, record, mappings);
                     chunkPayloads.add(payload);
                     recordToPayload.put(record, payload);
+                } else {
+                    log.warn("Processor returned NULL payload for staging record id: {}, entityTag: {}, rawMap keys: {}",
+                            record.getId(), entityTag, rawMap.keySet());
                 }
                 validCandidateRecords.add(record);
             } catch (Exception ex) {
@@ -839,6 +849,7 @@ public class DynamicSchemaResolutionService {
             }
         }
 
+
         // Perform per-table deduplication, delta versioning, and batch write
         if (!chunkPayloads.isEmpty()) {
             DatabaseRowPayload filteredCombinedPayload = applyDeduplicationAndVersioning(
@@ -846,6 +857,7 @@ public class DynamicSchemaResolutionService {
             );
 
             if (filteredCombinedPayload != null && !filteredCombinedPayload.getMultiTableRecords().isEmpty()) {
+                log.info("Batch writing filteredCombinedPayload tables: {}", filteredCombinedPayload.getMultiTableRecords().keySet());
                 try {
                     batchWriter.write(new Chunk<>(List.of(filteredCombinedPayload)));
                     long batchCount = filteredCombinedPayload.getMultiTableRecords().values().stream()
@@ -1022,6 +1034,7 @@ public class DynamicSchemaResolutionService {
             }
         }
 
+
         for (Map.Entry<String, List<Map<String, Object>>> entry : allTableRows.entrySet()) {
             String tableName = entry.getKey();
             List<Map<String, Object>> incomingRows = entry.getValue();
@@ -1156,6 +1169,7 @@ public class DynamicSchemaResolutionService {
                 }
             }
         }
+
         if (incomingRows != null && !incomingRows.isEmpty()) {
             Set<String> rowKeys = incomingRows.get(0).keySet();
             for (String candidate : List.of(tableName.toLowerCase() + "_id", "id", "code", "record_identifier")) {
@@ -1166,6 +1180,7 @@ public class DynamicSchemaResolutionService {
                 }
             }
         }
+
         return null;
     }
 
@@ -1536,6 +1551,7 @@ public class DynamicSchemaResolutionService {
                 }
             }
         }
+
     }
 
     private void updateStagingStatus(JdbcTemplate jdbcTemplate, List<StagingXmlRecord> records, String status, String errorMessage) {
@@ -1617,6 +1633,7 @@ public class DynamicSchemaResolutionService {
                 }
             }
         }
+
 
         try (Connection conn = jdbcTemplate.getDataSource().getConnection()) {
             DatabaseMetaData meta = conn.getMetaData();

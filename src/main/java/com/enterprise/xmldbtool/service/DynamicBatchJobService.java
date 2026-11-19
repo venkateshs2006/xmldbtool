@@ -487,10 +487,10 @@ public class DynamicBatchJobService {
                     for (String cand : xmlCandidateSet) {
                         String cLow = cand.toLowerCase();
                         if (cLow.equalsIgnoreCase(normTbl) || cLow.equalsIgnoreCase(singTbl)
-                                || (normTbl.equals("country") && (cLow.equals("country") || cLow.equals("countryname") || cLow.equals("countries")))
-                                || (normTbl.contains("sanction") && (cLow.contains("sanction") || cLow.contains("reference")))
-                                || (normTbl.equals("occupation") && (cLow.equals("occupation") || cLow.equals("occupations")))
-                                || (normTbl.equals("relationship") && (cLow.equals("relationship") || cLow.equals("relationships")))
+                                || (normTbl.equals("country") && (cLow.equals("country") || cLow.equals("countryname") || cLow.equals("countries") || cLow.equals("countrylist")))
+                                || (normTbl.contains("sanction") && (cLow.contains("sanction") || cLow.contains("reference") || cLow.equals("descriptionlist3") || cLow.equals("descriptionlist4")))
+                                || (normTbl.equals("occupation") && (cLow.equals("occupation") || cLow.equals("occupations") || cLow.equals("descriptionlist1")))
+                                || (normTbl.equals("relationship") && (cLow.equals("relationship") || cLow.equals("relationships") || cLow.equals("descriptionlist2")))
                                 || (normTbl.equals("person") && (cLow.equals("person") || cLow.equals("persons")))) {
                             rootsToStream.add(cand);
                         }
@@ -501,8 +501,9 @@ public class DynamicBatchJobService {
                         String clean = xf.trim().replaceAll("^/+", "");
                         String[] parts = clean.split("/");
                         if (parts.length > 1) {
-                            for (String part : parts) {
-                                if (part.startsWith("@")) break;
+                            for (int i = parts.length - 1; i >= 0; i--) {
+                                String part = parts[i];
+                                if (part.startsWith("@")) continue;
                                 String resolved = XmlSchemaDiscoveryService.resolveEntityTag(part);
                                 if (resolved != null && !resolved.isEmpty()
                                         && !XmlSchemaDiscoveryService.isWrapperContainerTag(resolved, docRoot)

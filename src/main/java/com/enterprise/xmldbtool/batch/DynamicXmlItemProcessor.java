@@ -151,19 +151,55 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 if (strippedTbl.startsWith("person") && !strippedEntity.startsWith("person")) {
                     continue; // Child table of Person belongs exclusively to Person
                 }
-                if (strippedTbl.startsWith("country") && !strippedEntity.startsWith("country")) {
-                    continue;
-                }
-                if (strippedTbl.startsWith("country") && strippedEntity.startsWith("country")) {
-                    if (strippedEntity.contains("list") != strippedTbl.contains("list")) {
+                if (strippedEntity.equals("person") && strippedTbl.startsWith("person") && !strippedTbl.equals("person")) {
+                    // Staged pipeline has dedicated child staging tables (gs_personname, etc.)
+                    // Only process child entity from person record if the record has an unmarshalled nested collection
+                    String childConcept = strippedTbl.substring("person".length());
+                    String singConcept = DynamicXmlUnmarshaller.singularize(childConcept);
+                    boolean hasChildCollection = xmlRecord.keySet().stream().anyMatch(k ->
+                            k.startsWith("_entities_") && (
+                                    k.contains(strippedTbl) || k.contains(singTbl)
+                                    || (!childConcept.isEmpty() && (k.contains(childConcept) || k.contains(singConcept)))
+                                    || (childConcept.contains("ident") && k.contains("id"))
+                                    || (childConcept.contains("idnumber") && k.contains("id"))
+                                    || (childConcept.contains("sanction") && (k.contains("reference") || k.contains("sanction")))
+                            )
+                    );
+                    if (!hasChildCollection) {
                         continue;
                     }
                 }
-                if (strippedTbl.startsWith("occupation") && !strippedEntity.startsWith("occupation")) {
+                if (strippedTbl.startsWith("country") && !strippedEntity.startsWith("country")) {
                     continue;
                 }
-                if (strippedTbl.startsWith("relationship") && !strippedEntity.startsWith("relation")) {
+                if (strippedTbl.startsWith("occupation") && !strippedEntity.startsWith("occupation") && !strippedEntity.equals("descriptionlist1")) {
                     continue;
+                }
+                if (strippedTbl.startsWith("relationship") && !strippedEntity.startsWith("relation") && !strippedEntity.equals("descriptionlist2")) {
+                    continue;
+                }
+                if (strippedTbl.contains("sanction") && !strippedTbl.startsWith("person") && !strippedEntity.contains("sanction") && !strippedEntity.contains("reference")
+                        && !strippedEntity.equals("descriptionlist3") && !strippedEntity.equals("descriptionlist4")) {
+                    continue;
+                }
+
+                boolean isChildOfMaster = (strippedTbl.startsWith(strippedEntity) && !strippedTbl.equals(strippedEntity))
+                        || (singTbl.startsWith(singEntity) && !singTbl.equals(singEntity));
+                if (isChildOfMaster && strippedEntity.equals("person")) {
+                    String childConcept = strippedTbl.startsWith("person") ? strippedTbl.substring("person".length()) : strippedTbl;
+                    String singConcept = DynamicXmlUnmarshaller.singularize(childConcept);
+                    boolean hasChildCollection = xmlRecord.keySet().stream().anyMatch(k ->
+                            k.startsWith("_entities_") && (
+                                    k.contains(strippedTbl) || k.contains(singTbl)
+                                    || (!childConcept.isEmpty() && (k.contains(childConcept) || k.contains(singConcept)))
+                                    || (childConcept.contains("ident") && k.contains("id"))
+                                    || (childConcept.contains("idnumber") && k.contains("id"))
+                                    || (childConcept.contains("sanction") && (k.contains("reference") || k.contains("sanction")))
+                            )
+                    );
+                    if (!hasChildCollection) {
+                        isChildOfMaster = false;
+                    }
                 }
 
                 boolean tableRelevant = strippedTbl.equals(strippedEntity)
@@ -175,8 +211,10 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                         || strippedTbl.equals(singBase)
                         || baseTbl.equals(baseEnt)
                         || singBaseTbl.equals(singBase)
-                        || (strippedTbl.startsWith(strippedEntity) && !strippedTbl.equals(strippedEntity))
-                        || (singTbl.startsWith(singEntity) && !singTbl.equals(singEntity));
+                        || isChildOfMaster
+                        || (strippedTbl.equals("occupation") && strippedEntity.equals("descriptionlist1"))
+                        || (strippedTbl.equals("relationship") && strippedEntity.equals("descriptionlist2"))
+                        || (strippedTbl.contains("sanction") && (strippedEntity.equals("descriptionlist3") || strippedEntity.equals("descriptionlist4")));
 
                 if (!tableRelevant) {
                     tableRelevant = tblMappings.stream().anyMatch(m -> {
@@ -1092,38 +1130,36 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             }
 
             if (tagMatches) {
-                // If unqualified attribute exists, ensure no conflicting qualified tags from other entities exist
                 val = xmlRecord.get(attrLeaf);
-                if (val != null) {
-                    boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
-                            k.endsWith("/@" + rawLeaf) && !k.toLowerCase().startsWith(immediateParent.toLowerCase() + "/"));
-                    if (!hasOtherTagAttr) {
-                        return val;
-                    }
-                }
-
+                if (val != null) return val;
                 val = xmlRecord.get(rawLeaf);
-                if (val != null) {
-                    boolean hasOtherTagAttr = xmlRecord.keySet().stream().anyMatch(k ->
-                            k.endsWith("/@" + rawLeaf) && !k.toLowerCase().startsWith(immediateParent.toLowerCase() + "/"));
-                    if (!hasOtherTagAttr) {
-                        return val;
-                    }
-                }
+                if (val != null) return val;
 
                 // Check leaf
                 for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
                     String k = entry.getKey();
                     if (k.equalsIgnoreCase(rawLeaf) || k.equalsIgnoreCase(attrLeaf)) {
-                        if (!k.contains("/") || k.toLowerCase().startsWith(immediateParent.toLowerCase() + "/")) {
-                            return entry.getValue();
-                        }
+                        return entry.getValue();
                     }
+                }
+
+                // If record has record_identifier and leaf is id/code
+                if ((rawLeaf.equalsIgnoreCase("id") || rawLeaf.equalsIgnoreCase("code")) && xmlRecord.get("record_identifier") != null) {
+                    return xmlRecord.get("record_identifier");
+                }
+            }
+
+            // If target column is primary key (code or id), check top-level record attributes
+            if (targetCol != null && (targetCol.equalsIgnoreCase("code") || targetCol.equalsIgnoreCase("id"))) {
+                for (String k : List.of("id", "@id", "code", "@code", "record_identifier")) {
+                    if (xmlRecord.containsKey(k)) return xmlRecord.get(k);
                 }
             }
 
             // Do not steal attribute from unrelated tag
-            return null;
+            if (!tagMatches) {
+                return null;
+            }
         }
 
         // 4. Unqualified fields: direct check on leaf and @leaf

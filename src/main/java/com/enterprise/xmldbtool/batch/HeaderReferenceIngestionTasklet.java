@@ -95,6 +95,10 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
             if (tbl == null || tbl.trim().isEmpty()) continue;
             String norm = tbl.trim().toLowerCase();
             String normBase = norm.replaceFirst("^gs_", "");
+            // Never treat master entity Person or child Person* entities as header lookup tables
+            if (normBase.startsWith("person") || normBase.startsWith("entity") || normBase.equals("record") || normBase.equals("address")) {
+                continue;
+            }
             String rootNorm = recordRootElement != null ? recordRootElement.toLowerCase().replaceFirst("^gs_", "") : "record";
             boolean isChildOfMaster = normBase.startsWith(rootNorm) && !normBase.equals(rootNorm);
             boolean isLookup = !isChildOfMaster && (normBase.endsWith("list") || normBase.endsWith("lists")
@@ -337,6 +341,24 @@ public class HeaderReferenceIngestionTasklet implements Tasklet, StepExecutionLi
                 if (e.getKey().equalsIgnoreCase(targetCol) || e.getKey().equalsIgnoreCase("@" + targetCol)) {
                     return e.getValue();
                 }
+            }
+        }
+
+        // Bidirectional code/id and name fallbacks
+        String colNorm = targetCol != null ? targetCol.toLowerCase() : "";
+        if (colNorm.equals("code") || clean.equalsIgnoreCase("code")) {
+            for (String alias : List.of("id", "@id", "record_identifier", "code", "@code")) {
+                if (data.containsKey(alias)) return data.get(alias);
+            }
+        }
+        if (colNorm.equals("id") || clean.equalsIgnoreCase("id")) {
+            for (String alias : List.of("code", "@code", "record_identifier", "id", "@id")) {
+                if (data.containsKey(alias)) return data.get(alias);
+            }
+        }
+        if (colNorm.equals("name") || clean.equalsIgnoreCase("name")) {
+            for (String alias : List.of("name", "@name", "value")) {
+                if (data.containsKey(alias)) return data.get(alias);
             }
         }
 

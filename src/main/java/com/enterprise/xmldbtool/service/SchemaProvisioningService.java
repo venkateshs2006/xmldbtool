@@ -413,9 +413,9 @@ public class SchemaProvisioningService {
                 for (String r : effectiveRoots) {
                     if (r != null && !r.trim().isEmpty()) {
                         String rNorm = r.trim().toLowerCase();
-                        boolean skipRecord = hasMappings && rNorm.equals("record");
-                        if (!skipRecord && !WRAPPER_NAMES.contains(rNorm)
-                                && !XmlSchemaDiscoveryService.isWrapperContainerTag(rNorm, docRoot)) {
+                        boolean isRecordAllowed = !hasMappings && rNorm.equals("record");
+                        if (isRecordAllowed || (!WRAPPER_NAMES.contains(rNorm)
+                                && !XmlSchemaDiscoveryService.isWrapperContainerTag(rNorm, docRoot))) {
                             allEntityTargets.add(r.trim());
                         }
                     }
@@ -426,8 +426,9 @@ public class SchemaProvisioningService {
                 if (entity == null || entity.trim().isEmpty()) continue;
                 String norm = entity.trim().toLowerCase();
                 boolean skipRecord = hasMappings && norm.equals("record");
-                if (WRAPPER_NAMES.contains(norm) || (docRoot != null && norm.equalsIgnoreCase(docRoot))
-                        || XmlSchemaDiscoveryService.isWrapperContainerTag(norm, docRoot) || skipRecord) {
+                boolean isRecordAllowed = !hasMappings && norm.equals("record");
+                if (!isRecordAllowed && (WRAPPER_NAMES.contains(norm) || (docRoot != null && norm.equalsIgnoreCase(docRoot))
+                        || XmlSchemaDiscoveryService.isWrapperContainerTag(norm, docRoot) || skipRecord)) {
                     continue; // Never provision docRoot, record, or wrappers as entity tables
                 }
                 String safe = norm.replaceAll("[^a-zA-Z0-9_]", "_");
@@ -437,7 +438,7 @@ public class SchemaProvisioningService {
                     createdTables.addAll(provisionSpecificFlattenedTable(stmt, gsPrefixTable, entity, effectiveElements, mappings, isOracle));
                 }
 
-                // In legacy H2 unit test mode only (when strictIngestionJson is false), create compatibility tables so legacy unit test assertions pass
+                // In legacy H2 unit test mode only when strictIngestionJson is false, create compatibility tables
                 if (isH2 && !strictIngestionJson) {
                     try {
                         String flatTable = safe + "_flat";
