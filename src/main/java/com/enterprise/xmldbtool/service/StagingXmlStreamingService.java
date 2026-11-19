@@ -20,6 +20,7 @@ import javax.xml.stream.XMLStreamReader;
 import javax.xml.stream.events.StartElement;
 import javax.xml.stream.events.XMLEvent;
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -27,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.sql.Connection;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -195,23 +197,23 @@ public class StagingXmlStreamingService {
             if (!singular.isEmpty() && !XmlSchemaDiscoveryService.isWrapperContainerTag(singular, docRoot)) {
                 rootTagLookup.put(singular, r.trim());
             }
-            if (norm.contains("country") || stripped.contains("country")) {
-                rootTagLookup.put("countryname", r.trim());
-                rootTagLookup.put("country", r.trim());
+            if (stripped.equals("country") || stripped.equals("countryname") || stripped.equals("countries")) {
+                rootTagLookup.putIfAbsent("countryname", r.trim());
+                rootTagLookup.putIfAbsent("country", r.trim());
             }
-            if (norm.contains("sanction") || stripped.contains("sanction") || norm.contains("reference") || stripped.contains("reference")) {
-                rootTagLookup.put("referencename", r.trim());
-                rootTagLookup.put("sanctionsreference", r.trim());
-                rootTagLookup.put("reference", r.trim());
+            if (stripped.equals("sanction") || stripped.equals("sanctionsreference") || stripped.equals("sanctionreference") || stripped.equals("referencename") || stripped.equals("reference")) {
+                rootTagLookup.putIfAbsent("referencename", r.trim());
+                rootTagLookup.putIfAbsent("sanctionsreference", r.trim());
+                rootTagLookup.putIfAbsent("reference", r.trim());
             }
-            if (norm.contains("occupation") || stripped.contains("occupation")) {
-                rootTagLookup.put("occupation", r.trim());
+            if (stripped.equals("occupation") || stripped.equals("occupations")) {
+                rootTagLookup.putIfAbsent("occupation", r.trim());
             }
-            if (norm.contains("relationship") || stripped.contains("relation")) {
-                rootTagLookup.put("relationship", r.trim());
+            if (stripped.equals("relationship") || stripped.equals("relationships")) {
+                rootTagLookup.putIfAbsent("relationship", r.trim());
             }
-            if (norm.contains("person") || stripped.contains("person")) {
-                rootTagLookup.put("person", r.trim());
+            if (stripped.equals("person") || stripped.equals("persons")) {
+                rootTagLookup.putIfAbsent("person", r.trim());
             }
         }
         if (rootTagLookup.isEmpty()) {
@@ -494,6 +496,15 @@ public class StagingXmlStreamingService {
         }
     }
 
+    private void repairSchemaSearchPath(JdbcTemplate jdbcTemplate) {
+        if (jdbcTemplate == null) return;
+        try (java.sql.Connection conn = jdbcTemplate.getDataSource() != null ? jdbcTemplate.getDataSource().getConnection() : null) {
+            if (conn != null) {
+                SchemaProvisioningService.prepareConnection(conn, null);
+            }
+        } catch (Exception ignored) {}
+    }
+
     public void ensureCheckpointTableExists(JdbcTemplate jdbcTemplate) {
         if (jdbcTemplate == null) return;
         String sql = "CREATE TABLE IF NOT EXISTS job_checkpoints (" +
@@ -515,7 +526,7 @@ public class StagingXmlStreamingService {
         } catch (Exception ex) {
             if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
                 try {
-                    jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
+                    repairSchemaSearchPath(jdbcTemplate);
                     jdbcTemplate.execute(sql);
                 } catch (Exception ignored) {}
             } else {
@@ -668,7 +679,7 @@ public class StagingXmlStreamingService {
         } catch (Exception ex) {
             if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
                 try {
-                    jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
+                    repairSchemaSearchPath(jdbcTemplate);
                     jdbcTemplate.execute(sqlGsError);
                 } catch (Exception ignored) {}
             }
@@ -689,7 +700,7 @@ public class StagingXmlStreamingService {
         } catch (Exception ex) {
             if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
                 try {
-                    jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
+                    repairSchemaSearchPath(jdbcTemplate);
                     jdbcTemplate.execute(createTableSql);
                 } catch (Exception ignored) {}
             }
@@ -700,10 +711,36 @@ public class StagingXmlStreamingService {
         if (records.isEmpty()) return;
 
         Set<String> cols = getTableColumns(jdbcTemplate, "staging_xml_records");
+        if (cols.isEmpty()) {
+            ensureStagingTableExists(jdbcTemplate);
+            cols = getTableColumns(jdbcTemplate, "staging_xml_records");
+        }
         if (!cols.isEmpty()) {
+            boolean hasFileId = cols.contains("file_id");
             boolean hasBnpp = cols.contains("bnpp_id");
 
-            if (hasBnpp) {
+            if (hasFileId && hasBnpp) {
+                String insertSql = "INSERT INTO staging_xml_records (" +
+                        "job_execution_id, file_id, bnpp_id, tag_name, version_number, entity_type, record_identifier, record_action, record_date, xml_version, schema_version, raw_payload, payload_hash, status, created_at, updated_at" +
+                        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+
+                jdbcTemplate.batchUpdate(insertSql, records, records.size(), (ps, r) -> {
+                    if (r.getJobExecutionId() != null) ps.setLong(1, r.getJobExecutionId()); else ps.setNull(1, java.sql.Types.BIGINT);
+                    ps.setString(2, r.getFileId());
+                    ps.setString(3, r.getBnppId());
+                    ps.setString(4, r.getTagName() != null ? r.getTagName() : r.getEntityType());
+                    ps.setInt(5, r.getVersionNumber() != null ? r.getVersionNumber() : 1);
+                    ps.setString(6, r.getEntityType());
+                    ps.setString(7, r.getRecordIdentifier());
+                    ps.setString(8, r.getRecordAction());
+                    ps.setString(9, r.getRecordDate());
+                    ps.setString(10, r.getXmlVersion());
+                    ps.setString(11, r.getSchemaVersion());
+                    ps.setString(12, r.getRawPayload());
+                    ps.setString(13, r.getPayloadHash());
+                    ps.setString(14, r.getStatus());
+                });
+            } else if (hasBnpp) {
                 String insertSql = "INSERT INTO staging_xml_records (" +
                         "job_execution_id, bnpp_id, tag_name, version_number, entity_type, record_identifier, record_action, record_date, xml_version, schema_version, raw_payload, payload_hash, status, created_at, updated_at" +
                         ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
@@ -754,7 +791,15 @@ public class StagingXmlStreamingService {
     private final Map<String, Set<String>> cachedTableColumns = new ConcurrentHashMap<>();
 
     private Set<String> getTableColumns(JdbcTemplate jdbcTemplate, String tableName) {
-        String key = tableName.toLowerCase();
+        String dsKey = "";
+        try {
+            if (jdbcTemplate != null && jdbcTemplate.getDataSource() != null) {
+                try (Connection c = jdbcTemplate.getDataSource().getConnection()) {
+                    dsKey = c.getMetaData().getURL() + "#";
+                }
+            }
+        } catch (Exception ignored) {}
+        String key = dsKey + tableName.toLowerCase();
         Set<String> cached = cachedTableColumns.get(key);
         if (cached != null && !cached.isEmpty()) {
             return cached;
@@ -802,11 +847,36 @@ public class StagingXmlStreamingService {
 
             // Resolve flat tables: in target DB, gs_<entityname> is used; in H2, compatibility tables are also populated
             List<String> targetFlatTables = new ArrayList<>();
-            for (String candidate : List.of("gs_" + norm, "gs_" + singular, "gs_" + plural, singular + "_flat", norm + "_flat", plural + "_flat", singular + "_gs", norm + "_gs")) {
+            List<String> candidates = new ArrayList<>(List.of(
+                    "gs_" + norm, "gs_" + singular, "gs_" + plural,
+                    singular + "_flat", norm + "_flat", plural + "_flat",
+                    singular + "_gs", norm + "_gs"
+            ));
+            if (norm.endsWith("name") && norm.length() > 4) {
+                String base = norm.substring(0, norm.length() - 4);
+                candidates.add("gs_" + base);
+                candidates.add(base + "_flat");
+                candidates.add(base + "_gs");
+            }
+            if (norm.equals("referencename") || norm.equals("sanctionreference") || norm.equals("sanctionsreference")) {
+                candidates.add("gs_sanctionsreference");
+                candidates.add("sanctionsreference_flat");
+            }
+            for (String candidate : candidates) {
                 Set<String> cols = getTableColumns(jdbcTemplate, candidate);
                 if (cols.isEmpty()) cols = getTableColumns(jdbcTemplate, candidate.toUpperCase());
                 if (!cols.isEmpty() && !targetFlatTables.contains(candidate)) {
                     targetFlatTables.add(candidate);
+                }
+            }
+
+            if (targetFlatTables.isEmpty()) {
+                String gsName = "gs_" + norm;
+                ensureGsTableExists(jdbcTemplate, gsName, norm);
+                Set<String> cols = getTableColumns(jdbcTemplate, gsName);
+                if (cols.isEmpty()) cols = getTableColumns(jdbcTemplate, gsName.toUpperCase());
+                if (!cols.isEmpty()) {
+                    targetFlatTables.add(gsName);
                 }
             }
 
@@ -879,7 +949,17 @@ public class StagingXmlStreamingService {
                             else ps.setNull(idx++, java.sql.Types.BIGINT);
                         }
                         case "file_id" -> ps.setString(idx++, r.getFileId());
-                        case "bnpp_id" -> ps.setString(idx++, r.getBnppId());
+                        case "bnpp_id" -> {
+                            String bid = r.getBnppId();
+                            if (r.getVersionNumber() != null && r.getVersionNumber() > 1 && (bid == null || !bid.startsWith("BNPP_"))) {
+                                bid = com.enterprise.xmldbtool.util.BnppIdGenerator.generateBnppId();
+                                r.setBnppId(bid);
+                            } else if (bid == null || bid.trim().isEmpty()) {
+                                bid = com.enterprise.xmldbtool.util.BnppIdGenerator.generateBnppId();
+                                r.setBnppId(bid);
+                            }
+                            ps.setString(idx++, bid);
+                        }
                         case "current_id" -> ps.setString(idx++, r.getCurrentId() != null ? r.getCurrentId() : r.getBnppId());
                         case "source_id" -> ps.setString(idx++, r.getSourceId() != null ? r.getSourceId() : (r.getSourceBnppId() != null ? r.getSourceBnppId() : r.getBnppId()));
                         case "source_bnpp_id" -> ps.setString(idx++, r.getSourceBnppId() != null ? r.getSourceBnppId() : (r.getSourceId() != null ? r.getSourceId() : r.getBnppId()));
@@ -1397,6 +1477,21 @@ public class StagingXmlStreamingService {
         }
     }
 
+    public static String computeFileSha256(Path path) {
+        if (path == null || !Files.exists(path)) return "";
+        try (InputStream is = Files.newInputStream(path)) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[65536];
+            int bytesRead;
+            while ((bytesRead = is.read(buffer)) != -1) {
+                digest.update(buffer, 0, bytesRead);
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     private String extractRecordIdentifier(Map<String, Object> recordMap) {
         if (recordMap == null || recordMap.isEmpty()) {
             return UUID.randomUUID().toString();
@@ -1455,51 +1550,166 @@ public class StagingXmlStreamingService {
     }
 
     private void ensureStagingTableExists(JdbcTemplate jdbcTemplate) {
-        try {
-            String sqlStaging = "CREATE TABLE IF NOT EXISTS staging_xml_records (" +
-                    "id BIGSERIAL PRIMARY KEY, " +
-                    "job_execution_id BIGINT, " +
-                    "bnpp_id VARCHAR(64), " +
-                    "tag_name VARCHAR(100), " +
-                    "version_number INT DEFAULT 1, " +
-                    "entity_type VARCHAR(50) NOT NULL, " +
-                    "record_identifier VARCHAR(100), " +
-                    "record_action VARCHAR(50), " +
-                    "record_date VARCHAR(50), " +
-                    "xml_version VARCHAR(50), " +
-                    "schema_version VARCHAR(50), " +
-                    "raw_payload TEXT NOT NULL, " +
-                    "payload_hash VARCHAR(64) NOT NULL, " +
-                    "status VARCHAR(30) DEFAULT 'STAGED', " +
-                    "error_message TEXT, " +
-                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
-                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
-                    ")";
-            try {
-                jdbcTemplate.execute(sqlStaging);
-            } catch (Exception ex) {
-                if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
-                    try {
-                        jdbcTemplate.execute("CREATE SCHEMA IF NOT EXISTS public; SET search_path TO public, \"$user\";");
-                        jdbcTemplate.execute(sqlStaging);
-                    } catch (Exception ignored) {}
-                } else if (ex.getMessage() == null || !ex.getMessage().contains("already exists")) {
-                    throw ex;
-                }
+        if (jdbcTemplate == null) return;
+        boolean isOracle = false;
+        try (java.sql.Connection conn = jdbcTemplate.getDataSource() != null ? jdbcTemplate.getDataSource().getConnection() : null) {
+            if (conn != null) {
+                String prod = conn.getMetaData().getDatabaseProductName();
+                isOracle = prod != null && prod.toLowerCase().contains("oracle");
             }
-            try {
-                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS bnpp_id VARCHAR(64)");
-                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS tag_name VARCHAR(100)");
-                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS version_number INT DEFAULT 1");
-                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS xml_version VARCHAR(50)");
-                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS schema_version VARCHAR(50)");
-                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
-                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)");
-                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_rec_id ON staging_xml_records(record_identifier)");
-                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_status_id ON staging_xml_records(status, id)");
-            } catch (Exception ignored) {}
+        } catch (Exception ignored) {}
+
+        try {
+            if (isOracle) {
+                String sql = "CREATE TABLE staging_xml_records (" +
+                        "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                        "job_execution_id NUMBER(19), " +
+                        "file_id VARCHAR2(64), " +
+                        "bnpp_id VARCHAR2(128), " +
+                        "tag_name VARCHAR2(100), " +
+                        "version_number NUMBER(10) DEFAULT 1, " +
+                        "entity_type VARCHAR2(50) NOT NULL, " +
+                        "record_identifier VARCHAR2(100), " +
+                        "record_action VARCHAR2(50), " +
+                        "record_date VARCHAR2(50), " +
+                        "xml_version VARCHAR2(50), " +
+                        "schema_version VARCHAR2(50), " +
+                        "raw_payload CLOB NOT NULL, " +
+                        "payload_hash VARCHAR2(64) NOT NULL, " +
+                        "status VARCHAR2(30) DEFAULT 'STAGED', " +
+                        "error_message CLOB, " +
+                        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                        ")";
+                try {
+                    jdbcTemplate.execute(sql);
+                } catch (Exception ex) {
+                    if (ex.getMessage() == null || !ex.getMessage().contains("ORA-00955")) {
+                        log.debug("Oracle staging table creation check: {}", ex.getMessage());
+                    }
+                }
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD (file_id VARCHAR2(64))"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD (bnpp_id VARCHAR2(128))"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD (tag_name VARCHAR2(100))"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD (version_number NUMBER(10) DEFAULT 1)"); } catch (Exception ignored) {}
+            } else {
+                String sql = "CREATE TABLE IF NOT EXISTS staging_xml_records (" +
+                        "id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, " +
+                        "job_execution_id BIGINT, " +
+                        "file_id VARCHAR(64), " +
+                        "bnpp_id VARCHAR(128), " +
+                        "tag_name VARCHAR(100), " +
+                        "version_number INT DEFAULT 1, " +
+                        "entity_type VARCHAR(50) NOT NULL, " +
+                        "record_identifier VARCHAR(100), " +
+                        "record_action VARCHAR(50), " +
+                        "record_date VARCHAR(50), " +
+                        "xml_version VARCHAR(50), " +
+                        "schema_version VARCHAR(50), " +
+                        "raw_payload TEXT NOT NULL, " +
+                        "payload_hash VARCHAR(64) NOT NULL, " +
+                        "status VARCHAR(30) DEFAULT 'STAGED', " +
+                        "error_message TEXT, " +
+                        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                        ")";
+                try {
+                    jdbcTemplate.execute(sql);
+                } catch (Exception ex) {
+                    if (ex.getMessage() != null && ex.getMessage().contains("no schema has been selected to create in")) {
+                        try {
+                            repairSchemaSearchPath(jdbcTemplate);
+                            jdbcTemplate.execute(sql);
+                        } catch (Exception ignored) {}
+                    } else if (ex.getMessage() == null || !ex.getMessage().contains("already exists")) {
+                        try {
+                            jdbcTemplate.execute(sql.replace("BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY", "BIGSERIAL PRIMARY KEY"));
+                        } catch (Exception ignored) {}
+                    }
+                }
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS file_id VARCHAR(64)"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS bnpp_id VARCHAR(128)"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS tag_name VARCHAR(100)"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS version_number INT DEFAULT 1"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_file ON staging_xml_records(file_id)"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)"); } catch (Exception ignored) {}
+                try { jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_status ON staging_xml_records(status)"); } catch (Exception ignored) {}
+            }
         } catch (Exception ex) {
             log.debug("Staging table creation check: {}", ex.getMessage());
+        }
+    }
+
+    private void ensureGsTableExists(JdbcTemplate jdbcTemplate, String gsTableName, String entityName) {
+        if (jdbcTemplate == null || gsTableName == null) return;
+        boolean isOracle = false;
+        try (java.sql.Connection conn = jdbcTemplate.getDataSource() != null ? jdbcTemplate.getDataSource().getConnection() : null) {
+            if (conn != null) {
+                String prod = conn.getMetaData().getDatabaseProductName();
+                isOracle = prod != null && prod.toLowerCase().contains("oracle");
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            String sql;
+            if (isOracle) {
+                sql = "CREATE TABLE " + gsTableName + " (" +
+                        "bnpp_id VARCHAR2(64) PRIMARY KEY, " +
+                        "id NUMBER GENERATED BY DEFAULT AS IDENTITY, " +
+                        "job_execution_id NUMBER(19), " +
+                        "file_id VARCHAR2(64), " +
+                        "current_id VARCHAR2(64), " +
+                        "source_id VARCHAR2(64), " +
+                        "source_bnpp_id VARCHAR2(64), " +
+                        "staging_bnpp_id VARCHAR2(64), " +
+                        "history_ids CLOB, " +
+                        "tag_name VARCHAR2(100), " +
+                        "version_number NUMBER(10) DEFAULT 1, " +
+                        "record_identifier VARCHAR2(100), " +
+                        "record_action VARCHAR2(50), " +
+                        "record_date VARCHAR2(50), " +
+                        "xml_version VARCHAR2(50), " +
+                        "schema_version VARCHAR2(50), " +
+                        "payload_hash VARCHAR2(64), " +
+                        "status VARCHAR2(30) DEFAULT 'STAGED', " +
+                        "raw_payload CLOB, " +
+                        "extra_attributes CLOB, " +
+                        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                        ")";
+            } else {
+                sql = "CREATE TABLE IF NOT EXISTS " + gsTableName + " (" +
+                        "bnpp_id VARCHAR(64) PRIMARY KEY, " +
+                        "id BIGINT GENERATED BY DEFAULT AS IDENTITY, " +
+                        "job_execution_id BIGINT, " +
+                        "file_id VARCHAR(64), " +
+                        "current_id VARCHAR(64), " +
+                        "source_id VARCHAR(64), " +
+                        "source_bnpp_id VARCHAR(64), " +
+                        "staging_bnpp_id VARCHAR(64), " +
+                        "history_ids TEXT, " +
+                        "tag_name VARCHAR(100), " +
+                        "version_number INT DEFAULT 1, " +
+                        "record_identifier VARCHAR(100), " +
+                        "record_action VARCHAR(50), " +
+                        "record_date VARCHAR(50), " +
+                        "xml_version VARCHAR(50), " +
+                        "schema_version VARCHAR(50), " +
+                        "payload_hash VARCHAR(64), " +
+                        "status VARCHAR(30) DEFAULT 'STAGED', " +
+                        "raw_payload TEXT, " +
+                        "extra_attributes TEXT, " +
+                        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+                        "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                        ")";
+            }
+            jdbcTemplate.execute(sql);
+            cachedTableColumns.remove(gsTableName.toLowerCase());
+            cachedTableColumns.remove(gsTableName.toUpperCase());
+            log.info("Auto-provisioned Golden Source table '{}' on the fly for incoming records.", gsTableName);
+        } catch (Exception ex) {
+            log.debug("Auto-provision gs table check for '{}': {}", gsTableName, ex.getMessage());
         }
     }
 

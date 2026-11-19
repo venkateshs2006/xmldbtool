@@ -20,7 +20,7 @@ public class JobLaunchRequest {
     private boolean resumeFromCheckpoint = false;
     private boolean retryFailedRecords = true;
     private String vendorName = "DEFAULT_VENDOR";
-    private String vendorId = "VND-DEFAULT";
+    private String vendorId = null;
     private String triggeredBy = "USER";
     private String fileId;
 

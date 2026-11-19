@@ -1280,22 +1280,29 @@ async function fetchFileHistory() {
             const status = (f.processing_status || 'READY').toUpperCase();
             const statusBadge = status === 'COMPLETED'
                 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                : status === 'RUNNING'
+                : status === 'RUNNING' || status === 'PROCESSING'
                     ? 'bg-blue-50 text-blue-700 border border-blue-200 animate-pulse'
                     : 'bg-red-50 text-red-700 border border-red-200';
-            const sha = f.sha256_hash ? escapeHtml(f.sha256_hash.substring(0, 16) + '...') : '--';
-            const uploadDate = f.upload_date ? escapeHtml(String(f.upload_date).replace('T', ' ')) : '--';
+            const hashRaw = f.file_hash || f.file_checksum || f.sha256_hash || '';
+            const sha = hashRaw ? escapeHtml(hashRaw.substring(0, 16) + '...') : '--';
+            const dateRaw = f.upload_date || f.created_at;
+            const uploadDate = dateRaw ? escapeHtml(String(dateRaw).replace('T', ' ')) : '--';
+            const ver = f.file_version_number ?? f.version_number ?? 1;
+            const recCount = f.total_number_of_record ?? f.total_number_of_records ?? f.record_count ?? 0;
+            const fileName = f.xml_filename || f.file_name || '--';
+            const vendor = f.vendor_name || '--';
+            const vendorId = f.vendor_id || '';
             html += `
                 <tr class="hover:bg-slate-50 transition">
                     <td class="px-4 py-2.5 font-bold text-gray-800">${escapeHtml(f.file_id || '--')}</td>
-                    <td class="px-4 py-2.5 text-blue-700 font-semibold">${escapeHtml(f.vendor_name || '--')}</td>
-                    <td class="px-4 py-2.5 font-medium text-gray-900 truncate max-w-xs" title="${escapeHtml(f.file_name || '')}">${escapeHtml(f.file_name || '--')}</td>
-                    <td class="px-4 py-2.5 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-800 border border-slate-200">v${f.version_number ?? 1}</span></td>
+                    <td class="px-4 py-2.5 text-blue-700 font-semibold" title="Vendor ID: ${escapeHtml(vendorId)}">${escapeHtml(vendor)}</td>
+                    <td class="px-4 py-2.5 font-medium text-gray-900 truncate max-w-xs" title="${escapeHtml(fileName)}">${escapeHtml(fileName)}</td>
+                    <td class="px-4 py-2.5 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-800 border border-slate-200">v${ver}</span></td>
                     <td class="px-4 py-2.5 text-right font-mono">${(f.file_size_kb || 0).toLocaleString()}</td>
                     <td class="px-4 py-2.5 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${statusBadge}">${escapeHtml(status)}</span></td>
-                    <td class="px-4 py-2.5 text-right font-mono text-emerald-700 font-bold">${(f.record_count || 0).toLocaleString()}</td>
+                    <td class="px-4 py-2.5 text-right font-mono text-emerald-700 font-bold">${recCount.toLocaleString()}</td>
                     <td class="px-4 py-2.5 text-gray-500 text-[11px]">${uploadDate}</td>
-                    <td class="px-4 py-2.5 text-gray-400 font-mono text-[11px]" title="${escapeHtml(f.sha256_hash || '')}">${sha}</td>
+                    <td class="px-4 py-2.5 text-gray-400 font-mono text-[11px]" title="${escapeHtml(hashRaw)}">${sha}</td>
                 </tr>
             `;
         });
@@ -1325,14 +1332,15 @@ async function fetchAuditLogs(jobExecutionId = null) {
         let html = '';
         audits.forEach(a => {
             const evt = a.event_type || 'INFO';
-            const evtBadge = evt.includes('COMPLETED')
+            const evtBadge = evt.includes('COMPLETED') || evt.includes('SUCCESS')
                 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                : evt.includes('FAILED')
+                : evt.includes('FAILED') || evt.includes('ERROR')
                     ? 'bg-red-50 text-red-700 border border-red-200'
                     : 'bg-blue-50 text-blue-700 border border-blue-200';
-            const status = a.status || 'SUCCESS';
-            const statusBadge = status === 'SUCCESS' ? 'text-emerald-700' : 'text-red-600 font-bold';
-            const eventTime = a.event_time ? escapeHtml(String(a.event_time).replace('T', ' ')) : '--';
+            const status = a.execution_status || a.status || 'SUCCESS';
+            const statusBadge = (status === 'SUCCESS' || status === 'COMPLETED') ? 'text-emerald-700' : (status === 'STARTED' ? 'text-blue-600' : 'text-red-600 font-bold');
+            const timeRaw = a.timestamp || a.event_time;
+            const eventTime = timeRaw ? escapeHtml(String(timeRaw).replace('T', ' ')) : '--';
             html += `
                 <tr class="hover:bg-slate-50 transition">
                     <td class="px-4 py-2.5 font-bold text-gray-800 text-[11px]">${escapeHtml(a.audit_id || '--')}</td>

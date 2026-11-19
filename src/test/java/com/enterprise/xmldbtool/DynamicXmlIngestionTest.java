@@ -4059,6 +4059,10 @@ class DynamicXmlIngestionTest {
         Thread.sleep(2500);
 
         List<String> expectedNonEmptyTables = List.of(
+                "gs_country",
+                "gs_occupation",
+                "gs_relationship",
+                "gs_sanctionsreference",
                 "gs_person",
                 "gs_personcountry",
                 "gs_persondate",
@@ -4066,9 +4070,7 @@ class DynamicXmlIngestionTest {
                 "gs_personimage",
                 "gs_personname",
                 "gs_personrole",
-                "gs_personsource",
-                "gs_relationship",
-                "gs_sanctionsreference"
+                "gs_personsource"
         );
 
         for (String tbl : expectedNonEmptyTables) {
@@ -4084,6 +4086,74 @@ class DynamicXmlIngestionTest {
                 assertNotNull(r.get("history_ids"), "history_ids in '" + tbl + "' must not be null");
             }
         }
+    }
+
+    @Test
+    @DisplayName("Verify end-to-end ingestion with gemini-code JSON populates all 12 gs_ and canonical tables with traceability")
+    void testGeminiCodeJsonPopulatesAllGsAndCanonicalTables() throws Exception {
+        DbConnectionConfig config = new DbConnectionConfig();
+        config.setEngine("H2");
+        config.setUrl("jdbc:h2:mem:gemini_code_full_test;DB_CLOSE_DELAY=-1");
+        config.setUsername("sa");
+        config.setPassword("");
+        config.setSchema("PUBLIC");
+
+        javax.sql.DataSource testDs = dataSourceService.getOrCreateDataSource(config);
+        org.springframework.jdbc.core.JdbcTemplate jt = new org.springframework.jdbc.core.JdbcTemplate(testDs);
+
+        List<FieldMapping> mappings = discoveryService.loadMappingsFromFile("sample-data/gemini-code-1794254320356.json");
+        assertNotNull(mappings);
+        assertFalse(mappings.isEmpty());
+
+        List<String> roots = List.of("Country", "Occupation", "Relationship", "SanctionsReference", "Person");
+
+        // 1. Provision gs_ and canonical tables
+        provisioningService.provisionDiscoveredTables(config, "sample-data/pfa-sample.xml", roots, Collections.emptyList(), mappings, true);
+
+        // 2. Launch pipeline job
+        JobLaunchRequest launchReq = new JobLaunchRequest();
+        launchReq.setDbConfig(config);
+        launchReq.setSourceXmlPath("sample-data/pfa-sample.xml");
+        launchReq.setRecordRootElement("Person");
+        launchReq.setRecordRootElements(roots);
+        launchReq.setVendorName("DOW_JONES");
+        launchReq.setMappings(mappings);
+        launchReq.setIngestionJsonPath("sample-data/gemini-code-1794254320356.json");
+        launchReq.setStagedPipeline(true);
+
+        JobLaunchResponse launchResp = batchJobService.launchIngestionJob(launchReq);
+        assertTrue(launchResp.isSuccess());
+
+        Thread.sleep(3000);
+
+        List<String> expectedGsTables = List.of(
+                "gs_country", "gs_occupation", "gs_relationship", "gs_sanctionsreference",
+                "gs_person", "gs_personcountry", "gs_persondate", "gs_personidentification",
+                "gs_personimage", "gs_personname", "gs_personrole", "gs_personsource"
+        );
+
+        for (String tbl : expectedGsTables) {
+            Integer count = jt.queryForObject("SELECT COUNT(*) FROM " + tbl, Integer.class);
+            assertNotNull(count, "Count for " + tbl + " should not be null");
+            assertTrue(count > 0, "GS table " + tbl + " must NOT be empty! Actual: " + count);
+
+            List<Map<String, Object>> rows = jt.queryForList("SELECT * FROM " + tbl + " LIMIT 5");
+            for (Map<String, Object> r : rows) {
+                assertNotNull(r.get("bnpp_id"), "bnpp_id in " + tbl + " must not be null");
+                assertNotNull(r.get("source_bnpp_id"), "source_bnpp_id in " + tbl + " must not be null");
+                assertNotNull(r.get("staging_bnpp_id"), "staging_bnpp_id in " + tbl + " must not be null");
+                assertNotNull(r.get("history_ids"), "history_ids in " + tbl + " must not be null");
+            }
+        }
+
+        // Also verify file_history and audit_log are populated
+        Integer fileHistCount = jt.queryForObject("SELECT COUNT(*) FROM file_history", Integer.class);
+        assertNotNull(fileHistCount);
+        assertTrue(fileHistCount > 0, "file_history table must be populated");
+
+        Integer auditCount = jt.queryForObject("SELECT COUNT(*) FROM audit_log", Integer.class);
+        assertNotNull(auditCount);
+        assertTrue(auditCount > 0, "audit_log table must be populated");
     }
 
     @Test

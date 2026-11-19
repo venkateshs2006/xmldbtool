@@ -1,0 +1,310 @@
+[
+  {
+    "xmlField": "PFA/CountryList/CountryName/@code",
+    "targetTable": "Country",
+    "targetColumn": "code",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/CountryList/CountryName/@name",
+    "targetTable": "Country",
+    "targetColumn": "name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/CountryList/CountryName/@IsTerritory",
+    "targetTable": "Country",
+    "targetColumn": "is_territory",
+    "constraintType": "NONE",
+    "transform": "TO_BOOLEAN"
+  },
+  {
+    "xmlField": "PFA/CountryList/CountryName/@ProfileURL",
+    "targetTable": "Country",
+    "targetColumn": "profile_url",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/OccupationList/Occupation/@code",
+    "targetTable": "Occupation",
+    "targetColumn": "code",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/OccupationList/Occupation/@name",
+    "targetTable": "Occupation",
+    "targetColumn": "name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/RelationshipList/Relationship/@code",
+    "targetTable": "Relationship",
+    "targetColumn": "code",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/RelationshipList/Relationship/@name",
+    "targetTable": "Relationship",
+    "targetColumn": "name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/SanctionsReferencesList/ReferenceName/@code",
+    "targetTable": "SanctionsReference",
+    "targetColumn": "code",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/SanctionsReferencesList/ReferenceName/@name",
+    "targetTable": "SanctionsReference",
+    "targetColumn": "name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/SanctionsReferencesList/ReferenceName/@status",
+    "targetTable": "SanctionsReference",
+    "targetColumn": "status",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "Person",
+    "targetColumn": "id",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@action",
+    "targetTable": "Person",
+    "targetColumn": "action",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@date",
+    "targetTable": "Person",
+    "targetColumn": "record_date",
+    "constraintType": "NONE",
+    "transform": "TO_DATE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/Gender",
+    "targetTable": "Person",
+    "targetColumn": "gender",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/ActiveStatus",
+    "targetTable": "Person",
+    "targetColumn": "active_status",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/Deceased",
+    "targetTable": "Person",
+    "targetColumn": "deceased",
+    "constraintType": "NONE",
+    "transform": "TO_BOOLEAN"
+  },
+  {
+    "xmlField": "PFA/Records/Person/BirthPlace/Place/@name",
+    "targetTable": "Person",
+    "targetColumn": "birth_place",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/ProfileNotes",
+    "targetTable": "Person",
+    "targetColumn": "profile_notes",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/NameDetails/Name/@NameType",
+    "targetTable": "PersonName",
+    "targetColumn": "name_type",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/NameDetails/Name/NameValue/FirstName",
+    "targetTable": "PersonName",
+    "targetColumn": "first_name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/NameDetails/Name/NameValue/Surname",
+    "targetTable": "PersonName",
+    "targetColumn": "surname",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "PersonName",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/RoleDetail/Roles/@RoleType",
+    "targetTable": "PersonRole",
+    "targetColumn": "role_type",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/RoleDetail/Roles/OccTitle/@OccCat",
+    "targetTable": "PersonRole",
+    "targetColumn": "occ_cat",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/RoleDetail/Roles/OccTitle",
+    "targetTable": "PersonRole",
+    "targetColumn": "occ_title",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/RoleDetail/Roles/OccTitle/@SinceYear",
+    "targetTable": "PersonRole",
+    "targetColumn": "since_year",
+    "constraintType": "NONE",
+    "transform": "TO_INT"
+  },
+  {
+    "xmlField": "PFA/Records/Person/RoleDetail/Roles/OccTitle/@ToYear",
+    "targetTable": "PersonRole",
+    "targetColumn": "to_year",
+    "constraintType": "NONE",
+    "transform": "TO_INT"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "PersonRole",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/DateDetails/Date/@DateType",
+    "targetTable": "PersonDate",
+    "targetColumn": "date_type",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/DateDetails/Date/DateValue/@Year",
+    "targetTable": "PersonDate",
+    "targetColumn": "year",
+    "constraintType": "NONE",
+    "transform": "TO_INT"
+  },
+  {
+    "xmlField": "PFA/Records/Person/DateDetails/Date/DateValue/@Month",
+    "targetTable": "PersonDate",
+    "targetColumn": "month",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/DateDetails/Date/DateValue/@Day",
+    "targetTable": "PersonDate",
+    "targetColumn": "day",
+    "constraintType": "NONE",
+    "transform": "TO_INT"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "PersonDate",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/CountryDetails/Country/@CountryType",
+    "targetTable": "PersonCountry",
+    "targetColumn": "country_type",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/CountryDetails/Country/CountryValue/@Code",
+    "targetTable": "PersonCountry",
+    "targetColumn": "country_code",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "PersonCountry",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/IDNumberTypes/ID/@IDType",
+    "targetTable": "PersonIdentification",
+    "targetColumn": "id_type",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/IDNumberTypes/ID/IDValue",
+    "targetTable": "PersonIdentification",
+    "targetColumn": "id_value",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "PersonIdentification",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/SourceDescription/Source/@name",
+    "targetTable": "PersonSource",
+    "targetColumn": "source_url",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "PersonSource",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/Images/Image/@URL",
+    "targetTable": "PersonImage",
+    "targetColumn": "image_url",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "PFA/Records/Person/@id",
+    "targetTable": "PersonImage",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "transform": "NONE"
+  }
+]

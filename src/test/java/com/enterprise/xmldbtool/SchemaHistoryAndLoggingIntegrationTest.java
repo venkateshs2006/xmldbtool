@@ -8,6 +8,7 @@ import com.enterprise.xmldbtool.service.DynamicDataSourceService;
 import com.enterprise.xmldbtool.service.DynamicBatchJobService;
 import com.enterprise.xmldbtool.service.SchemaProvisioningService;
 import com.enterprise.xmldbtool.service.SystemLoggingService;
+import com.enterprise.xmldbtool.service.XmlSchemaDiscoveryService;
 import com.enterprise.xmldbtool.util.BnppIdGenerator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,6 +45,9 @@ public class SchemaHistoryAndLoggingIntegrationTest {
     @Autowired
     private DynamicBatchJobService batchJobService;
 
+    @Autowired
+    private XmlSchemaDiscoveryService discoveryService;
+
     private DbConnectionConfig dbConfig;
     private DataSource testDataSource;
     private JdbcTemplate jdbcTemplate;
@@ -59,6 +63,9 @@ public class SchemaHistoryAndLoggingIntegrationTest {
 
         testDataSource = dataSourceService.getOrCreateDataSource(dbConfig);
         jdbcTemplate = new JdbcTemplate(testDataSource);
+        try {
+            jdbcTemplate.execute("DROP ALL OBJECTS");
+        } catch (Exception ignored) {}
         loggingService.ensureSystemLoggingTables(testDataSource);
     }
 
@@ -474,5 +481,447 @@ public class SchemaHistoryAndLoggingIntegrationTest {
         List<Map<String, Object>> canPersonAddresses = jdbcTemplate.queryForList("SELECT * FROM Address WHERE person_id = 'P-500'");
         assertEquals(2, canAddresses.size(), "Canonical Address table must contain normalized address records");
         assertEquals(2, canPersonAddresses.size(), "Both address records must be linked to parent person_id 'P-500'");
+    }
+
+    @Test
+    void testFileHistoryAndAuditLogFullSpecification() throws Exception {
+        // Step 1: Target DB from user (testDataSource configured in setUp)
+        assertNotNull(testDataSource);
+
+        // Step 2: XML and ingestion.json from user
+        File xmlFile = File.createTempFile("vendor_country_sample_", ".xml");
+        xmlFile.deleteOnExit();
+        Files.writeString(xmlFile.toPath(), "<root><Country code='FR'><name>France</name></Country></root>");
+
+        File ingestionJsonFile = File.createTempFile("ingestion_", ".json");
+        ingestionJsonFile.deleteOnExit();
+        String jsonContent = """
+            [
+              {"sourceField": "Country/@code", "targetTable": "Country", "targetColumn": "code", "primaryKey": true},
+              {"sourceField": "Country/name", "targetTable": "Country", "targetColumn": "country_name", "primaryKey": false}
+            ]
+            """;
+        Files.writeString(ingestionJsonFile.toPath(), jsonContent);
+
+        // Compute whole file hash
+        String wholeFileHash = com.enterprise.xmldbtool.service.StagingXmlStreamingService.computeFileSha256(xmlFile.toPath());
+        assertNotNull(wholeFileHash);
+        assertFalse(wholeFileHash.isEmpty());
+
+        // Step 3: Register in file_history table and verify all required columns
+        String vendorName = "REUTERS_CORP";
+        long fileSizeKb = Files.size(xmlFile.toPath()) / 1024L;
+
+        String fileId = loggingService.registerFile(
+                testDataSource,
+                vendorName,
+                null, // auto-generated vendor_id
+                xmlFile.getName(),
+                fileSizeKb,
+                wholeFileHash,
+                ingestionJsonFile.getAbsolutePath(),
+                jsonContent,
+                "USER",
+                Map.of("roots", List.of("Country"))
+        );
+
+        assertNotNull(fileId);
+        assertTrue(fileId.startsWith("FILE-"), "file_id must start with FILE- prefix");
+
+        // Verify file_history table schema & record
+        Map<String, Object> history = jdbcTemplate.queryForMap(
+                "SELECT * FROM file_history WHERE file_id = ?", fileId);
+
+        assertEquals("REUTERS_CORP", history.get("vendor_name"));
+        assertNotNull(history.get("vendor_id"), "vendor_id must be auto-generated");
+        assertTrue(history.get("vendor_id").toString().startsWith("VND-"), "vendor_id should have VND- prefix");
+        assertEquals(fileId, history.get("file_id"));
+        assertEquals(xmlFile.getName(), history.get("xml_filename"));
+        assertNotNull(history.get("file_size"));
+        assertEquals(wholeFileHash, history.get("file_hash"));
+        assertEquals(1, ((Number) history.get("file_version_number")).intValue());
+        assertNotNull(history.get("metadata"));
+        assertEquals(ingestionJsonFile.getAbsolutePath(), history.get("ingestion_file_path"));
+        assertEquals(jsonContent, history.get("ingestion_file_content"));
+        assertEquals("PROCESSING", history.get("processing_status"));
+        assertEquals(0L, ((Number) history.get("total_number_of_records")).longValue());
+        assertNotNull(history.get("created_by"));
+        assertNotNull(history.get("created_at"));
+        assertNotNull(history.get("updated_at"));
+
+        // Verify user executing again with same file hash
+        String fileIdDup = loggingService.registerFile(
+                testDataSource,
+                vendorName,
+                null,
+                xmlFile.getName(),
+                fileSizeKb,
+                wholeFileHash,
+                ingestionJsonFile.getAbsolutePath(),
+                jsonContent,
+                "USER",
+                Map.of("roots", List.of("Country"))
+        );
+        Map<String, Object> historyDup = jdbcTemplate.queryForMap(
+                "SELECT * FROM file_history WHERE file_id = ?", fileIdDup);
+        assertEquals(2, ((Number) historyDup.get("file_version_number")).intValue());
+        assertEquals(history.get("vendor_id"), historyDup.get("vendor_id"), "Vendor ID should be preserved across uploads for same vendor");
+
+        // Step 4: Verify audit_log table and matching sample data
+        Long jobExecId = 71L;
+        String actionDetailsStart = "Launched staged pipeline job for roots: [Country, Occupation, Relationship, SanctionsReference, Person, PersonName, PersonRole, PersonDate, PersonCountry, PersonIdentification, PersonSource, PersonImage], tables: country, occupation, relationship, sanctionsreference, person, personname, personrole, persondate, personcountry, personidentification, personsource, personimage";
+
+        loggingService.logAudit(testDataSource, fileId, jobExecId, "JOB_STARTED", "Country", actionDetailsStart, 0L, "USER", "STARTED");
+
+        String actionDetailsStaging = "Stage 1 completed: staged 40 records into gs_ tables";
+        loggingService.logAudit(testDataSource, fileId, jobExecId, "STAGING_COMPLETED", "Country", actionDetailsStaging, 40L, "SYSTEM", "SUCCESS");
+
+        // Query audit_log table directly
+        List<Map<String, Object>> auditLogs = jdbcTemplate.queryForList(
+                "SELECT * FROM audit_log WHERE file_id = ? ORDER BY timestamp ASC", fileId);
+        assertEquals(2, auditLogs.size(), "audit_log must contain both audit records");
+
+        Map<String, Object> log1 = auditLogs.get(0);
+        assertTrue(log1.get("audit_id").toString().startsWith("AUDIT-"), "audit_id must start with AUDIT- prefix");
+        assertEquals(fileId, log1.get("file_id"));
+        assertEquals("71", log1.get("job_execution_id").toString());
+        assertEquals("JOB_STARTED", log1.get("event_type"));
+        assertEquals("Country", log1.get("entity_name"));
+        assertEquals(actionDetailsStart, log1.get("action_details"));
+        assertEquals(0L, ((Number) log1.get("records_affected")).longValue());
+        assertEquals("USER", log1.get("triggered_by"));
+        assertEquals("STARTED", log1.get("execution_status"));
+        assertNotNull(log1.get("timestamp"));
+
+        Map<String, Object> log2 = auditLogs.get(1);
+        assertTrue(log2.get("audit_id").toString().startsWith("AUDIT-"), "audit_id must start with AUDIT- prefix");
+        assertEquals(fileId, log2.get("file_id"));
+        assertEquals("71", log2.get("job_execution_id").toString());
+        assertEquals("STAGING_COMPLETED", log2.get("event_type"));
+        assertEquals("Country", log2.get("entity_name"));
+        assertEquals(actionDetailsStaging, log2.get("action_details"));
+        assertEquals(40L, ((Number) log2.get("records_affected")).longValue());
+        assertEquals("SYSTEM", log2.get("triggered_by"));
+        assertEquals("SUCCESS", log2.get("execution_status"));
+        assertNotNull(log2.get("timestamp"));
+    }
+
+    @Test
+    void testGoldenSourceGsTableAndStagingXmlRecordsFullSpecification() throws Exception {
+        // Step 1: Ensure staging table exists in target database
+        provisioningService.ensureStagingTable(dbConfig);
+
+        // Step 2: Create sample XML files (Version 1 and Version 2 for Country)
+        File xmlFile1 = File.createTempFile("vendor_country_v1_", ".xml");
+        xmlFile1.deleteOnExit();
+        Files.writeString(xmlFile1.toPath(), """
+            <dataset>
+                <country code="US">
+                    <name>United States</name>
+                    <currency>USD</currency>
+                </country>
+            </dataset>
+            """);
+
+        File xmlFile2 = File.createTempFile("vendor_country_v2_", ".xml");
+        xmlFile2.deleteOnExit();
+        Files.writeString(xmlFile2.toPath(), """
+            <dataset>
+                <country code="US">
+                    <name>United States of America</name>
+                    <currency>USD</currency>
+                </country>
+            </dataset>
+            """);
+
+        // Define mappings based on ingestion.json with Primary Key on 'code'
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("country/@code", "Country", "code", "NONE", "PK"),
+                new FieldMapping("country/name", "Country", "name", "NONE", "NONE"),
+                new FieldMapping("country/currency", "Country", "currency", "NONE", "NONE")
+        );
+
+        // 1. Provision target tables (gs_country and Country)
+        provisioningService.provisionDiscoveredTables(
+                dbConfig, xmlFile1.getAbsolutePath(), List.of("country"), null, mappings, false
+        );
+
+        // Verify Primary Key on gs_country is strictly BNPP_ID, NOT the business PK 'code'
+        try (Connection conn = testDataSource.getConnection()) {
+            DatabaseMetaData meta = conn.getMetaData();
+            try (ResultSet rs = meta.getPrimaryKeys(null, "PUBLIC", "GS_COUNTRY")) {
+                assertTrue(rs.next(), "gs_country must have a Primary Key");
+                assertEquals("BNPP_ID", rs.getString("COLUMN_NAME").toUpperCase(),
+                        "The primary key of gs_country MUST be BNPP_ID, not the ingestion.json business PK (code)");
+            }
+        }
+
+        // 2. Launch Job for File 1
+        JobLaunchRequest launchReq1 = new JobLaunchRequest();
+        launchReq1.setDbConfig(dbConfig);
+        launchReq1.setSourceXmlPath(xmlFile1.getAbsolutePath());
+        launchReq1.setRecordRootElement("country");
+        launchReq1.setVendorName("REUTERS");
+        launchReq1.setMappings(mappings);
+        launchReq1.setStagedPipeline(true);
+
+        JobLaunchResponse resp1 = batchJobService.launchIngestionJob(launchReq1);
+        assertTrue(resp1.isSuccess());
+
+        Thread.sleep(1500);
+
+        // Verify Run 1 in file_history
+        List<Map<String, Object>> fileHistories = loggingService.getFileHistory(testDataSource, 5);
+        assertFalse(fileHistories.isEmpty());
+        String fileId1 = (String) fileHistories.get(0).get("file_id");
+
+        // Verify Run 1 in staging_xml_records: row-based history of the whole file
+        List<Map<String, Object>> stagingRecords1 = jdbcTemplate.queryForList(
+                "SELECT * FROM staging_xml_records WHERE file_id = ?", fileId1);
+        assertFalse(stagingRecords1.isEmpty(), "staging_xml_records must store row-based history of the file");
+        assertEquals("US", stagingRecords1.get(0).get("record_identifier"));
+        assertEquals("country", stagingRecords1.get(0).get("entity_type"));
+        assertNotNull(stagingRecords1.get(0).get("payload_hash"));
+        assertNotNull(stagingRecords1.get(0).get("raw_payload"));
+
+        // Verify Run 1 in gs_country: golden source table
+        List<Map<String, Object>> gsRows1 = jdbcTemplate.queryForList(
+                "SELECT * FROM gs_country WHERE record_identifier = 'US'");
+        assertEquals(1, gsRows1.size());
+        Map<String, Object> gsRow1 = gsRows1.get(0);
+        String bnppId1 = (String) gsRow1.get("bnpp_id");
+        assertNotNull(bnppId1);
+        assertTrue(bnppId1.matches("^BNPP_\\d{17}_\\d{7}$"),
+                "BNPP_ID format must be BNPP_<yyyymmddhhmmssSSS>_<7digit SequenceNumber>, got: " + bnppId1);
+        assertEquals(fileId1, gsRow1.get("file_id"), "gs_country must store file_id from file_history");
+        assertEquals(1, ((Number) gsRow1.get("version_number")).intValue(), "Version number should be 1");
+        assertNotNull(gsRow1.get("payload_hash"), "gs_country must store payload_hash value for reference");
+
+        // 3. Launch Job for File 2 (Delta modification with SAME business PK 'code' = 'US')
+        JobLaunchRequest launchReq2 = new JobLaunchRequest();
+        launchReq2.setDbConfig(dbConfig);
+        launchReq2.setSourceXmlPath(xmlFile2.getAbsolutePath());
+        launchReq2.setRecordRootElement("country");
+        launchReq2.setVendorName("REUTERS");
+        launchReq2.setMappings(mappings);
+        launchReq2.setStagedPipeline(true);
+
+        JobLaunchResponse resp2 = batchJobService.launchIngestionJob(launchReq2);
+        assertTrue(resp2.isSuccess());
+
+        Thread.sleep(1500);
+
+        // Verify Run 2 in gs_country: GOLDEN SOURCE HISTORY - MUST NOT UPDATE OR DELETE OLD RECORDS!
+        // Both v1 and v2 records must exist in gs_country for 'US'
+        List<Map<String, Object>> gsRows2 = jdbcTemplate.queryForList(
+                "SELECT * FROM gs_country WHERE record_identifier = 'US' ORDER BY version_number ASC");
+        assertEquals(2, gsRows2.size(),
+                "gs_country is an append-only golden source history table: it must preserve both records without update or delete");
+
+        Map<String, Object> v1 = gsRows2.get(0);
+        Map<String, Object> v2 = gsRows2.get(1);
+
+        assertEquals("United States", v1.get("name"));
+        assertEquals("United States of America", v2.get("name"));
+
+        assertNotEquals(v1.get("bnpp_id"), v2.get("bnpp_id"), "Each record must have a unique BNPP_ID");
+        assertTrue(v2.get("bnpp_id").toString().matches("^BNPP_\\d{17}_\\d{7}$"),
+                "BNPP_ID format must be BNPP_<yyyymmddhhmmssSSS>_<7digit SequenceNumber>, got: " + v2.get("bnpp_id"));
+
+        assertNotEquals(v1.get("payload_hash"), v2.get("payload_hash"), "Each version must have distinct payload_hash");
+        assertNotEquals(v1.get("file_id"), v2.get("file_id"), "Each version must track its respective file_id");
+    }
+
+    @Test
+    void testUploadsXmlAndIngestionJsonPopulatesStagingAndGsTables() throws Exception {
+        File xmlFile = new File("uploads/test.xml");
+        File jsonFile = new File("sample-data/ingestion.json");
+        assertTrue(xmlFile.exists(), "uploads/test.xml must exist");
+        assertTrue(jsonFile.exists(), "sample-data/ingestion.json must exist");
+
+        List<FieldMapping> mappings = discoveryService.loadMappingsFromFile(jsonFile.getAbsolutePath());
+        assertNotNull(mappings);
+        assertFalse(mappings.isEmpty());
+
+        // Provision discovered tables with mappings
+        provisioningService.provisionDiscoveredTables(
+                dbConfig, xmlFile.getAbsolutePath(), List.of("countrylist", "country"), null, mappings, false
+        );
+
+        JobLaunchRequest request = new JobLaunchRequest();
+        request.setDbConfig(dbConfig);
+        request.setSourceXmlPath(xmlFile.getAbsolutePath());
+        request.setIngestionJsonPath(jsonFile.getAbsolutePath());
+        request.setMappings(mappings);
+        request.setVendorName("REUTERS");
+        request.setStagedPipeline(true);
+
+        JobLaunchResponse response = batchJobService.launchIngestionJob(request);
+        assertTrue(response.isSuccess());
+        assertNotNull(response.getJobExecutionId());
+
+        // Allow async virtual threads to complete
+        Thread.sleep(2500);
+
+        // 1. Verify staging_xml_records is NOT empty
+        List<Map<String, Object>> stagingRecords = jdbcTemplate.queryForList(
+                "SELECT * FROM staging_xml_records WHERE job_execution_id = ?", response.getJobExecutionId());
+        assertFalse(stagingRecords.isEmpty(), "staging_xml_records MUST NOT be empty after ingestion");
+        assertTrue(stagingRecords.size() >= 20, "Should have staged at least 20 records, got: " + stagingRecords.size());
+
+        // 2. Verify Golden Source gs_country is NOT empty
+        List<Map<String, Object>> gsCountry = jdbcTemplate.queryForList("SELECT * FROM gs_country");
+        assertFalse(gsCountry.isEmpty(), "gs_country MUST NOT be empty after ingestion");
+
+        // 3. Verify Golden Source gs_countrylist is NOT empty
+        List<Map<String, Object>> gsCountryList = jdbcTemplate.queryForList("SELECT * FROM gs_countrylist");
+        assertFalse(gsCountryList.isEmpty(), "gs_countrylist MUST NOT be empty after ingestion");
+
+        // 4. Verify BNPP_ID and audit columns on gs_country
+        Map<String, Object> firstGsRow = gsCountry.get(0);
+        assertNotNull(firstGsRow.get("bnpp_id"), "bnpp_id must be populated on gs_country");
+        assertTrue(firstGsRow.get("bnpp_id").toString().matches("^BNPP_\\d{17}_\\d{7}$"),
+                "bnpp_id must follow BNPP_<yyyymmddhhmmssSSS>_<7digit Seq> format");
+        assertNotNull(firstGsRow.get("file_id"), "file_id must be populated on gs_country");
+        assertNotNull(firstGsRow.get("payload_hash"), "payload_hash must be populated on gs_country");
+        assertNotNull(firstGsRow.get("version_number"), "version_number must be populated on gs_country");
+    }
+
+    @Test
+    void testFileHistoryAndAuditLogFullLifecycleExactUserSpecification() throws Exception {
+        File xmlFile = new File("uploads/test.xml");
+        File jsonFile = new File("sample-data/ingestion.json");
+        assertTrue(xmlFile.exists(), "uploads/test.xml must exist");
+        assertTrue(jsonFile.exists(), "sample-data/ingestion.json must exist");
+
+        List<FieldMapping> mappings = discoveryService.loadMappingsFromFile(jsonFile.getAbsolutePath());
+        assertNotNull(mappings);
+
+        provisioningService.provisionDiscoveredTables(
+                dbConfig, xmlFile.getAbsolutePath(), List.of("countrylist", "country"), null, mappings, false
+        );
+
+        // 1. Launch Job 1 with vendor "DOW_JONES" and unassigned vendorId (to test auto-generation)
+        JobLaunchRequest req1 = new JobLaunchRequest();
+        req1.setDbConfig(dbConfig);
+        req1.setSourceXmlPath(xmlFile.getAbsolutePath());
+        req1.setIngestionJsonPath(jsonFile.getAbsolutePath());
+        req1.setMappings(mappings);
+        req1.setVendorName("DOW_JONES");
+        req1.setTriggeredBy("USER");
+        req1.setStagedPipeline(true);
+
+        JobLaunchResponse res1 = batchJobService.launchIngestionJob(req1);
+        assertTrue(res1.isSuccess());
+        assertNotNull(res1.getJobExecutionId());
+
+        // Wait for async processing to complete
+        long deadline1 = System.currentTimeMillis() + 10000;
+        while (System.currentTimeMillis() < deadline1) {
+            com.enterprise.xmldbtool.model.JobTelemetryResponse tel = batchJobService.getJobTelemetry(res1.getJobExecutionId());
+            if (tel != null && ("COMPLETED".equalsIgnoreCase(tel.getStatus()) || "FAILED".equalsIgnoreCase(tel.getStatus()))) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+
+        // Verify file_history table for Job 1
+        List<Map<String, Object>> fileHistories1 = jdbcTemplate.queryForList(
+                "SELECT * FROM file_history WHERE vendor_name = 'DOW_JONES' ORDER BY file_version_number ASC");
+        assertFalse(fileHistories1.isEmpty(), "file_history record must exist for DOW_JONES");
+        Map<String, Object> fh1 = fileHistories1.get(0);
+
+        // Verify vendor_name, auto-generated vendor_id, file_id, xml_filename, file_size, file_hash, file_version_number
+        assertEquals("DOW_JONES", fh1.get("vendor_name"));
+        String autoVendorId = (String) fh1.get("vendor_id");
+        assertNotNull(autoVendorId, "vendor_id must be generated");
+        assertTrue(autoVendorId.matches("^VND-\\d{17}-\\d{6}$"), "vendor_id must match VND-yyyyMMddHHmmssSSS-XXXXXX, got: " + autoVendorId);
+
+        String fileId1 = (String) fh1.get("file_id");
+        assertNotNull(fileId1, "file_id must be generated");
+        assertTrue(fileId1.matches("^FILE-\\d{17}-\\d{6}$"), "file_id must match FILE-yyyyMMddHHmmssSSS-XXXXXX, got: " + fileId1);
+
+        assertEquals("test.xml", fh1.get("xml_filename"));
+        assertTrue(((Number) fh1.get("file_size")).longValue() > 0, "file_size must be positive byte count");
+        String hash1 = (String) fh1.get("file_hash");
+        assertNotNull(hash1, "file_hash must not be null");
+        assertEquals(64, hash1.length(), "file_hash must be 64-char hex SHA-256");
+
+        assertEquals(1, ((Number) fh1.get("file_version_number")).intValue(), "file_version_number must be 1 on first upload");
+        assertNotNull(fh1.get("metadata"), "metadata JSON must be populated");
+        assertNotNull(fh1.get("ingestion_file_path"), "ingestion_file_path must be populated");
+        assertNotNull(fh1.get("ingestion_file_content"), "ingestion_file_content must be populated");
+        assertTrue(((Number) fh1.get("total_number_of_record")).longValue() > 0, "total_number_of_record must be updated after job completes");
+        assertEquals("COMPLETED", fh1.get("processing_status"));
+        assertNotNull(fh1.get("created_at"));
+        assertNotNull(fh1.get("updated_at"));
+
+        // Verify audit_log table for Job 1
+        List<Map<String, Object>> auditLogs1 = jdbcTemplate.queryForList(
+                "SELECT * FROM audit_log WHERE file_id = ? ORDER BY timestamp ASC", fileId1);
+        assertFalse(auditLogs1.isEmpty(), "audit_log must contain events for file_id " + fileId1);
+
+        boolean hasJobStarted = false;
+        boolean hasStagingCompleted = false;
+        boolean hasJobCompleted = false;
+
+        for (Map<String, Object> audit : auditLogs1) {
+            String auditId = (String) audit.get("audit_id");
+            assertNotNull(auditId);
+            assertTrue(auditId.matches("^AUDIT-\\d{17}-\\d{6}$"), "audit_id format must match AUDIT-yyyyMMddHHmmssSSS-XXXXXX, got: " + auditId);
+            assertEquals(fileId1, audit.get("file_id"));
+            assertEquals(String.valueOf(res1.getJobExecutionId()), String.valueOf(audit.get("job_execution_id")));
+            assertNotNull(audit.get("timestamp"));
+
+            String eventType = (String) audit.get("event_type");
+            if ("JOB_STARTED".equalsIgnoreCase(eventType)) {
+                hasJobStarted = true;
+                assertEquals("USER", audit.get("triggered_by"));
+                assertEquals("STARTED", audit.get("execution_status"));
+                String action = (String) audit.get("action_details");
+                assertTrue(action.contains("Launched staged pipeline job"), "action_details format mismatch: " + action);
+            } else if ("STAGING_COMPLETED".equalsIgnoreCase(eventType)) {
+                hasStagingCompleted = true;
+                assertEquals("SYSTEM", audit.get("triggered_by"));
+                assertEquals("SUCCESS", audit.get("execution_status"));
+                assertTrue(((Number) audit.get("records_affected")).longValue() > 0);
+                String action = (String) audit.get("action_details");
+                assertTrue(action.contains("Stage 1 completed: staged"), "action_details format mismatch: " + action);
+            } else if ("JOB_COMPLETED".equalsIgnoreCase(eventType)) {
+                hasJobCompleted = true;
+                assertEquals("SYSTEM", audit.get("triggered_by"));
+                assertTrue("SUCCESS".equalsIgnoreCase((String) audit.get("execution_status")) ||
+                           "COMPLETED".equalsIgnoreCase((String) audit.get("execution_status")),
+                           "JOB_COMPLETED execution_status must be SUCCESS or COMPLETED");
+            }
+        }
+
+        assertTrue(hasJobStarted, "Must contain JOB_STARTED audit event");
+        assertTrue(hasStagingCompleted, "Must contain STAGING_COMPLETED audit event");
+        assertTrue(hasJobCompleted, "Must contain JOB_COMPLETED audit event");
+
+        // 2. Launch Job 2 with same vendor "DOW_JONES" and same file to verify version increment & vendor_id reuse
+        JobLaunchRequest req2 = new JobLaunchRequest();
+        req2.setDbConfig(dbConfig);
+        req2.setSourceXmlPath(xmlFile.getAbsolutePath());
+        req2.setIngestionJsonPath(jsonFile.getAbsolutePath());
+        req2.setMappings(mappings);
+        req2.setVendorName("DOW_JONES");
+        req2.setTriggeredBy("USER");
+        req2.setStagedPipeline(true);
+
+        JobLaunchResponse res2 = batchJobService.launchIngestionJob(req2);
+        assertTrue(res2.isSuccess());
+        Thread.sleep(3000);
+
+        List<Map<String, Object>> fileHistories2 = jdbcTemplate.queryForList(
+                "SELECT * FROM file_history WHERE vendor_name = 'DOW_JONES' ORDER BY file_version_number ASC");
+        assertEquals(2, fileHistories2.size(), "Should now have 2 versions in file_history for DOW_JONES");
+
+        Map<String, Object> fh2 = fileHistories2.get(1);
+        assertEquals(autoVendorId, fh2.get("vendor_id"), "vendor_id must be preserved across uploads for same vendor");
+        assertEquals(2, ((Number) fh2.get("file_version_number")).intValue(), "file_version_number must increment to 2");
+        assertEquals(hash1, fh2.get("file_hash"), "file_hash must match Job 1 hash");
+        assertNotEquals(fileId1, fh2.get("file_id"), "Job 2 must get a distinct new file_id");
     }
 }

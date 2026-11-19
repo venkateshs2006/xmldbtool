@@ -1,5 +1,6 @@
 package com.enterprise.xmldbtool.controller;
 
+import com.enterprise.xmldbtool.service.StagingXmlStreamingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -13,6 +14,9 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.Map;
 
+/**
+ * Controller handling user-initiated XML and ingestion configuration file uploads.
+ */
 @RestController
 @RequestMapping("/api/files")
 public class FileUploadController {
@@ -42,16 +46,19 @@ public class FileUploadController {
             try (InputStream is = file.getInputStream()) {
                 Files.copy(is, targetPath, StandardCopyOption.REPLACE_EXISTING);
             }
+
             long sizeBytes = Files.size(targetPath);
             long sizeKb = Math.max(1, sizeBytes / 1024);
+            String fileHash = StagingXmlStreamingService.computeFileSha256(targetPath);
 
-            log.info("File uploaded successfully: {} ({} KB) -> {}", originalFilename, sizeKb, targetPath);
+            log.info("File uploaded successfully: {} ({} KB, hash={}) -> {}", originalFilename, sizeKb, fileHash, targetPath);
             return ResponseEntity.ok(Map.of(
                     "success", true,
                     "filePath", targetPath.toString(),
                     "fileName", originalFilename,
                     "fileSizeKb", sizeKb,
-                    "fileSizeBytes", sizeBytes
+                    "fileSizeBytes", sizeBytes,
+                    "fileHash", fileHash
             ));
         } catch (Exception ex) {
             log.error("Failed to upload file", ex);

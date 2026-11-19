@@ -39,10 +39,16 @@ public class AppSchemaInitializer {
             String sqlStaging = "CREATE TABLE IF NOT EXISTS staging_xml_records (" +
                     "id BIGSERIAL PRIMARY KEY, " +
                     "job_execution_id BIGINT, " +
+                    "file_id VARCHAR(64), " +
+                    "bnpp_id VARCHAR(128), " +
+                    "tag_name VARCHAR(100), " +
+                    "version_number INT DEFAULT 1, " +
                     "entity_type VARCHAR(50) NOT NULL, " +
                     "record_identifier VARCHAR(100), " +
                     "record_action VARCHAR(50), " +
                     "record_date VARCHAR(50), " +
+                    "xml_version VARCHAR(50), " +
+                    "schema_version VARCHAR(50), " +
                     "raw_payload TEXT NOT NULL, " +
                     "payload_hash VARCHAR(64) NOT NULL, " +
                     "status VARCHAR(30) DEFAULT 'STAGED', " +
@@ -52,6 +58,12 @@ public class AppSchemaInitializer {
                     ")";
             jdbcTemplate.execute(sqlStaging);
             try {
+                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS file_id VARCHAR(64)");
+                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS bnpp_id VARCHAR(128)");
+                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS tag_name VARCHAR(100)");
+                jdbcTemplate.execute("ALTER TABLE staging_xml_records ADD COLUMN IF NOT EXISTS version_number INT DEFAULT 1");
+                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_file ON staging_xml_records(file_id)");
+                jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_bnpp ON staging_xml_records(bnpp_id)");
                 jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_hash ON staging_xml_records(entity_type, record_identifier, payload_hash)");
                 jdbcTemplate.execute("CREATE INDEX IF NOT EXISTS idx_staging_status ON staging_xml_records(status)");
             } catch (Exception ignored) {}

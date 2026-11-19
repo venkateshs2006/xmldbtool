@@ -78,6 +78,7 @@ com/enterprise/xmldbtool/model/LoginRequest.class
 com/enterprise/xmldbtool/service/DynamicBatchJobService.class
 com/enterprise/xmldbtool/model/TableRelationship.class
 com/enterprise/xmldbtool/batch/DynamicXmlItemProcessor$1.class
+com/enterprise/xmldbtool/service/SystemLoggingService$DialectTypes.class
 com/enterprise/xmldbtool/util/BnppIdGenerator.class
 com/enterprise/xmldbtool/batch/DynamicJdbcBatchWriter.class
 com/enterprise/xmldbtool/model/User.class

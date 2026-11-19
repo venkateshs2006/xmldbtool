@@ -440,7 +440,7 @@ public class DynamicSchemaResolutionService {
 
         DatabaseErrorSkipListener skipListener = new DatabaseErrorSkipListener(targetDataSource, System.currentTimeMillis(), "stagingNormalizationStep");
         DynamicJdbcBatchWriter batchWriter = new DynamicJdbcBatchWriter(targetDataSource, resolvedTableOrder, skipListener);
-        batchWriter.setWriteToHistoricalGsTables(false);
+        batchWriter.setWriteToHistoricalGsTables(true);
         if (!effectiveMappings.isEmpty()) {
             Map<String, Set<String>> explicitPks = new HashMap<>();
             for (FieldMapping m : effectiveMappings) {
@@ -1298,7 +1298,8 @@ public class DynamicSchemaResolutionService {
     public static String computeRowPayloadHash(Map<String, Object> rowMap) {
         if (rowMap == null || rowMap.isEmpty()) return "";
         Set<String> ignoredKeys = Set.of(
-                "bnpp_id", "source_bnpp_id", "staging_bnpp_id", "version_number",
+                "bnpp_id", "current_id", "source_id", "source_bnpp_id", "staging_bnpp_id",
+                "history_ids", "file_id", "tag_name", "version_number",
                 "created_at", "updated_at", "payload_hash", "job_execution_id", "status"
         );
         TreeMap<String, String> sorted = new TreeMap<>();

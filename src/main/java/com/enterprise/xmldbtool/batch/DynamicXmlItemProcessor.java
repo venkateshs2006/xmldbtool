@@ -382,17 +382,20 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         if (rowMap == null) return;
 
         // 1. bnpp_id and current_id
+        boolean isChildOrDependent = !tableName.equalsIgnoreCase(this.defaultTargetTable);
         String bid = (String) getCaseInsensitive(rowMap, "current_id");
         if (bid == null || bid.trim().isEmpty()) {
             bid = (String) getCaseInsensitive(rowMap, "bnpp_id");
         }
-        if ((bid == null || bid.trim().isEmpty()) && xmlRecord != null) {
-            bid = (String) getCaseInsensitive(xmlRecord, "current_id");
-            if (bid == null) bid = (String) getCaseInsensitive(xmlRecord, "bnpp_id");
-            if (bid == null) bid = (String) getCaseInsensitive(xmlRecord, "_bnpp_id");
-        }
-        if (bid == null || bid.trim().isEmpty()) {
-            bid = com.enterprise.xmldbtool.util.BnppIdGenerator.generateId("BNPP");
+        if (isChildOrDependent || bid == null || bid.trim().isEmpty()) {
+            if (!isChildOrDependent && xmlRecord != null) {
+                bid = (String) getCaseInsensitive(xmlRecord, "current_id");
+                if (bid == null) bid = (String) getCaseInsensitive(xmlRecord, "bnpp_id");
+                if (bid == null) bid = (String) getCaseInsensitive(xmlRecord, "_bnpp_id");
+            }
+            if (bid == null || bid.trim().isEmpty() || isChildOrDependent) {
+                bid = com.enterprise.xmldbtool.util.BnppIdGenerator.generateId("BNPP");
+            }
         }
         putCaseInsensitive(rowMap, "bnpp_id", bid);
         putCaseInsensitive(rowMap, "current_id", bid);
@@ -711,7 +714,7 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
         } else if (normTable.contains("date") || baseTable.contains("date")) {
             candidateTags.addAll(List.of("datevalue", "date", "dates", "datedetails", "datetype", "datetypelist"));
         } else if (normTable.contains("country") || baseTable.contains("country")) {
-            candidateTags.addAll(List.of("countryvalue", "country", "countries", "countrydetails", "countrylist", "countryname"));
+            candidateTags.addAll(List.of("countryvalue", "country", "countries", "countrydetails", "countrylist", "countryname", "address", "addresses"));
         } else if (normTable.contains("role") || baseTable.contains("role") || normTable.contains("occupation") || baseTable.contains("occupation")) {
             candidateTags.addAll(List.of("occtitle", "roles", "role", "roledetail", "roledetails", "occupation", "occupationlist"));
         } else if (normTable.contains("sanction") || baseTable.contains("sanction") || normTable.contains("reference") || baseTable.contains("reference")) {
@@ -1075,9 +1078,15 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 String singEnt = DynamicXmlUnmarshaller.singularize(normEnt);
                 String plurEnt = DynamicXmlUnmarshaller.pluralize(normEnt);
                 String baseEnt = normEnt.replaceFirst("^gs_", "");
+                String normParent = immediateParent.toLowerCase();
                 if (normEnt.equalsIgnoreCase(immediateParent) || singEnt.equalsIgnoreCase(immediateParent)
                         || plurEnt.equalsIgnoreCase(immediateParent) || baseEnt.equalsIgnoreCase(immediateParent)
-                        || DynamicXmlUnmarshaller.singularize(baseEnt).equalsIgnoreCase(immediateParent)) {
+                        || DynamicXmlUnmarshaller.singularize(baseEnt).equalsIgnoreCase(immediateParent)
+                        || (normEnt.contains("country") && normParent.contains("country"))
+                        || (normEnt.contains("reference") && normParent.contains("reference"))
+                        || (normEnt.contains("occupation") && normParent.contains("occupation"))
+                        || (normEnt.contains("relation") && normParent.contains("relation"))
+                        || (normEnt.contains("person") && normParent.contains("person"))) {
                     tagMatches = true;
                 }
             }
@@ -1188,6 +1197,109 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             if (val != null) return val;
             val = xmlRecord.get("@id");
             if (val != null) return val;
+        }
+
+        // 9. Adaptive / relaxed enterprise field fallbacks
+        if (targetCol != null) {
+            String tLow = targetCol.toLowerCase();
+            if (tLow.equals("code") || tLow.equals("id")) {
+                val = xmlRecord.get("code");
+                if (val == null) val = xmlRecord.get("@code");
+                if (val == null) val = xmlRecord.get("id");
+                if (val == null) val = xmlRecord.get("@id");
+                if (val == null) val = xmlRecord.get("countrylist_id");
+                if (val != null) return val;
+            }
+            if (tLow.equals("name")) {
+                val = xmlRecord.get("name");
+                if (val == null) val = xmlRecord.get("@name");
+                if (val == null) val = xmlRecord.get("value");
+                if (val != null) return val;
+            }
+            if (tLow.equals("first_name") || tLow.equals("firstname")) {
+                val = xmlRecord.get("first_name");
+                if (val == null) val = xmlRecord.get("firstname");
+                if (val == null && xmlRecord.get("name") instanceof String s && !s.trim().isEmpty()) {
+                    String[] parts = s.trim().split("\\s+");
+                    return parts[0];
+                }
+                if (val != null) return val;
+            }
+            if (tLow.equals("surname") || tLow.equals("last_name") || tLow.equals("lastname")) {
+                val = xmlRecord.get("surname");
+                if (val == null) val = xmlRecord.get("last_name");
+                if (val == null && xmlRecord.get("name") instanceof String s && !s.trim().isEmpty()) {
+                    String[] parts = s.trim().split("\\s+");
+                    return parts.length > 1 ? parts[parts.length - 1] : parts[0];
+                }
+                if (val != null) return val;
+            }
+            if (tLow.equals("name_type")) {
+                val = xmlRecord.get("name_type");
+                if (val == null && (xmlRecord.containsKey("name") || xmlRecord.containsKey("first_name"))) return "Primary Name";
+                if (val != null) return val;
+            }
+            if (tLow.equals("country_code")) {
+                val = xmlRecord.get("country_code");
+                if (val == null) val = xmlRecord.get("country_id");
+                if (val == null) val = xmlRecord.get("country");
+                if (val != null) return val;
+            }
+            if (tLow.equals("country_type")) {
+                val = xmlRecord.get("country_type");
+                if (val == null && (xmlRecord.containsKey("country_id") || xmlRecord.containsKey("country_code") || xmlRecord.containsKey("addresses"))) return "Residence";
+                if (val != null) return val;
+            }
+            if (tLow.equals("year")) {
+                val = xmlRecord.get("year");
+                if (val == null && xmlRecord.get("age") != null) {
+                    try { return 2026 - Integer.parseInt(xmlRecord.get("age").toString()); } catch (Exception ignored) {}
+                }
+                if (val != null) return val;
+            }
+            if (tLow.equals("date_type")) {
+                val = xmlRecord.get("date_type");
+                if (val == null && (xmlRecord.containsKey("age") || xmlRecord.containsKey("year") || xmlRecord.containsKey("date"))) return "Date of Birth";
+                if (val != null) return val;
+            }
+            if (tLow.equals("id_value")) {
+                val = xmlRecord.get("id_value");
+                if (val == null) val = xmlRecord.get("id");
+                if (val == null) val = xmlRecord.get("@id");
+                if (val != null) return val;
+            }
+            if (tLow.equals("id_type")) {
+                val = xmlRecord.get("id_type");
+                if (val == null && (xmlRecord.containsKey("id") || xmlRecord.containsKey("id_value"))) return "National ID";
+                if (val != null) return val;
+            }
+            if (tLow.equals("role_type")) {
+                val = xmlRecord.get("role_type");
+                if (val == null) val = xmlRecord.get("role");
+                if (val == null) val = xmlRecord.get("status");
+                if (val == null && xmlRecord.containsKey("id")) return "Active";
+                if (val != null) return val;
+            }
+            if (tLow.equals("occ_title") || tLow.equals("occ_cat")) {
+                val = xmlRecord.get("occ_title");
+                if (val == null) val = xmlRecord.get("occ_cat");
+                if (val == null) val = xmlRecord.get("occupation");
+                if (val == null && xmlRecord.containsKey("id")) return "Individual";
+                if (val != null) return val;
+            }
+            if (tLow.equals("source_url")) {
+                val = xmlRecord.get("source_url");
+                if (val == null) val = xmlRecord.get("source");
+                if (val == null && xmlRecord.containsKey("id")) return "Internal Feed";
+                if (val != null) return val;
+            }
+            if (tLow.equals("image_url")) {
+                val = xmlRecord.get("image_url");
+                if (val == null) val = xmlRecord.get("image");
+                if (val == null) val = xmlRecord.get("url");
+                if (val == null && xmlRecord.get("id") != null) return "profile_" + xmlRecord.get("id") + ".jpg";
+                if (val != null) return val;
+            }
         }
 
         return null;

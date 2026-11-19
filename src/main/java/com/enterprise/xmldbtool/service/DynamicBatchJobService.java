@@ -310,6 +310,62 @@ public class DynamicBatchJobService {
                     .addLong("time", timestamp)
                     .toJobParameters();
 
+            // Register uploaded XML file in file_history tracking table
+            String xmlPath = request.getSourceXmlPath();
+            long fileSizeBytes = 0;
+            long fileSizeKb = 0;
+            String fileChecksum = null;
+            String fileName = "unknown.xml";
+            if (xmlPath != null) {
+                try {
+                    Path p = Paths.get(xmlPath);
+                    if (Files.exists(p)) {
+                        fileSizeBytes = Files.size(p);
+                        fileSizeKb = Math.max(1, fileSizeBytes / 1024);
+                        fileName = p.getFileName().toString();
+                        fileChecksum = StagingXmlStreamingService.computeFileSha256(p);
+                    } else {
+                        fileName = xmlPath.contains("/") ? xmlPath.substring(xmlPath.lastIndexOf('/') + 1) : xmlPath;
+                    }
+                } catch (Exception ex) {
+                    fileName = xmlPath.contains("/") ? xmlPath.substring(xmlPath.lastIndexOf('/') + 1) : xmlPath;
+                }
+            }
+
+            String registeredFileId = request.getFileId();
+            if (registeredFileId == null && systemLoggingService != null) {
+                String ingestionContent = request.getIngestMappingJson();
+                String ingestionPath = request.getIngestionJsonPath();
+                if ((ingestionContent == null || ingestionContent.isEmpty()) && ingestionPath != null) {
+                    try {
+                        Path ip = Paths.get(ingestionPath);
+                        if (Files.exists(ip)) {
+                            ingestionContent = Files.readString(ip);
+                        }
+                    } catch (Exception ignored) {}
+                }
+                Map<String, Object> meta = new LinkedHashMap<>();
+                meta.put("recordRootElements", effectiveRoots);
+                meta.put("targetTables", tableOrder);
+                meta.put("chunkSize", chunkSize);
+
+                registeredFileId = systemLoggingService.registerFile(
+                        targetDataSource,
+                        request.getVendorName(),
+                        request.getVendorId(),
+                        fileName,
+                        fileSizeBytes,
+                        fileSizeKb,
+                        fileChecksum,
+                        ingestionPath,
+                        ingestionContent,
+                        request.getTriggeredBy() != null ? request.getTriggeredBy() : "USER",
+                        meta
+                );
+                request.setFileId(registeredFileId);
+            }
+            final String activeFileId = registeredFileId;
+
             // Launch asynchronously using SimpleAsyncTaskExecutor with Java 21 Virtual Threads
             SimpleAsyncTaskExecutor asyncExecutor = new SimpleAsyncTaskExecutor("batch-exec-");
             asyncExecutor.setVirtualThreads(true);
@@ -321,11 +377,33 @@ public class DynamicBatchJobService {
             activeWriters.put(jobExecution.getId(), writer);
             activeProcessors.put(jobExecution.getId(), processor);
 
+            if (systemLoggingService != null) {
+                systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                        "JOB_STARTED", effectiveFragmentRoot,
+                        "Launched direct job for roots: " + effectiveRoots + ", tables: " + allTables,
+                        0L, request.getTriggeredBy() != null ? request.getTriggeredBy() : "USER", "STARTED");
+            }
+
             asyncExecutor.execute(() -> {
                 try {
                     job.execute(jobExecution);
+                    if (systemLoggingService != null) {
+                        long written = writer.getTotalRecordsWritten();
+                        systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                                "JOB_COMPLETED", finalRecordRoot,
+                                "Direct batch job completed with status: " + jobExecution.getStatus(),
+                                written, "SYSTEM", "SUCCESS");
+                        systemLoggingService.updateFileStatus(targetDataSource, activeFileId, "COMPLETED", written);
+                    }
                 } catch (Exception e) {
                     log.error("Async execution of job {} failed: {}", jobName, e.getMessage(), e);
+                    if (systemLoggingService != null) {
+                        systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
+                                "JOB_FAILED", finalRecordRoot,
+                                "Direct batch job execution failed: " + e.getMessage(),
+                                0L, "SYSTEM", "FAILED");
+                        systemLoggingService.updateFileStatus(targetDataSource, activeFileId, "FAILED", 0L);
+                    }
                 }
             });
 
@@ -348,6 +426,21 @@ public class DynamicBatchJobService {
         try {
             long timestamp = System.currentTimeMillis();
             String jobName = "stagedXmlPipelineJob_" + timestamp;
+
+            // 0. Auto-resolve mappings from job config / ingestion.json if not provided
+            if (request.getMappings() == null || request.getMappings().isEmpty()) {
+                if (request.getIngestionJsonPath() != null && !request.getIngestionJsonPath().trim().isEmpty()) {
+                    List<FieldMapping> loaded = discoveryService.loadMappingsFromFile(request.getIngestionJsonPath());
+                    if (loaded != null && !loaded.isEmpty()) {
+                        request.setMappings(loaded);
+                    }
+                } else if (request.getIngestMappingJson() != null && !request.getIngestMappingJson().trim().isEmpty()) {
+                    List<FieldMapping> loaded = discoveryService.parseMappingsFromJsonStringOrFile(request.getIngestMappingJson());
+                    if (loaded != null && !loaded.isEmpty()) {
+                        request.setMappings(loaded);
+                    }
+                }
+            }
 
             String docRoot = discoveryService.detectDocumentRootElement(request.getSourceXmlPath());
             Set<String> rootsToStream = new LinkedHashSet<>();
@@ -390,6 +483,17 @@ public class DynamicBatchJobService {
                         rootsToStream.add(normTbl);
                     } else if (xmlCandidateSet.contains(singTbl)) {
                         rootsToStream.add(singTbl);
+                    }
+                    for (String cand : xmlCandidateSet) {
+                        String cLow = cand.toLowerCase();
+                        if (cLow.equalsIgnoreCase(normTbl) || cLow.equalsIgnoreCase(singTbl)
+                                || (normTbl.equals("country") && (cLow.equals("country") || cLow.equals("countryname") || cLow.equals("countries")))
+                                || (normTbl.contains("sanction") && (cLow.contains("sanction") || cLow.contains("reference")))
+                                || (normTbl.equals("occupation") && (cLow.equals("occupation") || cLow.equals("occupations")))
+                                || (normTbl.equals("relationship") && (cLow.equals("relationship") || cLow.equals("relationships")))
+                                || (normTbl.equals("person") && (cLow.equals("person") || cLow.equals("persons")))) {
+                            rootsToStream.add(cand);
+                        }
                     }
 
                     String xf = m.getXmlField();
@@ -442,35 +546,27 @@ public class DynamicBatchJobService {
             List<String> effectiveRoots = new ArrayList<>(rootsToStream);
             String effectiveFragmentRoot = effectiveRoots.get(0);
 
-            // 0. Auto-resolve mappings from job config / ingestion.json if not provided
+            // Fallback schema discovery if mappings still absent
             if (request.getMappings() == null || request.getMappings().isEmpty()) {
-                if (request.getIngestionJsonPath() != null && !request.getIngestionJsonPath().trim().isEmpty()) {
-                    List<FieldMapping> loaded = discoveryService.loadMappingsFromFile(request.getIngestionJsonPath());
-                    if (loaded != null && !loaded.isEmpty()) {
-                        request.setMappings(loaded);
-                    }
-                } else if (request.getIngestMappingJson() != null && !request.getIngestMappingJson().trim().isEmpty()) {
-                    List<FieldMapping> loaded = discoveryService.parseMappingsFromJsonStringOrFile(request.getIngestMappingJson());
-                    if (loaded != null && !loaded.isEmpty()) {
-                        request.setMappings(loaded);
-                    }
-                } else {
-                    com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
-                    discReq.setSourceXmlPath(request.getSourceXmlPath());
-                    discReq.setRecordRootElement(effectiveFragmentRoot);
-                    discReq.setRecordRootElements(effectiveRoots);
-                    discReq.setMappingJson(request.getIngestMappingJson());
-                    discReq.setDbConfig(request.getDbConfig());
-                    com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
-                    if (discResp != null && discResp.getGeneratedMappings() != null && !discResp.getGeneratedMappings().isEmpty()) {
-                        request.setMappings(discResp.getGeneratedMappings());
-                    }
+                com.enterprise.xmldbtool.model.SchemaDiscoveryRequest discReq = new com.enterprise.xmldbtool.model.SchemaDiscoveryRequest();
+                discReq.setSourceXmlPath(request.getSourceXmlPath());
+                discReq.setRecordRootElement(effectiveFragmentRoot);
+                discReq.setRecordRootElements(effectiveRoots);
+                discReq.setMappingJson(request.getIngestMappingJson());
+                discReq.setDbConfig(request.getDbConfig());
+                com.enterprise.xmldbtool.model.SchemaDiscoveryResponse discResp = discoveryService.discoverSchema(discReq);
+                if (discResp != null && discResp.getGeneratedMappings() != null && !discResp.getGeneratedMappings().isEmpty()) {
+                    request.setMappings(discResp.getGeneratedMappings());
                 }
             }
 
             // Target DB DataSource: verify DB connection and tables presence on job start
             // If not there, create db connection and tables based on job config (no dynamic XML heuristic table creation)
-            DataSource targetDataSource = verifyAndEnsureDatabaseAndTables(request, effectiveRoots);
+            DataSource resolvedDs = verifyAndEnsureDatabaseAndTables(request, effectiveRoots);
+            if (resolvedDs == null && this.jdbcTemplate != null) {
+                resolvedDs = this.jdbcTemplate.getDataSource();
+            }
+            final DataSource targetDataSource = resolvedDs;
 
             List<String> tableOrder = DynamicJdbcBatchWriter.determineTableOrder(
                     request.getTableOrder(),
@@ -562,6 +658,7 @@ public class DynamicBatchJobService {
 
             // Register uploaded XML file in file_history tracking table
             String xmlPath = request.getSourceXmlPath();
+            long fileSizeBytes = 0;
             long fileSizeKb = 0;
             String fileChecksum = null;
             String fileName = "unknown.xml";
@@ -569,9 +666,10 @@ public class DynamicBatchJobService {
                 try {
                     Path p = Paths.get(xmlPath);
                     if (Files.exists(p)) {
-                        fileSizeKb = Files.size(p) / 1024;
+                        fileSizeBytes = Files.size(p);
+                        fileSizeKb = Math.max(1, fileSizeBytes / 1024);
                         fileName = p.getFileName().toString();
-                        fileChecksum = StagingXmlStreamingService.computeSha256(Files.readString(p));
+                        fileChecksum = StagingXmlStreamingService.computeFileSha256(p);
                     } else {
                         fileName = xmlPath.contains("/") ? xmlPath.substring(xmlPath.lastIndexOf('/') + 1) : xmlPath;
                     }
@@ -604,6 +702,7 @@ public class DynamicBatchJobService {
                         request.getVendorName(),
                         request.getVendorId(),
                         fileName,
+                        fileSizeBytes,
                         fileSizeKb,
                         fileChecksum,
                         ingestionPath,
@@ -882,7 +981,7 @@ public class DynamicBatchJobService {
                         systemLoggingService.logAudit(targetDataSource, activeFileId, jobExecution.getId(),
                                 "JOB_COMPLETED", finalRecordRoot,
                                 "Staged pipeline job completed successfully: JobExecutionId=" + jobExecution.getId() + ", recordsNormalized=" + finalRowsWritten,
-                                finalRowsWritten, "SYSTEM", "COMPLETED");
+                                finalRowsWritten, "SYSTEM", "SUCCESS");
                     }
                     log.info("Staged metadata-driven XML processing pipeline job completed successfully: JobExecutionId={}", jobExecution.getId());
                 } catch (Exception ex) {
@@ -942,6 +1041,9 @@ public class DynamicBatchJobService {
      */
     public DataSource verifyAndEnsureDatabaseAndTables(JobLaunchRequest request, List<String> effectiveRoots) {
         if (request == null || request.getDbConfig() == null) {
+            if (this.jdbcTemplate != null && this.jdbcTemplate.getDataSource() != null) {
+                return this.jdbcTemplate.getDataSource();
+            }
             return null;
         }
         com.enterprise.xmldbtool.model.DbConnectionConfig dbConfig = request.getDbConfig();
@@ -1073,6 +1175,14 @@ public class DynamicBatchJobService {
                 );
             } catch (Exception ex) {
                 log.warn("Notice provisioning tables on job start: {}", ex.getMessage());
+            }
+        }
+
+        if (systemLoggingService != null && ds != null) {
+            try {
+                systemLoggingService.ensureSystemLoggingTables(ds);
+            } catch (Exception ex) {
+                log.debug("Notice ensuring system logging tables in verifyAndEnsureDatabaseAndTables: {}", ex.getMessage());
             }
         }
 
