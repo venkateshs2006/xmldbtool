@@ -1927,18 +1927,37 @@ public class StagingXmlStreamingService {
     }
 
     private BufferedReader openReader(String path) throws Exception {
+        if (path == null || path.trim().isEmpty()) {
+            throw new IllegalArgumentException("XML source path cannot be blank.");
+        }
+        path = path.trim().replaceAll("^\"|\"$", "").replaceAll("^'|'$", "");
+
         Path direct = Paths.get(path);
         if (Files.exists(direct)) {
             return new BufferedReader(new InputStreamReader(Files.newInputStream(direct), StandardCharsets.UTF_8), 128 * 1024);
         }
+
+        Path wsRoot = Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
+        Path relPath = wsRoot.resolve(path);
+        if (Files.exists(relPath)) {
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(relPath), StandardCharsets.UTF_8), 128 * 1024);
+        }
+
+        Path uploadPath = wsRoot.resolve("uploads").resolve(path);
+        if (Files.exists(uploadPath)) {
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(uploadPath), StandardCharsets.UTF_8), 128 * 1024);
+        }
+
+        Path samplePath = wsRoot.resolve("sample-data").resolve(path);
+        if (Files.exists(samplePath)) {
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(samplePath), StandardCharsets.UTF_8), 128 * 1024);
+        }
+
         Resource res = resourceLoader.getResource(path);
         if (res.exists()) {
             return new BufferedReader(new InputStreamReader(res.getInputStream(), StandardCharsets.UTF_8), 128 * 1024);
         }
-        Path relative = Paths.get("/home/sv/Projects/xmldbtool", path);
-        if (Files.exists(relative)) {
-            return new BufferedReader(new InputStreamReader(Files.newInputStream(relative), StandardCharsets.UTF_8), 128 * 1024);
-        }
+
         throw new IllegalArgumentException("Unable to find XML source file: " + path);
     }
 }

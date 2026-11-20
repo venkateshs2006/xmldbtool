@@ -665,9 +665,9 @@
                                        class="input-field font-mono text-xs pl-10 w-full">
                                 <i class="fas fa-hard-drive absolute left-3.5 top-3 text-gray-400 text-sm"></i>
                             </div>
-                            <label class="btn text-xs py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white font-bold cursor-pointer shrink-0 flex items-center gap-1.5 shadow-sm" title="Upload XML File from Disk">
-                                <i class="fas fa-upload"></i>
-                                <span>Upload XML</span>
+                            <label class="btn text-xs py-2 px-3 bg-blue-600 hover:bg-blue-700 text-white font-bold cursor-pointer shrink-0 flex items-center gap-1.5 shadow-sm" title="Select XML File from Disk (StAX streaming reader reads path directly without uploading)">
+                                <i class="fas fa-folder-open"></i>
+                                <span>Select XML File</span>
                                 <input type="file" id="step2-xml-file-input" accept=".xml" class="hidden">
                             </label>
                             <button type="button" id="btn-detect-xml-roots" class="btn btn-secondary text-xs py-2 px-3 shrink-0 flex items-center gap-1.5" title="Inspect XML & Detect Root Tags">
@@ -679,7 +679,7 @@
                             <i class="fas fa-spinner fa-spin text-emerald-600 text-xs"></i>
                             <span id="xml-file-detect-indicator-text">Inspecting XML structure for candidate root elements...</span>
                         </div>
-                        <p class="text-xs text-gray-500 mt-1.5">Upload a local XML file or specify a local filesystem / cloud storage path. StAX streaming guarantees constant O(1) memory.</p>
+                        <p class="text-xs text-gray-500 mt-1.5">Select a local XML file or specify a local filesystem / cloud storage path. StAX streaming reader directly reads the file from disk with constant O(1) memory without uploading to server.</p>
                     </div>
 
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-4">

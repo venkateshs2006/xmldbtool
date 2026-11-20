@@ -140,38 +140,45 @@ function initStepHandlers() {
         });
     }
 
-    // Step 2: XML File Upload & Root Detection
+    // Step 2: XML File Selection & StAX Streaming (No file upload to server)
     const step2XmlFileInput = document.getElementById('step2-xml-file-input');
     if (step2XmlFileInput) {
         step2XmlFileInput.addEventListener('change', async (e) => {
             const file = e.target.files && e.target.files[0];
             if (!file) return;
-            const formData = new FormData();
-            formData.append('file', file);
-            showToast(`Uploading XML file '${file.name}'...`, 'info', 'File Upload');
-            try {
-                const response = await fetch('/api/files/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                if (response.ok && result.success) {
-                    const xmlInput = document.getElementById('xml-file-path');
-                    if (xmlInput) xmlInput.value = result.filePath;
-                    AppState.source.filePath = result.filePath;
-                    AppState.source.xmlFileName = result.fileName;
-                    AppState.source.fileSizeKb = result.fileSizeKb;
-                    showToast(`XML file uploaded successfully (${result.fileSizeKb} KB)`, 'success', 'XML Ready');
-                    clearTimeout(detectRootsDebounceTimer);
-                    detectCandidateRootsFromInput(true);
-                } else {
-                    showToast(result.message || 'Failed to upload XML file.', 'error', 'Upload Error');
-                }
-            } catch (err) {
-                showToast(err.message || 'Network error uploading XML file.', 'error', 'Upload Error');
-            } finally {
-                e.target.value = '';
+
+            // 1. Direct path from File object (e.g. Electron / local runtime)
+            let filePath = file.path;
+
+            // 2. If browser security hides path, resolve path on filesystem without uploading
+            if (!filePath) {
+                const existingVal = (document.getElementById('xml-file-path') || {}).value || '';
+                try {
+                    const response = await fetch(`/api/files/resolve-path?fileName=${encodeURIComponent(file.name)}&hintPath=${encodeURIComponent(existingVal)}`);
+                    const result = await response.json();
+                    if (result && result.success && result.filePath) {
+                        filePath = result.filePath;
+                    }
+                } catch (ignored) {}
             }
+
+            if (!filePath) {
+                filePath = file.name;
+            }
+
+            const xmlInput = document.getElementById('xml-file-path');
+            if (xmlInput) xmlInput.value = filePath;
+            AppState.source.filePath = filePath;
+            AppState.source.xmlFileName = file.name;
+            AppState.source.fileSizeKb = Math.max(1, Math.round(file.size / 1024));
+
+            showToast(`XML file path set to '${filePath}' (${AppState.source.fileSizeKb} KB). StAX streaming reader will read directly from path.`, 'success', 'Path Loaded');
+
+            // StAX reader inspects roots directly from path without uploading
+            clearTimeout(detectRootsDebounceTimer);
+            detectCandidateRootsFromInput(true);
+
+            e.target.value = '';
         });
     }
 

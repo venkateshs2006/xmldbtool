@@ -1437,21 +1437,32 @@ public class XmlSchemaDiscoveryService {
         if (sourcePath == null || sourcePath.trim().isEmpty()) {
             throw new IllegalArgumentException("XML source path cannot be blank.");
         }
+        sourcePath = sourcePath.trim().replaceAll("^\"|\"$", "").replaceAll("^'|'$", "");
 
         Path directPath = Paths.get(sourcePath);
         if (Files.exists(directPath)) {
             return new BufferedReader(new InputStreamReader(Files.newInputStream(directPath), StandardCharsets.UTF_8), 128 * 1024);
         }
 
+        Path wsRoot = Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
+        Path relPath = wsRoot.resolve(sourcePath);
+        if (Files.exists(relPath)) {
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(relPath), StandardCharsets.UTF_8), 128 * 1024);
+        }
+
+        Path uploadPath = wsRoot.resolve("uploads").resolve(sourcePath);
+        if (Files.exists(uploadPath)) {
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(uploadPath), StandardCharsets.UTF_8), 128 * 1024);
+        }
+
+        Path samplePath = wsRoot.resolve("sample-data").resolve(sourcePath);
+        if (Files.exists(samplePath)) {
+            return new BufferedReader(new InputStreamReader(Files.newInputStream(samplePath), StandardCharsets.UTF_8), 128 * 1024);
+        }
+
         Resource res = resourceLoader.getResource(sourcePath);
         if (res.exists()) {
             return new BufferedReader(new InputStreamReader(res.getInputStream(), StandardCharsets.UTF_8), 128 * 1024);
-        }
-
-        // Try relative to workspace
-        Path relativePath = Paths.get("/home/sv/Projects/xmldbtool", sourcePath);
-        if (Files.exists(relativePath)) {
-            return new BufferedReader(new InputStreamReader(Files.newInputStream(relativePath), StandardCharsets.UTF_8), 128 * 1024);
         }
 
         throw new IllegalArgumentException("Unable to locate XML source file: " + sourcePath);
@@ -1471,16 +1482,26 @@ public class XmlSchemaDiscoveryService {
         if (sourcePath == null || sourcePath.trim().isEmpty()) {
             return -1L;
         }
+        sourcePath = sourcePath.trim().replaceAll("^\"|\"$", "").replaceAll("^'|'$", "");
         try {
-            Path directPath = Paths.get(sourcePath.trim());
+            Path directPath = Paths.get(sourcePath);
             if (Files.exists(directPath)) {
                 return Files.size(directPath);
             }
-            Path relativePath = Paths.get("/home/sv/Projects/xmldbtool", sourcePath.trim());
-            if (Files.exists(relativePath)) {
-                return Files.size(relativePath);
+            Path wsRoot = Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
+            Path relPath = wsRoot.resolve(sourcePath);
+            if (Files.exists(relPath)) {
+                return Files.size(relPath);
             }
-            Resource res = resourceLoader.getResource(sourcePath.trim());
+            Path uploadPath = wsRoot.resolve("uploads").resolve(sourcePath);
+            if (Files.exists(uploadPath)) {
+                return Files.size(uploadPath);
+            }
+            Path samplePath = wsRoot.resolve("sample-data").resolve(sourcePath);
+            if (Files.exists(samplePath)) {
+                return Files.size(samplePath);
+            }
+            Resource res = resourceLoader.getResource(sourcePath);
             if (res.exists()) {
                 return res.contentLength();
             }
