@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Organization id="ORG-2026" country="India">
+    <Name>orgName</Name>
+    <Headquarters>
+        <City>Chennai</City>
+        <State>Tamil Nadu</State>
+        <PinCode>600001</PinCode>
+    </Headquarters>
+    <Departments>
+        <Department code="DEPT-ENG">
+            <DepartmentName>Software Engineering</DepartmentName>
+            <AnnualBudget currency="currency;">15000000</AnnualBudget>
+	  <Employees>
+                <Employee id="EMP-01" status="Active">
+                    <FullName>Karthik Subramanian</FullName>
+                    <Designation>Lead Architect</Designation>
+                    <Contact>
+                        <Email>karthik.s@example.com</Email>
+                        <Phone type="mobile">+91-98400-11223</Phone>
+                    </Contact>
+
+                    <Skills>
+                        <Skill level="Expert">Java</Skill>
+                        <Skill level="Expert">Cloud Architecture</Skill>
+                        <Skill level="Intermediate">Kubernetes</Skill>
+                    </Skills>
+
+
+                    <AssignedProjects>
+                        <Project id="PRJ-101">
+                            <ProjectName>Core Banking API</ProjectName>
+                            <Role>Tech Lead</Role>
+                            <Milestones>
+                                <Milestone completed="true">System Design</Milestone>
+                                <Milestone completed="false">Production Rollout</Milestone>
+                            </Milestones>
+                        </Project>
+                    </AssignedProjects>
+                </Employee>
+
+                <Employee id="EMP-02" status="Active">
+                    <FullName>Meera Krishnan</FullName>
+                    <Designation>Senior Backend Developer</Designation>
+                    <Contact>
+                        <Email>meera.k@example.com</Email>
+                        <Phone type="mobile">+91-98400-44556</Phone>
+                    </Contact>
+                    <Skills>
+                        <Skill level="Expert">Python</Skill>
+                        <Skill level="Advanced">PostgreSQL</Skill>
+                    </Skills>
+                    <AssignedProjects>
+                        <Project id="PRJ-101">
+                            <ProjectName>Core Banking API</ProjectName>
+                            <Role>API Developer</Role>
+                            <Milestones>
+                                <Milestone completed="true">Database Schema</Milestone>
+                                <Milestone completed="true">Auth Integration</Milestone>
+                            </Milestones>
+                        </Project>
+                    </AssignedProjects>
+                </Employee>
+            </Employees>
+        </Department>
+
+
+        <Department code="DEPT-FIN">
+            <DepartmentName>Finance Operations</DepartmentName>
+            <AnnualBudget currency="currency;">4500000</AnnualBudget>
+            <Employees>
+                <Employee id="EMP-03" status="OnLeave">
+                    <FullName>Suresh Venkat</FullName>
+                    <Designation>Finance Manager</Designation>
+                    <Contact>
+                        <Email>suresh.v@example.com</Email>
+                        <Phone type="work">+91-44-2811-9900</Phone>
+                    </Contact>
+                    <Skills>
+                        <Skill level="Expert">Taxation Compliance</Skill>
+                        <Skill level="Advanced">SAP ERP</Skill>
+                    </Skills>
+                    <AssignedProjects />
+                </Employee>
+            </Employees>
+        </Department>
+
+    </Departments>
+
+    <Metadata>
+        <GeneratedBy>HR Management System</GeneratedBy>
+        <Notice>standardFooter;</Notice>
+    </Metadata>
+</Organization>

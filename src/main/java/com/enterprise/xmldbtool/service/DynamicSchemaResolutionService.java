@@ -230,10 +230,13 @@ public class DynamicSchemaResolutionService {
         for (String flatTable : candidateFlatTables) {
             log.info("Moving latest version records from flat table '{}' to canonical table(s)...", flatTable);
 
+            String flatEntity = flatTable.toLowerCase().replaceFirst("^gs_", "").replaceAll("(?i)_(flat|gs)$", "");
+
             String selectSql = "SELECT * FROM " + flatTable + " ORDER BY id ASC";
             List<StagingXmlRecord> allFlatRecords = jdbcTemplate.query(selectSql, (rs, rowNum) -> {
                 StagingXmlRecord r = new StagingXmlRecord();
                 r.setId(rs.getLong("id"));
+                r.setEntityType(flatEntity);
                 try { r.setJobExecutionId(rs.getLong("job_execution_id")); } catch (Exception ignored) {}
                 try { r.setFileId(rs.getString("file_id")); } catch (Exception ignored) {}
                 try { r.setBnppId(rs.getString("bnpp_id")); } catch (Exception ignored) {}
@@ -245,13 +248,9 @@ public class DynamicSchemaResolutionService {
                 try { r.setStagingBnppId(rs.getString("staging_bnpp_id")); } catch (Exception ignored) {}
                 try { r.setHistoryIds(rs.getString("history_ids")); } catch (Exception ignored) {}
                 try { r.setTagName(rs.getString("tag_name")); } catch (Exception ignored) {}
-                try {
-                    if (r.getTagName() == null || r.getTagName().isEmpty()) r.setTagName(rs.getString("entity_type"));
-                } catch (Exception ignored) {}
-                try { r.setEntityType(rs.getString("entity_type")); } catch (Exception ignored) {}
-                try {
-                    if (r.getEntityType() == null || r.getEntityType().isEmpty()) r.setEntityType(rs.getString("tag_name"));
-                } catch (Exception ignored) {}
+                if (r.getTagName() == null || r.getTagName().isEmpty()) {
+                    r.setTagName(flatEntity);
+                }
                 try { r.setVersionNumber(rs.getInt("version_number")); } catch (Exception ignored) {}
                 try { r.setRecordIdentifier(rs.getString("record_identifier")); } catch (Exception ignored) {}
                 try { r.setRecordAction(rs.getString("record_action")); } catch (Exception ignored) {}
@@ -280,13 +279,13 @@ public class DynamicSchemaResolutionService {
                 continue;
             }
 
-            // Group records by business recordIdentifier (or fallback to id/bnpp_id)
+            // Group records by business recordIdentifier (or fallback to code/id/bnpp_id)
             Map<String, List<StagingXmlRecord>> recordsByEntityKey = new LinkedHashMap<>();
             for (StagingXmlRecord rec : allFlatRecords) {
                 String key = rec.getRecordIdentifier();
                 if (key == null || key.trim().isEmpty()) {
                     if (rec.getCachedMap() != null) {
-                        for (String candidateCol : List.of("person_id", "id", "@id", "code", "record_identifier")) {
+                        for (String candidateCol : List.of("record_identifier", "code", "@code", "id", "@id", "bnpp_id")) {
                             Object val = rec.getCachedMap().get(candidateCol);
                             if (val != null && !String.valueOf(val).trim().isEmpty()) {
                                 key = String.valueOf(val).trim();
@@ -597,6 +596,13 @@ public class DynamicSchemaResolutionService {
                     processedAnyFlat = true;
                     lastSeenId = stagedBatch.get(stagedBatch.size() - 1).getId();
 
+                    String flatEntity = flatTable.toLowerCase().replaceFirst("^gs_", "").replaceAll("(?i)_(flat|gs)$", "");
+                    stagedBatch.forEach(r -> {
+                        if (!flatEntity.isEmpty() && !flatEntity.equals("staging_xml_records")) {
+                            r.setEntityType(flatEntity);
+                        }
+                    });
+
                     inFlightTasks.acquire();
                     futures.add(vThreadExecutor.submit(() -> {
                         try {
@@ -811,10 +817,12 @@ public class DynamicSchemaResolutionService {
                     rawMap.putIfAbsent("bnpp_id", record.getBnppId());
                 }
 
-                String entityTag = record.getTagName() != null ? record.getTagName() : record.getEntityType();
+                String entityTag = (record.getEntityType() != null && !record.getEntityType().isEmpty())
+                        ? record.getEntityType()
+                        : record.getTagName();
                 if (entityTag != null) {
                     rawMap.put("_entity_tag", entityTag);
-                    rawMap.put("_tag_name", entityTag);
+                    rawMap.put("_tag_name", record.getTagName() != null ? record.getTagName() : entityTag);
                 }
 
                 // Capture unmapped delta XML fields into unmapped_attributes JSON

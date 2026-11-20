@@ -11,6 +11,7 @@ import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
 import java.io.StringReader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -172,14 +173,13 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 if (strippedTbl.startsWith("country") && !strippedEntity.startsWith("country")) {
                     continue;
                 }
-                if (strippedTbl.startsWith("occupation") && !strippedEntity.startsWith("occupation") && !strippedEntity.equals("descriptionlist1")) {
+                if (strippedTbl.startsWith("occupation") && !strippedEntity.startsWith("occupation")) {
                     continue;
                 }
-                if (strippedTbl.startsWith("relationship") && !strippedEntity.startsWith("relation") && !strippedEntity.equals("descriptionlist2")) {
+                if (strippedTbl.startsWith("relationship") && !strippedEntity.startsWith("relation")) {
                     continue;
                 }
-                if (strippedTbl.contains("sanction") && !strippedTbl.startsWith("person") && !strippedEntity.contains("sanction") && !strippedEntity.contains("reference")
-                        && !strippedEntity.equals("descriptionlist3") && !strippedEntity.equals("descriptionlist4")) {
+                if (strippedTbl.contains("sanction") && !strippedTbl.startsWith("person") && !strippedEntity.contains("sanction") && !strippedEntity.contains("reference")) {
                     continue;
                 }
 
@@ -211,10 +211,7 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                         || strippedTbl.equals(singBase)
                         || baseTbl.equals(baseEnt)
                         || singBaseTbl.equals(singBase)
-                        || isChildOfMaster
-                        || (strippedTbl.equals("occupation") && strippedEntity.equals("descriptionlist1"))
-                        || (strippedTbl.equals("relationship") && strippedEntity.equals("descriptionlist2"))
-                        || (strippedTbl.contains("sanction") && (strippedEntity.equals("descriptionlist3") || strippedEntity.equals("descriptionlist4")));
+                        || isChildOfMaster;
 
                 if (!tableRelevant) {
                     tableRelevant = tblMappings.stream().anyMatch(m -> {
@@ -1026,7 +1023,20 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
     }
 
     private Object resolveXmlValue(Map<String, Object> xmlRecord, String xmlField, String targetCol) {
-        if (xmlField == null || xmlRecord == null) return null;
+        if (xmlRecord == null) return null;
+
+        // 0. Direct match against targetCol in the source record (e.g. from gs_<entity> table or cached record map)
+        if (targetCol != null && !targetCol.trim().isEmpty()) {
+            Object directVal = xmlRecord.get(targetCol);
+            if (directVal != null) return directVal;
+            for (Map.Entry<String, Object> entry : xmlRecord.entrySet()) {
+                if (entry.getKey().equalsIgnoreCase(targetCol) && entry.getValue() != null) {
+                    return entry.getValue();
+                }
+            }
+        }
+
+        if (xmlField == null) return null;
 
         // 1. Direct key match (exact case)
         Object val = xmlRecord.get(xmlField);
@@ -1120,11 +1130,19 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 if (normEnt.equalsIgnoreCase(immediateParent) || singEnt.equalsIgnoreCase(immediateParent)
                         || plurEnt.equalsIgnoreCase(immediateParent) || baseEnt.equalsIgnoreCase(immediateParent)
                         || DynamicXmlUnmarshaller.singularize(baseEnt).equalsIgnoreCase(immediateParent)
-                        || (normEnt.contains("country") && normParent.contains("country"))
-                        || (normEnt.contains("reference") && normParent.contains("reference"))
-                        || (normEnt.contains("occupation") && normParent.contains("occupation"))
-                        || (normEnt.contains("relation") && normParent.contains("relation"))
-                        || (normEnt.contains("person") && normParent.contains("person"))) {
+                        || (normEnt.contains("country") && (normParent.contains("country") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("country"))))
+                        || (normEnt.contains("reference") && (normParent.contains("reference") || normParent.contains("sanction") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("reference") || s.toLowerCase().contains("sanction"))))
+                        || (normEnt.contains("occupation") && (normParent.contains("occupation") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("occupation"))))
+                        || (normEnt.contains("relation") && (normParent.contains("relation") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("relation"))))
+                        || (normEnt.startsWith("person") && (normParent.contains("person") || normParent.contains("record")
+                                || (normEnt.contains("name") && (normParent.contains("name") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("name")) || rawLeaf.equalsIgnoreCase("firstname") || rawLeaf.equalsIgnoreCase("surname")))
+                                || (normEnt.contains("date") && (normParent.contains("date") || normParent.contains("day") || normParent.contains("month") || normParent.contains("year") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("date")) || rawLeaf.equalsIgnoreCase("day") || rawLeaf.equalsIgnoreCase("month") || rawLeaf.equalsIgnoreCase("year")))
+                                || (normEnt.contains("role") && (normParent.contains("role") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("role")) || rawLeaf.equalsIgnoreCase("roletype")))
+                                || (normEnt.contains("ident") && (normParent.contains("id") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("id")) || rawLeaf.equalsIgnoreCase("idvalue") || rawLeaf.equalsIgnoreCase("idtype")))
+                                || (normEnt.contains("source") && (normParent.contains("source") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("source")) || rawLeaf.equalsIgnoreCase("name") || rawLeaf.equalsIgnoreCase("sourceurl")))
+                                || (normEnt.contains("image") && (normParent.contains("image") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("image")) || rawLeaf.equalsIgnoreCase("url") || rawLeaf.equalsIgnoreCase("imageurl")))
+                                || (normEnt.contains("country") && (normParent.contains("country") || Arrays.stream(segments).anyMatch(s -> s.toLowerCase().contains("country")) || rawLeaf.equalsIgnoreCase("countrycode") || rawLeaf.equalsIgnoreCase("countrytype")))
+                                || (rawLeaf.equalsIgnoreCase("id") || rawLeaf.equalsIgnoreCase("person_id") || (targetCol != null && targetCol.equalsIgnoreCase("person_id")))))) {
                     tagMatches = true;
                 }
             }
@@ -1149,10 +1167,10 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
                 }
             }
 
-            // If target column is primary key (code or id), check top-level record attributes
-            if (targetCol != null && (targetCol.equalsIgnoreCase("code") || targetCol.equalsIgnoreCase("id"))) {
-                for (String k : List.of("id", "@id", "code", "@code", "record_identifier")) {
-                    if (xmlRecord.containsKey(k)) return xmlRecord.get(k);
+            // If target column is primary key (code, id, person_id), check top-level record attributes
+            if (targetCol != null && (targetCol.equalsIgnoreCase("code") || targetCol.equalsIgnoreCase("id") || targetCol.equalsIgnoreCase("person_id"))) {
+                for (String k : List.of("person_id", "record_identifier", "code", "@code", "id", "@id")) {
+                    if (xmlRecord.containsKey(k) && xmlRecord.get(k) != null) return xmlRecord.get(k);
                 }
             }
 

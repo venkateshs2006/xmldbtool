@@ -138,7 +138,7 @@ public class UserScenarioReproTest {
             assertTrue(count >= 20, "GS table " + gsTbl + " must contain at least 20 records (actual: " + count + ")");
         }
 
-        // Verify Requirement 15: No unwanted _flat or _gs tables
+        // Verify Requirement 15: No unwanted _flat or _gs tables, and no random wrapper tables
         List<Map<String, Object>> allTables = jt.queryForList(
                 "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'PUBLIC'"
         );
@@ -146,6 +146,9 @@ public class UserScenarioReproTest {
             String name = (String) t.get("TABLE_NAME");
             assertFalse(name.endsWith("_FLAT"), "Unwanted table ending with _flat found: " + name);
             assertFalse(name.endsWith("_GS"), "Unwanted table ending with _gs found: " + name);
+            assertFalse(name.equalsIgnoreCase("GS_COUNTRYLIST"), "Must NOT create random table gs_countrylist: " + name);
+            assertFalse(name.equalsIgnoreCase("COUNTRYLISTS"), "Must NOT create random table countrylists: " + name);
+            assertFalse(name.equalsIgnoreCase("DESCRIPTIONLISTS1"), "Must NOT create random table descriptionlists1: " + name);
         }
 
         // Verify file_history table has complete metadata
@@ -169,5 +172,25 @@ public class UserScenarioReproTest {
         assertTrue(events.contains("JOB_STARTED"), "Audit log should contain JOB_STARTED");
         assertTrue(events.contains("STAGING_COMPLETED"), "Audit log should contain STAGING_COMPLETED");
         assertTrue(events.contains("NORMALIZATION_COMPLETED"), "Audit log should contain NORMALIZATION_COMPLETED");
+
+        // --- Test moveGsDataToCanonical directly ---
+        // 1. Clear canonical tables while keeping gs_ historical data intact
+        for (String tbl : canonicalTables) {
+            jt.execute("DELETE FROM \"" + tbl + "\"");
+            Integer c = jt.queryForObject("SELECT COUNT(*) FROM \"" + tbl + "\"", Integer.class);
+            assertEquals(0, c, "Canonical table " + tbl + " should be empty after delete");
+        }
+
+        // 2. Invoke moveGsDataToCanonical to project data directly from gs_ tables to canonical tables
+        JobLaunchResponse moveResp = batchJobService.moveGsDataToCanonical(launchReq);
+        assertNotNull(moveResp);
+        assertTrue(moveResp.isSuccess(), "moveGsDataToCanonical should succeed: " + moveResp.getMessage());
+
+        // 3. Verify ALL 12 canonical tables are repopulated from gs_ tables with exactly 20 records each
+        for (String tbl : canonicalTables) {
+            Integer count = jt.queryForObject("SELECT COUNT(*) FROM \"" + tbl + "\"", Integer.class);
+            assertNotNull(count, "Count for canonical table " + tbl + " after moveGsDataToCanonical should not be null");
+            assertEquals(20, count, "Canonical table " + tbl + " must contain exactly 20 records after moveGsDataToCanonical");
+        }
     }
 }

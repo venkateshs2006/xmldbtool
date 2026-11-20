@@ -401,19 +401,18 @@ public class SchemaProvisioningService {
             // 2. For EVERY identified entity in ingestion.json and root tags, create golden source table gs_<entityname>
             Set<String> provisionedFlats = new HashSet<>();
             Set<String> allEntityTargets = new LinkedHashSet<>();
-            if (mappings != null && !mappings.isEmpty()) {
+            boolean hasMappings = mappings != null && !mappings.isEmpty();
+            if (hasMappings) {
                 for (FieldMapping m : mappings) {
                     if (m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()) {
                         allEntityTargets.add(m.getTargetTable().trim().replaceFirst("(?i)^gs_", ""));
                     }
                 }
-            }
-            boolean hasMappings = mappings != null && !mappings.isEmpty();
-            if (effectiveRoots != null) {
+            } else if (effectiveRoots != null) {
                 for (String r : effectiveRoots) {
                     if (r != null && !r.trim().isEmpty()) {
                         String rNorm = r.trim().toLowerCase();
-                        boolean isRecordAllowed = !hasMappings && rNorm.equals("record");
+                        boolean isRecordAllowed = rNorm.equals("record");
                         if (isRecordAllowed || (!WRAPPER_NAMES.contains(rNorm)
                                 && !XmlSchemaDiscoveryService.isWrapperContainerTag(rNorm, docRoot))) {
                             allEntityTargets.add(r.trim());
@@ -438,8 +437,8 @@ public class SchemaProvisioningService {
                     createdTables.addAll(provisionSpecificFlattenedTable(stmt, gsPrefixTable, entity, effectiveElements, mappings, isOracle));
                 }
 
-                // In legacy H2 unit test mode only when strictIngestionJson is false, create compatibility tables
-                if (isH2 && !strictIngestionJson) {
+                // In legacy H2 unit test mode only when strictIngestionJson is false AND no mappings are provided, create compatibility tables
+                if (isH2 && !strictIngestionJson && !hasMappings) {
                     try {
                         String flatTable = safe + "_flat";
                         String gsTable = safe + "_gs";
