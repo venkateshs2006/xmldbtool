@@ -62,19 +62,31 @@ async function handleLogin(username, password) {
         });
         const result = await response.json();
 
-        if (response.ok && result.success) {
-            AppState.authToken = result.token;
-            AppState.currentUser = result.user;
-            sessionStorage.setItem('xmldb_auth_token', result.token);
-            sessionStorage.setItem('xmldb_user', JSON.stringify(result.user));
+        if (response.ok && (result.success || result.token)) {
+            const user = result.user || {
+                id: result.id || '1',
+                username: result.username || username,
+                fullName: result.fullName || result.username || username,
+                email: result.email || '',
+                role: result.role || 'ADMIN',
+                enabled: true
+            };
+            const token = result.token || ('dummy-jwt-token-' + (user.username || 'user'));
 
-            showToast(`Welcome back, ${result.user.fullName || result.user.username}!`, 'success', 'Login Successful');
+            AppState.authToken = token;
+            AppState.currentUser = user;
+            sessionStorage.setItem('xmldb_auth_token', token);
+            sessionStorage.setItem('xmldb_user', JSON.stringify(user));
 
-            if (result.user.role === 'APPROVER') {
-                window.location.href = 'joblist.html';
-            } else {
-                window.location.href = 'schedule.html';
-            }
+            showToast(`Welcome back, ${user.fullName || user.username}!`, 'success', 'Login Successful');
+
+            setTimeout(() => {
+                if (user.role === 'APPROVER') {
+                    window.location.href = 'joblist.html';
+                } else {
+                    window.location.href = 'schedule.html';
+                }
+            }, 100);
         } else {
             errText.textContent = result.message || 'Invalid username or password.';
             errAlert.classList.remove('hidden');

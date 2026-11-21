@@ -10,7 +10,7 @@ spring:
     virtual:
       enabled: true
 
-  # Primary Datasource for Spring Batch metadata (PostgreSQL)
+  # Primary Datasource connected to local PostgreSQL database: v5_batch_db
   datasource:
     url: jdbc:postgresql://localhost:5432/v5_batch_db
     username: postgres
@@ -19,21 +19,14 @@ spring:
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
-    # Batch Metadata Database Configuration (Primary)
-    batchdb:
-      url: jdbc:postgresql://localhost:5432/v5_batch_db
-      username: postgres
-      password: postgres
-      driver-class-name: org.postgresql.Driver
-      hikari:
-        maximum-pool-size: 20
-        minimum-idle: 5
+      connection-timeout: 10000
+      idle-timeout: 300000
+      max-lifetime: 600000
 
-  # Spring Batch Configuration
+  # Spring Batch Configuration with v5_batch_db
   batch:
     jdbc:
-      initialize-schema: always
-      schema: classpath:batch-schema.sql
+      initialize-schema: never
       table-prefix: BATCH_
     job:
       enabled: false  
@@ -53,5 +46,5 @@ management:
 logging:
   level:
     root: INFO
-    com.enterprise.xmldbtool: DEBUG
+    com.bnpp: DEBUG
     org.springframework.batch: INFO

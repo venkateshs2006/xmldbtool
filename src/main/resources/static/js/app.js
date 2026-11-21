@@ -295,13 +295,23 @@ async function handleLogin(username, password) {
         });
         const result = await response.json();
 
-        if (response.ok && result.success) {
-            AppState.authToken = result.token;
-            AppState.currentUser = result.user;
-            sessionStorage.setItem('xmldb_auth_token', result.token);
-            sessionStorage.setItem('xmldb_user', JSON.stringify(result.user));
+        if (response.ok && (result.success || result.token)) {
+            const user = result.user || {
+                id: result.id || '1',
+                username: result.username || username,
+                fullName: result.fullName || result.username || username,
+                email: result.email || '',
+                role: result.role || 'ADMIN',
+                enabled: true
+            };
+            const token = result.token || ('dummy-jwt-token-' + (user.username || 'user'));
 
-            showToast(`Welcome back, ${result.user.fullName || result.user.username}!`, 'success', 'Login Successful');
+            AppState.authToken = token;
+            AppState.currentUser = user;
+            sessionStorage.setItem('xmldb_auth_token', token);
+            sessionStorage.setItem('xmldb_user', JSON.stringify(user));
+
+            showToast(`Welcome back, ${user.fullName || user.username}!`, 'success', 'Login Successful');
             renderAuthenticatedApp();
         } else {
             errText.textContent = result.message || 'Invalid username or password.';
@@ -3172,7 +3182,8 @@ async function loadSavedJobs() {
                 : `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-100 text-slate-600 border border-slate-200" title="Single-Pass Direct Streaming"><i class="fas fa-bolt text-[8px]"></i> DIRECT</span>`;
 
             // Action buttons based on user role and approval state
-            const canRun = approval === 'APPROVED' && role !== 'APPROVER';
+            const isRunning = (job.lastRunStatus || '').toUpperCase() === 'RUNNING';
+            const canRun = approval === 'APPROVED' && role !== 'APPROVER' && !isRunning;
             const canDelete = role === 'ADMIN' || role === 'PLANNER';
 
             let actionButtonsHtml = `
@@ -3186,6 +3197,12 @@ async function loadSavedJobs() {
                     <button type="button" class="btn-run-job btn text-xs py-1 px-2.5 bg-emerald-50 text-bnp-emerald border border-emerald-300 hover:bg-emerald-100 mr-1.5 font-bold" data-id="${job.id}">
                         <i class="fas fa-play mr-1"></i> Run Job
                     </button>
+                `;
+            } else if (isRunning && role !== 'APPROVER') {
+                actionButtonsHtml += `
+                    <span class="inline-flex items-center text-[10px] text-amber-700 font-mono mr-1.5 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded cursor-wait">
+                        <i class="fas fa-spinner fa-spin mr-1"></i> Running...
+                    </span>
                 `;
             } else if (approval === 'REJECTED' && role !== 'APPROVER') {
                 actionButtonsHtml += `
@@ -3320,9 +3337,10 @@ function openReviewModal(job) {
     if (btnApprove) btnApprove.classList.toggle('hidden', !canApproveOrReject);
     if (btnReject) btnReject.classList.toggle('hidden', !canApproveOrReject);
 
-    // Planner & Admin can run ONLY IF APPROVED
+    // Planner & Admin can run ONLY IF APPROVED and not currently running
     // Approver can NEVER run
-    const canRunModal = role !== 'APPROVER' && approval === 'APPROVED';
+    const isJobRunning = (job.lastRunStatus || '').toUpperCase() === 'RUNNING';
+    const canRunModal = role !== 'APPROVER' && approval === 'APPROVED' && !isJobRunning;
     if (btnRun) btnRun.classList.toggle('hidden', !canRunModal);
 
     const statusBadge = document.getElementById('review-modal-status-badge');
@@ -3738,25 +3756,33 @@ async function loadSystemMetrics() {
 
         // 1. CPU & OS
         const cpuCoresEl = document.getElementById('metric-cpu-cores');
-        if (cpuCoresEl) cpuCoresEl.textContent = m.availableProcessors || '--';
+        if (cpuCoresEl) cpuCoresEl.textContent = m.availableProcessors || m.cpuCores || '--';
+        const cpuPct = m.systemCpuLoadPercent ?? m.cpuUsage ?? 0;
         const sysCpuEl = document.getElementById('metric-system-cpu');
-        if (sysCpuEl) sysCpuEl.textContent = `${m.systemCpuLoadPercent || 0}%`;
+        if (sysCpuEl) sysCpuEl.textContent = `${cpuPct}%`;
         const cpuBar = document.getElementById('metric-cpu-bar');
-        if (cpuBar) cpuBar.style.width = `${Math.min(100, m.systemCpuLoadPercent || 0)}%`;
+        if (cpuBar) cpuBar.style.width = `${Math.min(100, cpuPct)}%`;
         const osInfoEl = document.getElementById('metric-os-info');
-        if (osInfoEl) osInfoEl.textContent = `${m.osName || 'Linux'} ${m.osArch || 'x64'}`;
+        if (osInfoEl) osInfoEl.textContent = `OS: ${m.osName || 'Linux'} ${m.osArch || 'x64'}`;
 
         // 2. JVM Heap Memory
+        const heapUsedFormatted = m.heapUsedFormatted || (m.usedMemoryMb ? `${m.usedMemoryMb} MB` : '--');
         const heapUsedEl = document.getElementById('metric-heap-used');
-        if (heapUsedEl) heapUsedEl.textContent = m.heapUsedFormatted || '--';
+        if (heapUsedEl) heapUsedEl.textContent = heapUsedFormatted;
+
+        const heapPercent = m.heapUsagePercent ?? m.memoryUsage ?? 0;
         const heapPercentEl = document.getElementById('metric-heap-percent');
-        if (heapPercentEl) heapPercentEl.textContent = `${m.heapUsagePercent || 0}%`;
+        if (heapPercentEl) heapPercentEl.textContent = `${heapPercent}%`;
+
+        const heapMaxFormatted = m.heapMaxFormatted || (m.totalMemoryMb ? `${m.totalMemoryMb} MB` : '--');
         const heapMaxEl = document.getElementById('metric-heap-max');
-        if (heapMaxEl) heapMaxEl.textContent = m.heapMaxFormatted || '--';
+        if (heapMaxEl) heapMaxEl.textContent = heapMaxFormatted;
+
         const heapBar = document.getElementById('metric-heap-bar');
-        if (heapBar) heapBar.style.width = `${Math.min(100, m.heapUsagePercent || 0)}%`;
+        if (heapBar) heapBar.style.width = `${Math.min(100, heapPercent)}%`;
+
         const gcInfoEl = document.getElementById('metric-gc-info');
-        if (gcInfoEl) gcInfoEl.textContent = `GC: ${m.gcCount || 0} (${m.gcTimeMs || 0}ms)`;
+        if (gcInfoEl) gcInfoEl.textContent = `GC: ${m.gcCount ?? 0} (${m.gcTimeMs ?? 0}ms)`;
 
         // 3. JVM Uptime & Java Version
         const jvmUptimeEl = document.getElementById('metric-jvm-uptime');
@@ -3764,9 +3790,14 @@ async function loadSystemMetrics() {
         const javaVerEl = document.getElementById('metric-java-ver');
         if (javaVerEl) javaVerEl.textContent = m.javaVersion ? m.javaVersion.split(' ')[0] : 'Java 21';
         const sysLoadEl = document.getElementById('metric-system-load');
-        if (sysLoadEl) sysLoadEl.textContent = `Load Avg: ${m.systemLoadAverage || 0}`;
+        if (sysLoadEl) sysLoadEl.textContent = `Load: ${m.systemLoadAverage ?? 0}`;
         const procCpuEl = document.getElementById('metric-process-cpu');
-        if (procCpuEl) procCpuEl.textContent = `Process CPU: ${m.processCpuLoadPercent || 0}%`;
+        if (procCpuEl) procCpuEl.textContent = `Process CPU: ${m.processCpuLoadPercent ?? 0}%`;
+        if (javaVerEl) javaVerEl.textContent = m.javaVersion ? m.javaVersion.split(' ')[0] : 'Java 21';
+        const sysLoadEl = document.getElementById('metric-system-load');
+        if (sysLoadEl) sysLoadEl.textContent = `Load Avg: ${m.systemLoadAverage ?? 0}`;
+        const procCpuEl = document.getElementById('metric-process-cpu');
+        if (procCpuEl) procCpuEl.textContent = `Process CPU: ${m.processCpuLoadPercent ?? 0}%`;
     } catch (e) {
         console.warn('System metrics polling error:', e);
     }

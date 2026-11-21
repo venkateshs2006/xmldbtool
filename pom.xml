@@ -76,6 +76,12 @@
             <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
 
+        <!-- Spring Security Crypto for BCrypt Password Hashing -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+
         <!-- HikariCP for Dynamic Target DataSource Connection Pool -->
         <dependency>
             <groupId>com.zaxxer</groupId>

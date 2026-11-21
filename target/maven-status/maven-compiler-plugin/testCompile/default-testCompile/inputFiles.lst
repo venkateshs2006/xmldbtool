@@ -1,5 +1,5 @@
-/home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/DynamicXmlIngestionTest.java
-/home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/RoleGovernanceAndApprovalTest.java
-/home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/SchemaHistoryAndLoggingIntegrationTest.java
-/home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/StaxPathReaderTest.java
-/home/sv/Projects/xmldbtool/src/test/java/com/enterprise/xmldbtool/UserScenarioReproTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/bnpp/AuditGovernanceTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/bnpp/DynamicIngestionIntegrationTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/bnpp/RoleGovernanceAndApprovalTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/bnpp/SpringBatchStaxIngestionPipelineTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/bnpp/UserJobPersistenceAndExecutionIntegrationTest.java

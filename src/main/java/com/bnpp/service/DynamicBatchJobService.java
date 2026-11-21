@@ -1,0 +1,180 @@
+package com.bnpp.service;
+
+import com.bnpp.batch.DatabaseErrorSkipListener;
+import com.bnpp.batch.DynamicJdbcBatchWriter;
+import com.bnpp.batch.DynamicXmlItemProcessor;
+import com.bnpp.batch.DynamicXmlUnmarshaller;
+import com.bnpp.batch.StaxXmlItemReader;
+import com.bnpp.model.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.batch.core.*;
+import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.JobLauncher;
+import org.springframework.batch.core.repository.JobRepository;
+import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Enterprise Spring Batch 5 Job Service orchestrating the complete StAX streaming ingestion pipeline:
+ * StaxXmlItemReader -> DynamicXmlItemProcessor -> DynamicJdbcBatchWriter.
+ */
+@Service
+public class DynamicBatchJobService {
+
+    private static final Logger log = LoggerFactory.getLogger(DynamicBatchJobService.class);
+
+    private final JobRepository jobRepository;
+    private final JobLauncher jobLauncher;
+    private final PlatformTransactionManager transactionManager;
+    private final DynamicXmlUnmarshaller dynamicXmlUnmarshaller;
+    private final DynamicDataSourceService dataSourceService;
+    private final AuditGovernanceService auditGovernanceService;
+    private final SchemaProvisioningService schemaProvisioningService;
+
+    private final Map<String, DynamicJdbcBatchWriter> activeWriters = new ConcurrentHashMap<>();
+    private final Map<String, DatabaseErrorSkipListener> activeListeners = new ConcurrentHashMap<>();
+
+    public DynamicBatchJobService(JobRepository jobRepository,
+                                 JobLauncher jobLauncher,
+                                 PlatformTransactionManager transactionManager,
+                                 DynamicXmlUnmarshaller dynamicXmlUnmarshaller,
+                                 DynamicDataSourceService dataSourceService,
+                                 AuditGovernanceService auditGovernanceService,
+                                 SchemaProvisioningService schemaProvisioningService) {
+        this.jobRepository = jobRepository;
+        this.jobLauncher = jobLauncher;
+        this.transactionManager = transactionManager;
+        this.dynamicXmlUnmarshaller = dynamicXmlUnmarshaller;
+        this.dataSourceService = dataSourceService;
+        this.auditGovernanceService = auditGovernanceService;
+        this.schemaProvisioningService = schemaProvisioningService;
+    }
+
+    public JobExecution launchSpringBatchIngestion(JobLaunchRequest request,
+                                                  FileHistoryRecord fileRecord,
+                                                  List<FieldMapping> mappings,
+                                                  String jobExecutionId) throws Exception {
+
+        File xmlFile = resolvePhysicalFile(request.getXmlFilePath());
+        DataSource targetDs = dataSourceService.getOrCreateDataSource(request.getDbConfig());
+
+        int chunkSize = request.getChunkSize() != null && request.getChunkSize() > 0 ? request.getChunkSize() : 500;
+
+        // 1. Reader
+        List<String> rootElements = request.getRecordRootElements();
+        if (rootElements == null || rootElements.isEmpty()) {
+            rootElements = new ArrayList<>();
+            if (request.getRecordRootElement() != null && !request.getRecordRootElement().trim().isEmpty()) {
+                rootElements.add(request.getRecordRootElement().trim());
+            }
+        }
+        if (rootElements.isEmpty()) {
+            for (FieldMapping m : mappings) {
+                if (m.getTargetTable() != null && !rootElements.contains(m.getTargetTable())) {
+                    rootElements.add(m.getTargetTable());
+                }
+                if (m.getXmlField() != null) {
+                    String cleanPath = m.getXmlField().replaceAll("^/+", "");
+                    String[] parts = cleanPath.split("/");
+                    for (String part : parts) {
+                        if (!part.startsWith("@") && !part.isEmpty() && !rootElements.contains(part)) {
+                            rootElements.add(part);
+                        }
+                    }
+                }
+            }
+        }
+        StaxXmlItemReader reader = new StaxXmlItemReader(new FileSystemResource(xmlFile), rootElements, dynamicXmlUnmarshaller);
+
+        // 2. Processor
+        DynamicXmlItemProcessor processor = new DynamicXmlItemProcessor(
+                mappings,
+                fileRecord.getFileId(),
+                fileRecord.getFileVersionNumber(),
+                fileRecord.getVendorId(),
+                jobExecutionId,
+                request.getTargetTable()
+        );
+
+        // 3. Skip Listener
+        DatabaseErrorSkipListener skipListener = new DatabaseErrorSkipListener(
+                jobExecutionId, "springBatchStep", auditGovernanceService, request.getDbConfig()
+        );
+        activeListeners.put(jobExecutionId, skipListener);
+
+        // 4. Writer
+        List<String> tableOrder = request.getTableOrder();
+        DynamicJdbcBatchWriter writer = new DynamicJdbcBatchWriter(targetDs, tableOrder, skipListener, mappings);
+        activeWriters.put(jobExecutionId, writer);
+
+        // Build Spring Batch Step
+        Step step = new StepBuilder("staxXmlIngestionStep-" + System.currentTimeMillis(), jobRepository)
+                .<Map<String, Object>, DatabaseRowPayload>chunk(chunkSize, transactionManager)
+                .reader(reader)
+                .processor(processor)
+                .writer(writer)
+                .faultTolerant()
+                .skip(Exception.class)
+                .skipLimit(500)
+                .listener(skipListener)
+                .build();
+
+        // Build Spring Batch Job
+        Job job = new JobBuilder("dynamicBatchJob-" + System.currentTimeMillis(), jobRepository)
+                .start(step)
+                .build();
+
+        JobParameters params = new JobParametersBuilder()
+                .addString("jobExecutionId", jobExecutionId)
+                .addString("fileId", fileRecord.getFileId())
+                .addLong("timestamp", System.currentTimeMillis())
+                .toJobParameters();
+
+        log.info("Launching Spring Batch Job for execution {} on file {}", jobExecutionId, xmlFile.getName());
+        JobExecution execution = jobLauncher.run(job, params);
+        log.info("Spring Batch Job execution finished with status: {}", execution.getStatus());
+
+        return execution;
+    }
+
+    public DynamicJdbcBatchWriter getActiveWriter(String jobExecutionId) {
+        return activeWriters.get(jobExecutionId);
+    }
+
+    public DatabaseErrorSkipListener getActiveSkipListener(String jobExecutionId) {
+        return activeListeners.get(jobExecutionId);
+    }
+
+    private File resolvePhysicalFile(String rawPath) {
+        if (rawPath == null || rawPath.trim().isEmpty()) {
+            throw new IllegalArgumentException("File path cannot be blank.");
+        }
+        String clean = rawPath.trim().replaceAll("^\"|\"$", "").replaceAll("^'|'$", "");
+
+        File f = new File(clean);
+        if (f.exists() && f.isFile()) return f;
+
+        File inUploads = new File("uploads", clean);
+        if (inUploads.exists() && inUploads.isFile()) return inUploads;
+
+        File inSample = new File("sample-data", clean);
+        if (inSample.exists() && inSample.isFile()) return inSample;
+
+        Path ws = Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
+        Path p = ws.resolve(clean);
+        if (Files.exists(p) && Files.isRegularFile(p)) return p.toFile();
+
+        throw new IllegalArgumentException("Could not locate XML file at disk path: " + rawPath);
+    }
+}

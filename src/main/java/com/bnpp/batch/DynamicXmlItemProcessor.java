@@ -1,0 +1,461 @@
+package com.bnpp.batch;
+
+import com.bnpp.model.DatabaseRowPayload;
+import com.bnpp.model.FieldMapping;
+import com.bnpp.util.BnppIdGenerator;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.batch.item.ItemProcessor;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+/**
+ * Dynamic Spring Batch ItemProcessor supporting One-to-Many and hierarchical XML-to-Database table mappings.
+ * Generates payloads for:
+ * 1. Layer 2 Universal Staging (staging_xml_records) with full raw XML JSON payload.
+ * 2. Layer 3 Golden Source Historical Tables (gs_<entity>).
+ * 3. Layer 4 Canonical Tables (<entity>).
+ */
+public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object>, DatabaseRowPayload> {
+
+    private static final Logger log = LoggerFactory.getLogger(DynamicXmlItemProcessor.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final List<FieldMapping> mappings;
+    private final String fileId;
+    private final int fileVersion;
+    private final String vendorId;
+    private final String jobExecutionId;
+    private final String defaultTargetTable;
+
+    public DynamicXmlItemProcessor(List<FieldMapping> mappings,
+                                   String fileId,
+                                   int fileVersion,
+                                   String vendorId,
+                                   String jobExecutionId,
+                                   String defaultTargetTable) {
+        this.mappings = mappings != null ? mappings : Collections.emptyList();
+        this.fileId = fileId != null ? fileId : "FILE-UNKNOWN";
+        this.fileVersion = Math.max(1, fileVersion);
+        this.vendorId = vendorId != null ? vendorId : "VND-UNKNOWN";
+        this.jobExecutionId = jobExecutionId != null ? jobExecutionId : "EXEC-UNKNOWN";
+        this.defaultTargetTable = defaultTargetTable;
+    }
+
+    @Override
+    public DatabaseRowPayload process(Map<String, Object> xmlRecord) throws Exception {
+        if (xmlRecord == null || xmlRecord.isEmpty() || mappings == null || mappings.isEmpty()) {
+            return null;
+        }
+
+        DatabaseRowPayload payload = new DatabaseRowPayload();
+        payload.setOriginalXmlMap(xmlRecord);
+
+        // Group field mappings by target table
+        Map<String, List<FieldMapping>> tableMap = new LinkedHashMap<>();
+        for (FieldMapping m : mappings) {
+            String tbl = m.getTargetTable() != null && !m.getTargetTable().trim().isEmpty()
+                    ? m.getTargetTable().trim() : defaultTargetTable;
+            if (tbl != null && !tbl.trim().isEmpty()) {
+                tableMap.computeIfAbsent(tbl, k -> new ArrayList<>()).add(m);
+            }
+        }
+
+        String rawXmlJson = MAPPER.writeValueAsString(xmlRecord);
+        String rootTag = (String) xmlRecord.getOrDefault("_rootTag", "record");
+        String nowStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+
+        for (Map.Entry<String, List<FieldMapping>> entry : tableMap.entrySet()) {
+            String targetTable = entry.getKey();
+            String entityName = targetTable.toLowerCase();
+            List<FieldMapping> tableMappings = entry.getValue();
+
+            // Extract rows for this table (handling 1..N collection items if nested)
+            List<Map<String, Object>> extractedRows = extractTableRows(targetTable, tableMappings, xmlRecord);
+
+            for (Map<String, Object> businessRow : extractedRows) {
+                if (businessRow.isEmpty()) continue;
+
+                // Identify PK
+                String pkVal = "";
+                String pkCol = null;
+                for (FieldMapping m : tableMappings) {
+                    if ("PK".equalsIgnoreCase(m.getConstraintType())) {
+                        pkCol = m.getTargetColumn().toLowerCase();
+                        Object val = businessRow.get(pkCol);
+                        if (val != null) pkVal = String.valueOf(val);
+                        break;
+                    }
+                }
+
+                String stagingBnppId = BnppIdGenerator.generateBnppId();
+                String gsBnppId = BnppIdGenerator.generateBnppId();
+
+                if (pkCol == null) {
+                    // No explicit PK constraint defined in mappings:
+                    // SchemaProvisioningService provisions canonical table with "id" as PK
+                    pkCol = "id";
+                    if (businessRow.get("id") != null) {
+                        pkVal = String.valueOf(businessRow.get("id"));
+                    } else {
+                        pkVal = gsBnppId;
+                    }
+                } else if (pkVal.isEmpty()) {
+                    pkVal = gsBnppId;
+                }
+
+                String payloadHash = computeSha256(rawXmlJson);
+
+                // 1. Layer 2: Universal Staging Row
+                Map<String, Object> stgRow = new LinkedHashMap<>();
+                stgRow.put("job_execution_id", jobExecutionId);
+                stgRow.put("file_id", fileId);
+                stgRow.put("bnpp_id", stagingBnppId);
+                stgRow.put("tag_name", rootTag);
+                stgRow.put("version_number", fileVersion);
+                stgRow.put("entity_type", targetTable);
+                stgRow.put("record_identifier", pkVal);
+                stgRow.put("record_action", "INSERT");
+                stgRow.put("record_date", nowStr);
+                stgRow.put("xml_file_version", fileVersion);
+                stgRow.put("raw_payload", rawXmlJson);
+                stgRow.put("payload_hash", payloadHash);
+                stgRow.put("status", "STAGED");
+                payload.addStagingRecord(stgRow);
+
+                // 2. Layer 3: Golden Source Historical Row
+                Map<String, Object> gsRow = new LinkedHashMap<>(businessRow);
+                gsRow.put("bnpp_id", gsBnppId);
+                gsRow.put("file_id", fileId);
+                gsRow.put("file_version", fileVersion);
+                gsRow.put("vendor_id", vendorId);
+                gsRow.put("job_execution_id", jobExecutionId);
+                gsRow.put("staging_bnpp_id", stagingBnppId);
+                gsRow.put("raw_payload", rawXmlJson);
+                gsRow.put("tag_name", rootTag);
+                gsRow.put("tag_type", "element");
+                payload.addGoldenSourceRecord("gs_" + entityName, gsRow);
+
+                // 3. Layer 4: Canonical Row
+                Map<String, Object> canRow = new LinkedHashMap<>(businessRow);
+                canRow.put(pkCol, canRow.getOrDefault(pkCol, pkVal));
+                canRow.put("starting_bnpp_id", gsBnppId);
+                canRow.put("current_bnpp_id", gsBnppId);
+                canRow.put("file_id", fileId);
+                canRow.put("file_version_number", fileVersion);
+                canRow.put("vendor_id", vendorId);
+                canRow.put("historical_bnpp_ids", "[\"" + gsBnppId + "\"]");
+                payload.addCanonicalRecord(entityName, canRow);
+                payload.addTableRecord(targetTable, canRow);
+            }
+        }
+
+        return payload;
+    }
+
+    private List<Map<String, Object>> extractTableRows(String targetTable, List<FieldMapping> mappings, Map<String, Object> xmlRecord) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+
+        // Detect if there is a nested repeating collection for this table
+        // e.g. "addresses/address" or "Employees/Employee"
+        List<Map<String, Object>> childContexts = findChildContexts(targetTable, mappings, xmlRecord);
+
+        if (!childContexts.isEmpty()) {
+            for (Map<String, Object> childCtx : childContexts) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (FieldMapping m : mappings) {
+                    Object val = resolveValue(m.getXmlField(), childCtx, xmlRecord, targetTable);
+                    if (val != null) {
+                        row.put(m.getTargetColumn().toLowerCase(), applyTransform(val, m.getTransform()));
+                    }
+                }
+                if (!row.isEmpty()) {
+                    rows.add(row);
+                }
+            }
+        } else {
+            // Only extract a row if xmlRecord actually corresponds to targetTable
+            Set<String> candidateTags = getCandidateTags(targetTable, mappings);
+            String rootTag = (String) xmlRecord.getOrDefault("_rootTag", "");
+            boolean matches = candidateTags.contains(rootTag.toLowerCase())
+                    || candidateTags.contains(rootTag.toLowerCase().replaceAll("[_\\-]", ""))
+                    || rootTag.equalsIgnoreCase(targetTable)
+                    || rootTag.equalsIgnoreCase("record")
+                    || rootTag.equalsIgnoreCase("row")
+                    || rootTag.isEmpty();
+
+            if (matches) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (FieldMapping m : mappings) {
+                    Object val = resolveValue(m.getXmlField(), xmlRecord, null, targetTable);
+                    if (val != null) {
+                        row.put(m.getTargetColumn().toLowerCase(), applyTransform(val, m.getTransform()));
+                    }
+                }
+                if (!row.isEmpty()) {
+                    rows.add(row);
+                }
+            }
+        }
+
+        return rows;
+    }
+
+    private Set<String> getCandidateTags(String targetTable, List<FieldMapping> mappings) {
+        Set<String> candidateTags = new LinkedHashSet<>();
+        candidateTags.add(targetTable.toLowerCase());
+        candidateTags.add(targetTable.toLowerCase().replaceAll("[_\\-]", ""));
+        for (FieldMapping m : mappings) {
+            if (targetTable.equalsIgnoreCase(m.getTargetTable()) && m.getXmlField() != null) {
+                String clean = m.getXmlField().replaceAll("^/+", "");
+                String[] parts = clean.split("/");
+                for (int i = parts.length - 1; i >= 0; i--) {
+                    String part = parts[i];
+                    if (!part.startsWith("@") && !part.isEmpty()) {
+                        candidateTags.add(part.toLowerCase());
+                        candidateTags.add(part.toLowerCase().replaceAll("[_\\-]", ""));
+                        break;
+                    }
+                }
+            }
+        }
+        return candidateTags;
+    }
+
+    private List<Map<String, Object>> findChildContexts(String targetTable, List<FieldMapping> mappings, Map<String, Object> xmlRecord) {
+        String entityName = targetTable.toLowerCase();
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        // If xmlRecord is itself this entity
+        String rootTag = (String) xmlRecord.getOrDefault("_rootTag", "");
+        if (rootTag.equalsIgnoreCase(entityName) || rootTag.equalsIgnoreCase(targetTable)) {
+            return Collections.emptyList();
+        }
+
+        Set<String> candidateTags = getCandidateTags(targetTable, mappings);
+        searchChildContexts(xmlRecord, candidateTags, result, null);
+        return result;
+    }
+
+    private void searchChildContexts(Object current, Set<String> candidateTags, List<Map<String, Object>> result, Map<String, Object> parentAttrs) {
+        if (current instanceof Map<?, ?> map) {
+            Map<String, Object> currentAttrs = new HashMap<>();
+            if (parentAttrs != null) {
+                currentAttrs.putAll(parentAttrs);
+            }
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String k = String.valueOf(entry.getKey());
+                Object v = entry.getValue();
+                if (v instanceof String || v instanceof Number) {
+                    currentAttrs.put(k, v);
+                }
+            }
+
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String key = String.valueOf(entry.getKey()).toLowerCase();
+                Object val = entry.getValue();
+
+                if (candidateTags.contains(key) || candidateTags.contains(key.replaceAll("[_\\-]", ""))) {
+                    if (val instanceof Map<?, ?> itemMap) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> m = new LinkedHashMap<>((Map<String, Object>) itemMap);
+                        for (Map.Entry<String, Object> pa : currentAttrs.entrySet()) {
+                            m.putIfAbsent("_parent_" + pa.getKey(), pa.getValue());
+                        }
+                        if (!result.contains(m)) result.add(m);
+                    } else if (val instanceof List<?> list) {
+                        for (Object item : list) {
+                            if (item instanceof Map<?, ?> itemMap) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> m = new LinkedHashMap<>((Map<String, Object>) itemMap);
+                                for (Map.Entry<String, Object> pa : currentAttrs.entrySet()) {
+                                    m.putIfAbsent("_parent_" + pa.getKey(), pa.getValue());
+                                }
+                                if (!result.contains(m)) result.add(m);
+                            }
+                        }
+                    }
+                } else {
+                    searchChildContexts(val, candidateTags, result, currentAttrs);
+                }
+            }
+        } else if (current instanceof List<?> list) {
+            for (Object item : list) {
+                searchChildContexts(item, candidateTags, result, parentAttrs);
+            }
+        }
+    }
+
+    private Object resolveValue(String xmlPath, Map<String, Object> context, Map<String, Object> rootContext, String targetTable) {
+        if (xmlPath == null || xmlPath.isEmpty()) return null;
+
+        String cleanPath = xmlPath.replaceAll("^/+", "");
+        String[] parts = cleanPath.split("/");
+        String lastSegment = parts[parts.length - 1];
+
+        // 1. Direct path lookup in context
+        Object val = navigatePath(context, cleanPath);
+        if (val != null) return unwrap(val);
+
+        // 1b. Check relative suffix paths in context
+        for (int i = 0; i < parts.length - 1; i++) {
+            String relativeSub = String.join("/", Arrays.copyOfRange(parts, i + 1, parts.length));
+            val = navigatePath(context, relativeSub);
+            if (val != null) return unwrap(val);
+        }
+
+        // 2. If mapping xmlPath refers to context element itself (e.g. canopyapp/countrylists/countrylist)
+        String contextTag = (String) context.getOrDefault("_rootTag", "");
+        if (lastSegment.equalsIgnoreCase(contextTag) || (targetTable != null && lastSegment.equalsIgnoreCase(targetTable))) {
+            if (context.containsKey("value")) return unwrap(context.get("value"));
+            if (context.containsKey("_text")) return unwrap(context.get("_text"));
+            val = getCaseInsensitive(context, lastSegment);
+            if (val != null) return unwrap(val);
+        }
+
+        // 3. If path points to a parent element attribute/field (e.g. person/@id while mapping for address)
+        boolean isParentRef = false;
+        if (parts.length >= 2) {
+            String parentTag = parts[parts.length - 2];
+            if (!parentTag.equalsIgnoreCase(targetTable) && !parentTag.equalsIgnoreCase(contextTag)) {
+                isParentRef = true;
+            }
+        }
+
+        if (isParentRef) {
+            if (context.containsKey("_parent_" + lastSegment)) {
+                return unwrap(context.get("_parent_" + lastSegment));
+            }
+            if (rootContext != null) {
+                val = navigatePath(rootContext, cleanPath);
+                if (val != null) return unwrap(val);
+                for (int i = 0; i < parts.length - 1; i++) {
+                    String relativeSub = String.join("/", Arrays.copyOfRange(parts, i + 1, parts.length));
+                    val = navigatePath(rootContext, relativeSub);
+                    if (val != null) return unwrap(val);
+                }
+                val = getCaseInsensitive(rootContext, lastSegment);
+                if (val != null) return unwrap(val);
+            }
+        }
+
+        // 4. Lookup last segment in context
+        val = getCaseInsensitive(context, lastSegment);
+        if (val != null) return unwrap(val);
+
+        // 5. Check parent attributes in context
+        if (context.containsKey("_parent_" + lastSegment)) {
+            return unwrap(context.get("_parent_" + lastSegment));
+        }
+
+        // 6. Fallback to root context
+        if (rootContext != null) {
+            val = navigatePath(rootContext, cleanPath);
+            if (val != null) return unwrap(val);
+
+            for (int i = 0; i < parts.length - 1; i++) {
+                String relativeSub = String.join("/", Arrays.copyOfRange(parts, i + 1, parts.length));
+                val = navigatePath(rootContext, relativeSub);
+                if (val != null) return unwrap(val);
+            }
+
+            val = getCaseInsensitive(rootContext, lastSegment);
+            if (val != null) return unwrap(val);
+        }
+
+        return null;
+    }
+
+    private Object navigatePath(Map<?, ?> map, String path) {
+        if (map == null || path == null || path.isEmpty()) return null;
+
+        String[] segments = path.split("/");
+        Object current = map;
+
+        for (String seg : segments) {
+            if (current instanceof Map<?, ?> currentMap) {
+                current = getCaseInsensitive(currentMap, seg);
+                if (current == null) return null;
+            } else if (current instanceof List<?> list) {
+                // If it's a list, check first item or search items
+                Object found = null;
+                for (Object item : list) {
+                    if (item instanceof Map<?, ?> itemMap) {
+                        found = getCaseInsensitive(itemMap, seg);
+                        if (found != null) break;
+                    }
+                }
+                current = found;
+                if (current == null) return null;
+            } else {
+                return null;
+            }
+        }
+
+        return current;
+    }
+
+    private Object getCaseInsensitive(Map<?, ?> map, String key) {
+        if (map == null || key == null) return null;
+
+        Object val = map.get(key);
+        if (val != null) return val;
+
+        String altKey = key.startsWith("@") ? key.substring(1) : "@" + key;
+        val = map.get(altKey);
+        if (val != null) return val;
+
+        String normKey = key.replaceAll("[@_\\-]", "").toLowerCase();
+
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+            if (entry.getKey() != null) {
+                String k = entry.getKey().toString();
+                String normK = k.replaceAll("[@_\\-]", "").toLowerCase();
+                if (normK.equals(normKey)) {
+                    return entry.getValue();
+                }
+            }
+        }
+        return null;
+    }
+
+    private Object unwrap(Object val) {
+        if (val instanceof Map<?, ?> m) {
+            if (m.containsKey("value")) return m.get("value");
+            if (m.size() == 1) return m.values().iterator().next();
+        }
+        return val;
+    }
+
+    private Object applyTransform(Object val, String transform) {
+        if (val == null) return null;
+        String str = String.valueOf(val).trim();
+        String t = transform != null ? transform.toUpperCase() : "NONE";
+        return switch (t) {
+            case "UPPER" -> str.toUpperCase();
+            case "TO_INT" -> {
+                try { yield Integer.parseInt(str.replaceAll("[^0-9-]", "")); } catch (Exception e) { yield null; }
+            }
+            case "TO_LONG" -> {
+                try { yield Long.parseLong(str.replaceAll("[^0-9-]", "")); } catch (Exception e) { yield null; }
+            }
+            case "TO_BOOLEAN" -> "true".equalsIgnoreCase(str) || "1".equals(str) || "yes".equalsIgnoreCase(str);
+            default -> str;
+        };
+    }
+
+    private String computeSha256(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (Exception ex) {
+            return String.valueOf(input.hashCode());
+        }
+    }
+}

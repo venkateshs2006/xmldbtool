@@ -1,8 +1,9 @@
-com/enterprise/xmldbtool/RoleGovernanceAndApprovalTest.class
-com/enterprise/xmldbtool/DynamicXmlIngestionTest$1.class
-com/enterprise/xmldbtool/SchemaHistoryAndLoggingIntegrationTest.class
-com/enterprise/xmldbtool/UserScenarioReproTest.class
-com/enterprise/xmldbtool/StaxPathReaderTest.class
-com/enterprise/xmldbtool/DynamicXmlIngestionTest$3.class
-com/enterprise/xmldbtool/DynamicXmlIngestionTest.class
-com/enterprise/xmldbtool/DynamicXmlIngestionTest$2.class
+com/bnpp/DynamicIngestionIntegrationTest$1.class
+com/bnpp/RoleGovernanceAndApprovalTest.class
+com/bnpp/UserJobPersistenceAndExecutionIntegrationTest.class
+com/bnpp/SpringBatchStaxIngestionPipelineTest.class
+com/bnpp/SpringBatchStaxIngestionPipelineTest$2.class
+com/bnpp/SpringBatchStaxIngestionPipelineTest$1.class
+com/bnpp/AuditGovernanceTest.class
+com/bnpp/DynamicIngestionIntegrationTest$2.class
+com/bnpp/DynamicIngestionIntegrationTest.class

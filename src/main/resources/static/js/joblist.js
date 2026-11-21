@@ -194,7 +194,8 @@ async function loadSavedJobs() {
                 : `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-100 text-slate-600 border border-slate-200" title="Single-Pass Direct Streaming"><i class="fas fa-bolt text-[8px]"></i> DIRECT</span>`;
 
             // Action buttons based on user role and approval state
-            const canRun = approval === 'APPROVED' && role !== 'APPROVER';
+            const isRunning = (job.lastRunStatus || '').toUpperCase() === 'RUNNING';
+            const canRun = approval === 'APPROVED' && role !== 'APPROVER' && !isRunning;
             const canDelete = role === 'ADMIN' || role === 'PLANNER';
 
             let actionButtonsHtml = `
@@ -208,6 +209,12 @@ async function loadSavedJobs() {
                     <button type="button" class="btn-run-job btn text-xs py-1 px-2.5 bg-emerald-50 text-bnp-emerald border border-emerald-300 hover:bg-emerald-100 mr-1.5 font-bold" data-id="${job.id}">
                         <i class="fas fa-play mr-1"></i> Run Job
                     </button>
+                `;
+            } else if (isRunning && role !== 'APPROVER') {
+                actionButtonsHtml += `
+                    <span class="inline-flex items-center text-[10px] text-amber-700 font-mono mr-1.5 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded cursor-wait">
+                        <i class="fas fa-spinner fa-spin mr-1"></i> Running...
+                    </span>
                 `;
             } else if (approval === 'REJECTED' && role !== 'APPROVER') {
                 actionButtonsHtml += `
@@ -342,9 +349,10 @@ function openReviewModal(job) {
     if (btnApprove) btnApprove.classList.toggle('hidden', !canApproveOrReject);
     if (btnReject) btnReject.classList.toggle('hidden', !canApproveOrReject);
 
-    // Planner & Admin can run ONLY IF APPROVED
+    // Planner & Admin can run ONLY IF APPROVED and not currently running
     // Approver can NEVER run
-    const canRunModal = role !== 'APPROVER' && approval === 'APPROVED';
+    const isJobRunning = (job.lastRunStatus || '').toUpperCase() === 'RUNNING';
+    const canRunModal = role !== 'APPROVER' && approval === 'APPROVED' && !isJobRunning;
     if (btnRun) btnRun.classList.toggle('hidden', !canRunModal);
 
     const statusBadge = document.getElementById('review-modal-status-badge');

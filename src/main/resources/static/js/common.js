@@ -165,8 +165,10 @@ function checkAuthSession(allowedRoles = null) {
         AppState.currentUser = user;
 
         if (allowedRoles && allowedRoles.length > 0) {
-            const role = (user.role || '').toUpperCase();
-            if (!allowedRoles.includes(role)) {
+            let role = (user.role || '').toUpperCase();
+            if (role === 'SCHEDULER') role = 'PLANNER';
+            const normalizedAllowed = allowedRoles.map(r => r === 'SCHEDULER' ? 'PLANNER' : r);
+            if (!normalizedAllowed.includes(role)) {
                 showToast('You do not have permission to access this page.', 'error', 'Access Denied');
                 if (role === 'APPROVER') {
                     window.location.href = 'joblist.html';
@@ -224,7 +226,7 @@ function initHeader(activePage) {
         if (role === 'APPROVER') {
             if (navSchedule) navSchedule.classList.add('hidden');
             if (navUsers) navUsers.classList.add('hidden');
-        } else if (role === 'PLANNER') {
+        } else if (role === 'PLANNER' || role === 'SCHEDULER') {
             if (navUsers) navUsers.classList.add('hidden');
         }
     }

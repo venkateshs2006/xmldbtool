@@ -14,6 +14,9 @@ document.addEventListener('DOMContentLoaded', () => {
     initCharts();
     initErrorModalListeners();
 
+    // Start system hardware & JVM metrics monitoring immediately
+    startSystemMetricsMonitoring();
+
     // Check URL or session for target job execution ID
     const urlParams = new URLSearchParams(window.location.search);
     const targetJobExecId = urlParams.get('jobExecutionId') || sessionStorage.getItem('active_job_execution_id');
@@ -225,6 +228,13 @@ function initExecutionSummaryHandlers() {
     });
 }
 
+function startSystemMetricsMonitoring() {
+    loadSystemMetrics();
+    if (!AppState.systemMetricsTimer) {
+        AppState.systemMetricsTimer = setInterval(loadSystemMetrics, 2000);
+    }
+}
+
 function startUnifiedLiveTelemetryEngine() {
     stopUnifiedLiveTelemetryEngine();
     setLiveTelemetryIndicator();
@@ -236,10 +246,6 @@ function stopUnifiedLiveTelemetryEngine() {
     if (AppState.telemetryPollingTimer) {
         clearInterval(AppState.telemetryPollingTimer);
         AppState.telemetryPollingTimer = null;
-    }
-    if (AppState.systemMetricsTimer) {
-        clearInterval(AppState.systemMetricsTimer);
-        AppState.systemMetricsTimer = null;
     }
 }
 
@@ -267,11 +273,11 @@ async function runLiveTelemetryCycle(isManualOneOff = false) {
     if (selectedVal !== 'ALL') {
         targetJobId = selectedVal;
     } else if (running) {
-        targetJobId = running.executionId;
+        targetJobId = running.executionId || running.jobExecutionId || running.jobId;
     } else if (AppState.activeJobExecutionId) {
         targetJobId = AppState.activeJobExecutionId;
     } else if (AppState.executionHistory && AppState.executionHistory.length > 0) {
-        targetJobId = AppState.executionHistory[0].executionId;
+        targetJobId = AppState.executionHistory[0].executionId || AppState.executionHistory[0].jobExecutionId || AppState.executionHistory[0].jobId;
     }
 
     if (targetJobId) {
@@ -303,25 +309,33 @@ async function loadSystemMetrics() {
 
         // 1. CPU & OS
         const cpuCoresEl = document.getElementById('metric-cpu-cores');
-        if (cpuCoresEl) cpuCoresEl.textContent = m.availableProcessors || '--';
+        if (cpuCoresEl) cpuCoresEl.textContent = m.availableProcessors || m.cpuCores || '--';
+        const cpuPct = m.systemCpuLoadPercent ?? m.cpuUsage ?? 0;
         const sysCpuEl = document.getElementById('metric-system-cpu');
-        if (sysCpuEl) sysCpuEl.textContent = `${m.systemCpuLoadPercent || 0}%`;
+        if (sysCpuEl) sysCpuEl.textContent = `${cpuPct}%`;
         const cpuBar = document.getElementById('metric-cpu-bar');
-        if (cpuBar) cpuBar.style.width = `${Math.min(100, m.systemCpuLoadPercent || 0)}%`;
+        if (cpuBar) cpuBar.style.width = `${Math.min(100, cpuPct)}%`;
         const osInfoEl = document.getElementById('metric-os-info');
-        if (osInfoEl) osInfoEl.textContent = `${m.osName || 'Linux'} ${m.osArch || 'x64'}`;
+        if (osInfoEl) osInfoEl.textContent = `OS: ${m.osName || 'Linux'} ${m.osArch || 'x64'}`;
 
         // 2. JVM Heap Memory
+        const heapUsedFormatted = m.heapUsedFormatted || (m.usedMemoryMb ? `${m.usedMemoryMb} MB` : '--');
         const heapUsedEl = document.getElementById('metric-heap-used');
-        if (heapUsedEl) heapUsedEl.textContent = m.heapUsedFormatted || '--';
+        if (heapUsedEl) heapUsedEl.textContent = heapUsedFormatted;
+
+        const heapPercent = m.heapUsagePercent ?? m.memoryUsage ?? 0;
         const heapPercentEl = document.getElementById('metric-heap-percent');
-        if (heapPercentEl) heapPercentEl.textContent = `${m.heapUsagePercent || 0}%`;
+        if (heapPercentEl) heapPercentEl.textContent = `${heapPercent}%`;
+
+        const heapMaxFormatted = m.heapMaxFormatted || (m.totalMemoryMb ? `${m.totalMemoryMb} MB` : '--');
         const heapMaxEl = document.getElementById('metric-heap-max');
-        if (heapMaxEl) heapMaxEl.textContent = m.heapMaxFormatted || '--';
+        if (heapMaxEl) heapMaxEl.textContent = heapMaxFormatted;
+
         const heapBar = document.getElementById('metric-heap-bar');
-        if (heapBar) heapBar.style.width = `${Math.min(100, m.heapUsagePercent || 0)}%`;
+        if (heapBar) heapBar.style.width = `${Math.min(100, heapPercent)}%`;
+
         const gcInfoEl = document.getElementById('metric-gc-info');
-        if (gcInfoEl) gcInfoEl.textContent = `GC: ${m.gcCount || 0} (${m.gcTimeMs || 0}ms)`;
+        if (gcInfoEl) gcInfoEl.textContent = `GC: ${m.gcCount ?? 0} (${m.gcTimeMs ?? 0}ms)`;
 
         // 3. JVM Uptime & Java Version
         const jvmUptimeEl = document.getElementById('metric-jvm-uptime');
@@ -329,9 +343,9 @@ async function loadSystemMetrics() {
         const javaVerEl = document.getElementById('metric-java-ver');
         if (javaVerEl) javaVerEl.textContent = m.javaVersion ? m.javaVersion.split(' ')[0] : 'Java 21';
         const sysLoadEl = document.getElementById('metric-system-load');
-        if (sysLoadEl) sysLoadEl.textContent = `Load Avg: ${m.systemLoadAverage || 0}`;
+        if (sysLoadEl) sysLoadEl.textContent = `Load: ${m.systemLoadAverage ?? 0}`;
         const procCpuEl = document.getElementById('metric-process-cpu');
-        if (procCpuEl) procCpuEl.textContent = `Process CPU: ${m.processCpuLoadPercent || 0}%`;
+        if (procCpuEl) procCpuEl.textContent = `Process CPU: ${m.processCpuLoadPercent ?? 0}%`;
     } catch (e) {
         console.warn('System metrics polling error:', e);
     }
@@ -357,13 +371,14 @@ async function loadExecutionHistory(isSilent = false) {
             const currentSelected = dropdown.value || 'ALL';
             let optionsHtml = `<option value="ALL">All Executions (${effectiveCount})</option>`;
             history.forEach(exec => {
+                const execId = exec.executionId || exec.jobExecutionId || exec.jobId;
                 const writtenStr = (exec.totalWritten || exec.totalRead || 0).toLocaleString();
                 const phaseStr = exec.currentPhase ? ` [${exec.currentPhase}]` : ` [${exec.status}]`;
-                optionsHtml += `<option value="${exec.executionId}">Job #${exec.executionId} - ${escapeHtml(exec.jobName || 'Batch Ingestion')}${phaseStr} (${writtenStr} records)</option>`;
+                optionsHtml += `<option value="${execId}">Job #${execId} - ${escapeHtml(exec.jobName || 'Batch Ingestion')}${phaseStr} (${writtenStr} records)</option>`;
             });
 
             // Ensure active job is always present in dropdown even if history sync has slight lag
-            if (AppState.activeJobExecutionId && !history.some(e => String(e.executionId) === String(AppState.activeJobExecutionId))) {
+            if (AppState.activeJobExecutionId && !history.some(e => String(e.executionId || e.jobExecutionId || e.jobId) === String(AppState.activeJobExecutionId))) {
                 optionsHtml += `<option value="${AppState.activeJobExecutionId}">Job #${AppState.activeJobExecutionId} - Active Ingestion [STREAMING]</option>`;
             }
 
@@ -409,8 +424,9 @@ function updateTransferredCard(exec, totalRunsCount) {
         return;
     }
 
-    const written = exec.totalWritten || 0;
-    const read = exec.totalRead || 0;
+    const written = exec.totalWritten || exec.recordsWritten || 0;
+    const read = exec.totalRead || exec.recordsRead || 0;
+    const execId = exec.executionId || exec.jobExecutionId || exec.jobId || '--';
 
     if (totalTransferredEl) totalTransferredEl.textContent = written.toLocaleString();
     if (totalReadEl) totalReadEl.textContent = read.toLocaleString();
@@ -418,20 +434,21 @@ function updateTransferredCard(exec, totalRunsCount) {
 
     if (execBadgeEl) {
         if (totalRunsCount && totalRunsCount > 1) {
-            execBadgeEl.textContent = `Job #${exec.executionId} (${exec.status || 'DONE'})`;
+            execBadgeEl.textContent = `Job #${execId} (${exec.status || 'DONE'})`;
         } else {
-            execBadgeEl.textContent = `Job #${exec.executionId}`;
+            execBadgeEl.textContent = `Job #${execId}`;
         }
     }
 
     if (subtitleEl) {
-        subtitleEl.innerHTML = `<i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Transaction Details (Job #${exec.executionId})`;
+        subtitleEl.innerHTML = `<i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Transaction Details (Job #${execId})`;
     }
 
     if (tablesCountEl) {
         let count = 0;
-        if (exec.tableWriteCounts && Object.keys(exec.tableWriteCounts).length > 0) {
-            count = Object.keys(exec.tableWriteCounts).length;
+        const writeCounts = exec.tableWriteCounts || exec.tableCounts || exec.tableRowCounts || {};
+        if (Object.keys(writeCounts).length > 0) {
+            count = Object.keys(writeCounts).length;
         } else if (exec.targetTables && exec.targetTables.length > 0) {
             count = exec.targetTables.length;
         } else if (exec.targetTable && exec.targetTable.includes(',')) {
@@ -451,9 +468,10 @@ function updateTransferredFromTelemetry(data) {
     const subtitleEl = document.getElementById('metric-transferred-subtitle');
     const tablesCountEl = document.getElementById('metric-total-tables-count');
 
-    const written = data.totalWritten || 0;
-    const read = data.totalRead || 0;
+    const written = data.totalWritten || data.recordsWritten || 0;
+    const read = data.totalRead || data.recordsRead || 0;
     const effectiveDisplay = written > 0 ? written : read;
+    const execId = data.jobExecutionId || data.executionId || data.jobId || '--';
 
     if (totalTransferredEl) totalTransferredEl.textContent = effectiveDisplay.toLocaleString();
     if (totalReadEl) totalReadEl.textContent = read.toLocaleString();
@@ -462,7 +480,7 @@ function updateTransferredFromTelemetry(data) {
     if (execBadgeEl) {
         const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
         const streamState = data.streamingState || (isRunning ? 'STREAMING' : data.status);
-        execBadgeEl.textContent = `Job #${data.jobExecutionId} (${streamState})`;
+        execBadgeEl.textContent = `Job #${execId} (${streamState})`;
         execBadgeEl.className = `px-2 py-0.5 rounded-full font-bold text-[10px] font-mono shadow-2xs ${
             streamState === 'STREAMING' ? 'bg-blue-100 text-blue-800 animate-pulse' :
             streamState === 'NORMALIZING' ? 'bg-indigo-100 text-indigo-800 animate-pulse' :
@@ -479,16 +497,17 @@ function updateTransferredFromTelemetry(data) {
         } else if (data.currentPhase) {
             subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> ${escapeHtml(data.currentPhase)}`;
         } else if (isRunning) {
-            subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> Streaming Active (Job #${data.jobExecutionId})`;
+            subtitleEl.innerHTML = `<i class="fas fa-bolt text-emerald-500 text-[10px]"></i> Streaming Active (Job #${execId})`;
         } else {
-            subtitleEl.innerHTML = `<i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Finished Ingestion (Job #${data.jobExecutionId})`;
+            subtitleEl.innerHTML = `<i class="fas fa-check-circle text-emerald-500 text-[10px]"></i> Finished Ingestion (Job #${execId})`;
         }
     }
 
     if (tablesCountEl) {
         let count = 0;
-        if (data.tableWriteCounts && Object.keys(data.tableWriteCounts).length > 0) {
-            count = Object.keys(data.tableWriteCounts).length;
+        const writeCounts = data.tableWriteCounts || data.tableCounts || data.tableRowCounts || {};
+        if (Object.keys(writeCounts).length > 0) {
+            count = Object.keys(writeCounts).length;
         } else if (data.targetTables && data.targetTables.length > 0) {
             count = data.targetTables.length;
         }
@@ -522,19 +541,21 @@ function applyExecutionHistoryFilter(selectedId) {
 
         // Check if latest execution failed
         if (latestExec && latestExec.status === 'FAILED') {
+            const execId = latestExec.executionId || latestExec.jobExecutionId || latestExec.jobId || '--';
+            const errMsg = latestExec.message || latestExec.errorMessage || 'Job failed during execution.';
             checkAndDisplayFailureAlert({
-                jobExecutionId: latestExec.executionId,
+                jobExecutionId: execId,
                 status: latestExec.status,
-                message: latestExec.errorMessage || 'Job failed during execution.',
+                message: errMsg,
                 endTime: latestExec.endTime
             });
             // Populate errors table from job history when live telemetry isn't yet available
-            if (latestExec.errorMessage) {
+            if (errMsg) {
                 updateErrorsTable([{
                     phase: 'JOB_FATAL',
                     stepName: latestExec.jobName || 'batchJob',
-                    errorMessage: latestExec.errorMessage,
-                    recordData: JSON.stringify({ jobExecutionId: latestExec.executionId, status: latestExec.status }),
+                    errorMessage: errMsg,
+                    recordData: JSON.stringify({ jobExecutionId: execId, status: latestExec.status }),
                     failedAt: latestExec.endTime || ''
                 }]);
             }
@@ -547,7 +568,7 @@ function applyExecutionHistoryFilter(selectedId) {
         return;
     }
 
-    const selectedExec = history.find(e => String(e.executionId) === String(selectedId));
+    const selectedExec = history.find(e => String(e.executionId || e.jobExecutionId || e.jobId) === String(selectedId));
     if (!selectedExec) {
         if (selectedId !== 'ALL' && AppState.activeJobExecutionId && String(selectedId) === String(AppState.activeJobExecutionId)) {
             const activeSummary = {
@@ -698,37 +719,41 @@ function renderExecutionRows(executions) {
 
         // Resolve table list with per-table counts & errors
         let tableList = [];
-        if (exec.tableWriteCounts && Object.keys(exec.tableWriteCounts).length > 0) {
-            tableList = Object.entries(exec.tableWriteCounts).map(([tbl, cnt]) => ({
+        const execId = exec.executionId || exec.jobExecutionId || exec.jobId || '--';
+        const writeCounts = exec.tableWriteCounts || exec.tableCounts || exec.tableRowCounts || {};
+        const errorCounts = exec.tableErrorCounts || {};
+
+        if (writeCounts && Object.keys(writeCounts).length > 0) {
+            tableList = Object.entries(writeCounts).map(([tbl, cnt]) => ({
                 name: tbl,
                 written: cnt || 0,
                 read: cnt || 0,
-                errors: (exec.tableErrorCounts && exec.tableErrorCounts[tbl]) || 0
+                errors: (errorCounts && errorCounts[tbl]) || 0
             }));
         } else if (exec.targetTables && exec.targetTables.length > 0) {
-            const totalCount = exec.totalWritten || 0;
+            const totalCount = exec.totalWritten || exec.recordsWritten || 0;
             const countPerTable = Math.round(totalCount / exec.targetTables.length);
             tableList = exec.targetTables.map(tbl => ({
                 name: tbl,
                 written: countPerTable,
                 read: countPerTable,
-                errors: (exec.tableErrorCounts && exec.tableErrorCounts[tbl]) || 0
+                errors: (errorCounts && errorCounts[tbl]) || 0
             }));
         } else if (exec.targetTable && exec.targetTable.includes(',')) {
             const arr = exec.targetTable.split(',').map(t => t.trim()).filter(Boolean);
-            const totalCount = exec.totalWritten || 0;
+            const totalCount = exec.totalWritten || exec.recordsWritten || 0;
             const countPerTable = Math.round(totalCount / arr.length);
             tableList = arr.map(tbl => ({
                 name: tbl,
                 written: countPerTable,
                 read: countPerTable,
-                errors: (exec.tableErrorCounts && exec.tableErrorCounts[tbl]) || 0
+                errors: (errorCounts && errorCounts[tbl]) || 0
             }));
         } else {
             tableList = [{
                 name: exec.targetTable || '--',
-                written: exec.totalWritten || 0,
-                read: exec.totalRead || 0,
+                written: exec.totalWritten || exec.recordsWritten || 0,
+                read: exec.totalRead || exec.recordsRead || 0,
                 errors: exec.totalErrors || 0
             }];
         }
@@ -736,8 +761,8 @@ function renderExecutionRows(executions) {
         if (tableList.length === 0) {
             tableList = [{
                 name: exec.targetTable || '--',
-                written: exec.totalWritten || 0,
-                read: exec.totalRead || 0,
+                written: exec.totalWritten || exec.recordsWritten || 0,
+                read: exec.totalRead || exec.recordsRead || 0,
                 errors: exec.totalErrors || 0
             }];
         }
@@ -751,7 +776,7 @@ function renderExecutionRows(executions) {
             if (idx === 0) {
                 tr.innerHTML = `
                     <td rowspan="${numRows}" class="px-4 py-3 font-bold text-gray-800 align-middle bg-white border-r border-slate-100">
-                        <span class="inline-flex items-center px-2 py-0.5 rounded font-mono font-bold bg-slate-100 text-slate-800 text-xs">#${exec.executionId}</span>
+                        <span class="inline-flex items-center px-2 py-0.5 rounded font-mono font-bold bg-slate-100 text-slate-800 text-xs">#${execId}</span>
                     </td>
                     <td rowspan="${numRows}" class="px-4 py-3 font-sans font-semibold text-gray-900 truncate max-w-[150px] align-middle bg-white border-r border-slate-100">
                         <div class="font-medium text-gray-900 truncate" title="${escapeHtml(exec.jobName)}">${escapeHtml(exec.jobName)}</div>
@@ -780,11 +805,11 @@ function renderExecutionRows(executions) {
                     <td class="px-4 py-2.5 font-bold font-mono ${tbl.errors > 0 ? 'text-red-600' : 'text-gray-400'}">${tbl.errors.toLocaleString()}</td>
                     <td rowspan="${numRows}" class="px-4 py-3 text-center align-middle bg-white">
                         <div class="flex flex-col items-center gap-1.5 justify-center">
-                            <button type="button" class="btn btn-secondary text-[11px] py-1 px-2.5 font-sans font-semibold btn-inspect-exec" data-id="${exec.executionId}">
+                            <button type="button" class="btn btn-secondary text-[11px] py-1 px-2.5 font-sans font-semibold btn-inspect-exec" data-id="${execId}">
                                 <i class="fas fa-eye text-bnp-emerald mr-1"></i> Inspect
                             </button>
                             ${((exec.status === 'STOPPED' || exec.status === 'FAILED') && (AppState.currentUser?.role || '').toUpperCase() !== 'APPROVER') ? `
-                            <button type="button" class="btn text-[11px] py-1 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-sans font-semibold rounded shadow-2xs btn-resume-exec" data-id="${exec.executionId}">
+                            <button type="button" class="btn text-[11px] py-1 px-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-sans font-semibold rounded shadow-2xs btn-resume-exec" data-id="${execId}">
                                 <i class="fas fa-play text-white mr-1"></i> Resume
                             </button>` : ''}
                         </div>
@@ -900,13 +925,14 @@ function renderTelemetryData(data) {
 
     // 6. Recent Error Logs
     // If recentErrors is empty but job is failed, synthesize an error entry from the message field
-    let errors = data.recentErrors || [];
-    if (errors.length === 0 && data.status === 'FAILED' && data.message) {
+    let errors = data.recentErrors || data.errorLogs || [];
+    const fatalMsg = data.message || data.errorMessage;
+    if (errors.length === 0 && data.status === 'FAILED' && fatalMsg) {
         errors = [{
             phase: 'JOB_FATAL',
             stepName: 'batchJob',
-            errorMessage: data.message,
-            recordData: JSON.stringify({ jobExecutionId: data.jobExecutionId, exitCode: data.exitCode || 'FAILED' }),
+            errorMessage: fatalMsg,
+            recordData: JSON.stringify({ jobExecutionId: data.jobExecutionId || data.executionId, exitCode: data.exitCode || 'FAILED' }),
             failedAt: data.endTime || new Date().toLocaleTimeString()
         }];
     }
@@ -1016,9 +1042,18 @@ function updateTableBreakdown(data) {
     const badge = document.getElementById('table-breakdown-total-badge');
     if (!tbody) return;
 
-    const writeCounts = data.tableWriteCounts || {};
+    const writeCounts = data.tableWriteCounts || data.tableCounts || data.tableRowCounts || {};
     const errorCounts = data.tableErrorCounts || {};
-    const targetTables = data.targetTables || Object.keys(writeCounts);
+    let targetTables = data.targetTables || [];
+    if (!targetTables || targetTables.length === 0) {
+        if (data.tableOrder && data.tableOrder.length > 0) {
+            targetTables = data.tableOrder;
+        } else if (data.targetTable && data.targetTable !== '--') {
+            targetTables = data.targetTable.split(',').map(s => s.trim()).filter(Boolean);
+        } else {
+            targetTables = Object.keys(writeCounts);
+        }
+    }
 
     if (targetTables.length === 0 && Object.keys(writeCounts).length === 0) {
         if (data.status === 'RUNNING' || data.status === 'STARTED') {
@@ -1034,7 +1069,7 @@ function updateTableBreakdown(data) {
     const allTables = Array.from(new Set([...targetTables, ...Object.keys(writeCounts)]));
     if (badge) badge.textContent = `${allTables.length} Tables Active`;
 
-    const totalWrittenAll = (data.totalWritten || 0) > 0 ? data.totalWritten : (data.totalRead || 1);
+    const totalWrittenAll = (data.totalWritten || data.recordsWritten || 0) > 0 ? (data.totalWritten || data.recordsWritten) : (data.totalRead || data.recordsRead || 1);
 
     let html = '';
     allTables.forEach(tableName => {
@@ -1091,8 +1126,8 @@ function updateTableBreakdown(data) {
 }
 
 function updateThroughputAndState(data) {
-    let speed = Math.round(data.recordsPerSecond || 0);
-    const effectiveTotal = (data.totalWritten || 0) > 0 ? data.totalWritten : (data.totalRead || 0);
+    let speed = Math.round(data.recordsPerSecond || data.throughput || data.writeThroughput || 0);
+    const effectiveTotal = (data.totalWritten || data.recordsWritten || 0) > 0 ? (data.totalWritten || data.recordsWritten) : (data.totalRead || data.recordsRead || 0);
     if (speed === 0 && effectiveTotal > 0) {
         if (data.startTime && data.endTime) {
             try {
@@ -1171,12 +1206,12 @@ function checkAndDisplayFailureAlert(data) {
         alertPanel.classList.remove('hidden');
 
         const jobBadge = document.getElementById('failure-alert-job-id');
-        if (jobBadge) jobBadge.textContent = `Job #${data.jobExecutionId}`;
+        if (jobBadge) jobBadge.textContent = `Job #${data.jobExecutionId || data.executionId || '--'}`;
 
         let failedStep = 'dynamicIngestStep';
         let stackTrace = '';
-        // Prefer the message field which is always populated by backend for failed jobs
-        let errorMsg = data.message || 'Fatal batch execution failure.';
+        // Prefer the message / errorMessage field which is always populated by backend for failed jobs
+        let errorMsg = data.message || data.errorMessage || 'Fatal batch execution failure.';
 
         if (data.recentErrors && data.recentErrors.length > 0) {
             // Look for JOB_FATAL phase first (fatal exception), then any other error
