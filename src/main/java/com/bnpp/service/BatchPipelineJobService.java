@@ -114,7 +114,11 @@ public class BatchPipelineJobService {
                 "ALTER TABLE job_details ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP",
                 "ALTER TABLE job_details ADD COLUMN IF NOT EXISTS job_execution_id VARCHAR(64)",
                 "ALTER TABLE job_details ADD COLUMN IF NOT EXISTS last_job_execution_id BIGINT",
-                "ALTER TABLE job_details ADD COLUMN IF NOT EXISTS staged_pipeline BOOLEAN DEFAULT TRUE"
+                "ALTER TABLE job_details ADD COLUMN IF NOT EXISTS staged_pipeline BOOLEAN DEFAULT TRUE",
+                "ALTER TABLE job_details ALTER COLUMN db_config_json DROP NOT NULL",
+                "ALTER TABLE job_details ALTER COLUMN mappings_json DROP NOT NULL",
+                "ALTER TABLE job_details ALTER COLUMN source_xml_path DROP NOT NULL",
+                "ALTER TABLE job_details ALTER COLUMN record_root_element DROP NOT NULL"
             };
             for (String alterSql : alterCols) {
                 try {
@@ -135,6 +139,45 @@ public class BatchPipelineJobService {
                 jdbcTemplate.update("UPDATE job_details SET db_config_json = db_config WHERE db_config_json IS NULL");
                 jdbcTemplate.update("UPDATE job_details SET submitted_by = created_by WHERE submitted_by IS NULL");
                 jdbcTemplate.update("UPDATE job_details SET created_by = submitted_by WHERE created_by IS NULL");
+            } catch (Exception ignored) {}
+
+            // Discover and backfill from Spring Batch tables if any executions exist
+            try {
+                jdbcTemplate.update("""
+                    INSERT INTO job_details (
+                        job_id, job_name, source_xml_path, xml_file_path, record_root_element,
+                        db_config_json, mappings_json, db_config, ingestion_json,
+                        status, approval_status, submitted_by, created_by, last_run_status,
+                        last_run_at, job_execution_id, created_at, updated_at
+                    )
+                    SELECT 
+                        'JOB-' || e.job_execution_id,
+                        i.job_name,
+                        COALESCE(c.source_xml_path, '/home/sv/Projects/xmldbtool/uploads/test.xml'),
+                        COALESCE(c.source_xml_path, '/home/sv/Projects/xmldbtool/uploads/test.xml'),
+                        'root',
+                        '{}',
+                        '[]',
+                        '{}',
+                        '[]',
+                        e.status,
+                        'APPROVED',
+                        'admin',
+                        'admin',
+                        e.status,
+                        e.start_time,
+                        CAST(e.job_execution_id AS VARCHAR(64)),
+                        COALESCE(e.start_time, CURRENT_TIMESTAMP),
+                        COALESCE(e.end_time, CURRENT_TIMESTAMP)
+                    FROM batch_job_execution e
+                    JOIN batch_job_instance i ON e.job_instance_id = i.job_instance_id
+                    LEFT JOIN job_checkpoints c ON c.job_execution_id = e.job_execution_id
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM job_details jd 
+                        WHERE jd.job_id = 'JOB-' || e.job_execution_id 
+                           OR jd.job_execution_id = CAST(e.job_execution_id AS VARCHAR(64))
+                    )
+                """);
             } catch (Exception ignored) {}
 
             log.info("Initialized and synchronized job_details table in application database.");

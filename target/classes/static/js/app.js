@@ -3763,7 +3763,7 @@ async function loadSystemMetrics() {
         const cpuBar = document.getElementById('metric-cpu-bar');
         if (cpuBar) cpuBar.style.width = `${Math.min(100, cpuPct)}%`;
         const osInfoEl = document.getElementById('metric-os-info');
-        if (osInfoEl) osInfoEl.textContent = `${m.osName || 'Linux'} ${m.osArch || 'x64'}`;
+        if (osInfoEl) osInfoEl.textContent = `OS: ${m.osName || 'Linux'} ${m.osArch || 'x64'}`;
 
         // 2. JVM Heap Memory
         const heapUsedFormatted = m.heapUsedFormatted || (m.usedMemoryMb ? `${m.usedMemoryMb} MB` : '--');
@@ -3782,12 +3782,17 @@ async function loadSystemMetrics() {
         if (heapBar) heapBar.style.width = `${Math.min(100, heapPercent)}%`;
 
         const gcInfoEl = document.getElementById('metric-gc-info');
-        if (gcInfoEl) gcInfoEl.textContent = `GC: ${m.gcCount || 0} (${m.gcTimeMs || 0}ms)`;
+        if (gcInfoEl) gcInfoEl.textContent = `GC: ${m.gcCount ?? 0} (${m.gcTimeMs ?? 0}ms)`;
 
         // 3. JVM Uptime & Java Version
         const jvmUptimeEl = document.getElementById('metric-jvm-uptime');
         if (jvmUptimeEl) jvmUptimeEl.textContent = m.jvmUptimeFormatted || '--';
         const javaVerEl = document.getElementById('metric-java-ver');
+        if (javaVerEl) javaVerEl.textContent = m.javaVersion ? m.javaVersion.split(' ')[0] : 'Java 21';
+        const sysLoadEl = document.getElementById('metric-system-load');
+        if (sysLoadEl) sysLoadEl.textContent = `Load: ${m.systemLoadAverage ?? 0}`;
+        const procCpuEl = document.getElementById('metric-process-cpu');
+        if (procCpuEl) procCpuEl.textContent = `Process CPU: ${m.processCpuLoadPercent ?? 0}%`;
         if (javaVerEl) javaVerEl.textContent = m.javaVersion ? m.javaVersion.split(' ')[0] : 'Java 21';
         const sysLoadEl = document.getElementById('metric-system-load');
         if (sysLoadEl) sysLoadEl.textContent = `Load Avg: ${m.systemLoadAverage ?? 0}`;
