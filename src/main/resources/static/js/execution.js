@@ -568,7 +568,12 @@ function applyExecutionHistoryFilter(selectedId) {
         return;
     }
 
-    const selectedExec = history.find(e => String(e.executionId || e.jobExecutionId || e.jobId) === String(selectedId));
+    const selectedExec = history.find(e => 
+        String(e.executionId) === String(selectedId) ||
+        String(e.jobExecutionId) === String(selectedId) ||
+        String(e.jobId) === String(selectedId) ||
+        String(e.id) === String(selectedId)
+    );
     if (!selectedExec) {
         if (selectedId !== 'ALL' && AppState.activeJobExecutionId && String(selectedId) === String(AppState.activeJobExecutionId)) {
             const activeSummary = {
@@ -627,41 +632,45 @@ function updateSelectedJobStatusPanel(jobData) {
     if (!statusPanel) return;
     statusPanel.classList.remove('hidden');
 
-    const execId = jobData.jobExecutionId || jobData.executionId || '--';
+    const execId = jobData.jobId || jobData.jobExecutionId || jobData.executionId || '--';
     const idBadge = document.getElementById('status-panel-job-id');
     if (idBadge) idBadge.textContent = `Job #${execId}`;
 
     const nameEl = document.getElementById('status-panel-job-name');
     if (nameEl) nameEl.textContent = jobData.jobName || 'Batch Ingestion Job';
 
+    const currentStatus = (jobData.status && jobData.status !== 'UNKNOWN') ? jobData.status : (jobData.lastRunStatus || 'COMPLETED');
     const statusBadge = document.getElementById('status-panel-status-badge');
     if (statusBadge) {
-        statusBadge.textContent = jobData.status;
+        statusBadge.textContent = currentStatus;
         statusBadge.className = `px-2 py-0.5 rounded text-[10px] font-bold ${
-            jobData.status === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
-            jobData.status === 'STARTED' || jobData.status === 'RUNNING' ? 'bg-blue-100 text-blue-700 animate-pulse' :
-            jobData.status === 'FAILED' ? 'bg-red-100 text-red-600' :
+            currentStatus === 'COMPLETED' ? 'bg-emerald-100 text-bnp-emerald' :
+            currentStatus === 'STARTED' || currentStatus === 'RUNNING' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+            currentStatus === 'FAILED' ? 'bg-red-100 text-red-600' :
             'bg-amber-100 text-amber-800'
         }`;
     }
 
     const startEl = document.getElementById('status-panel-start');
-    if (startEl) startEl.textContent = jobData.startTime || '--';
+    if (startEl) startEl.textContent = jobData.startTime || jobData.lastRunAt || '--';
 
     const endEl = document.getElementById('status-panel-end');
-    if (endEl) endEl.textContent = jobData.endTime || '--';
+    if (endEl) endEl.textContent = jobData.endTime || (jobData.startTime && jobData.duration ? jobData.startTime : '--');
 
     const durationEl = document.getElementById('status-panel-duration');
     if (durationEl) durationEl.textContent = jobData.duration || '--';
 
+    const totalRead = jobData.totalRead || jobData.recordsRead || 0;
     const readEl = document.getElementById('status-panel-read');
-    if (readEl) readEl.textContent = (jobData.totalRead || 0).toLocaleString();
+    if (readEl) readEl.textContent = totalRead.toLocaleString();
 
+    const totalWritten = jobData.totalWritten || jobData.recordsWritten || 0;
     const writtenEl = document.getElementById('status-panel-written');
-    if (writtenEl) writtenEl.textContent = (jobData.totalWritten || 0).toLocaleString();
+    if (writtenEl) writtenEl.textContent = totalWritten.toLocaleString();
 
+    const totalErrors = jobData.totalErrors || jobData.recordsFailed || jobData.recordsSkipped || 0;
     const errorsEl = document.getElementById('status-panel-errors');
-    if (errorsEl) errorsEl.textContent = (jobData.totalErrors || 0).toLocaleString();
+    if (errorsEl) errorsEl.textContent = totalErrors.toLocaleString();
 
     const tablesEl = document.getElementById('status-panel-tables');
     if (tablesEl) {
@@ -669,6 +678,8 @@ function updateSelectedJobStatusPanel(jobData) {
             tablesEl.textContent = Object.keys(jobData.tableWriteCounts).join(', ');
         } else if (jobData.targetTables && jobData.targetTables.length > 0) {
             tablesEl.textContent = jobData.targetTables.join(', ');
+        } else if (jobData.tableOrder && jobData.tableOrder.length > 0) {
+            tablesEl.textContent = jobData.tableOrder.join(', ');
         } else {
             tablesEl.textContent = jobData.targetTable || '--';
         }

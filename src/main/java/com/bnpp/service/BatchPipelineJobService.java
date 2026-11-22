@@ -1,5 +1,6 @@
 package com.bnpp.service;
 
+import java.io.File;
 import com.bnpp.batch.DatabaseErrorSkipListener;
 import com.bnpp.batch.DynamicJdbcBatchWriter;
 import com.bnpp.model.*;
@@ -30,6 +31,7 @@ public class BatchPipelineJobService {
     private final CanonicalNormalizationService canonicalNormalizationService;
     private final DynamicDataSourceService dataSourceService;
     private final DynamicBatchJobService dynamicBatchJobService;
+    private final XmlSchemaDiscoveryService xmlSchemaDiscoveryService;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
     private final com.fasterxml.jackson.databind.ObjectMapper objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
@@ -38,6 +40,7 @@ public class BatchPipelineJobService {
                                    XmlStreamingParserService xmlStreamingParserService,
                                    CanonicalNormalizationService canonicalNormalizationService,
                                    DynamicDataSourceService dataSourceService,
+                                   XmlSchemaDiscoveryService xmlSchemaDiscoveryService,
                                    @org.springframework.beans.factory.annotation.Autowired(required = false) DynamicBatchJobService dynamicBatchJobService,
                                    @org.springframework.beans.factory.annotation.Autowired(required = false) org.springframework.jdbc.core.JdbcTemplate jdbcTemplate) {
         this.auditGovernanceService = auditGovernanceService;
@@ -45,6 +48,7 @@ public class BatchPipelineJobService {
         this.xmlStreamingParserService = xmlStreamingParserService;
         this.canonicalNormalizationService = canonicalNormalizationService;
         this.dataSourceService = dataSourceService;
+        this.xmlSchemaDiscoveryService = xmlSchemaDiscoveryService;
         this.dynamicBatchJobService = dynamicBatchJobService;
         this.jdbcTemplate = jdbcTemplate;
     }
@@ -139,6 +143,23 @@ public class BatchPipelineJobService {
                 jdbcTemplate.update("UPDATE job_details SET db_config_json = db_config WHERE db_config_json IS NULL");
                 jdbcTemplate.update("UPDATE job_details SET submitted_by = created_by WHERE submitted_by IS NULL");
                 jdbcTemplate.update("UPDATE job_details SET created_by = submitted_by WHERE created_by IS NULL");
+            } catch (Exception ignored) {}
+
+            // Ensure source_xml_path and xml_file_path in job_details contain full absolute paths
+            try {
+                List<Map<String, Object>> rows = jdbcTemplate.queryForList("SELECT id, source_xml_path, xml_file_path FROM job_details");
+                for (Map<String, Object> r : rows) {
+                    Long rowId = ((Number) r.get("id")).longValue();
+                    String sPath = (String) r.get("source_xml_path");
+                    if (sPath == null || sPath.trim().isEmpty()) sPath = (String) r.get("xml_file_path");
+                    if (sPath != null && !sPath.trim().isEmpty()) {
+                        try {
+                            File resolved = xmlSchemaDiscoveryService.resolvePath(sPath, null);
+                            String full = resolved.getAbsolutePath();
+                            jdbcTemplate.update("UPDATE job_details SET source_xml_path = ?, xml_file_path = ? WHERE id = ?", full, full, rowId);
+                        } catch (Exception ignored) {}
+                    }
+                }
             } catch (Exception ignored) {}
 
             // Discover and backfill from Spring Batch tables if any executions exist
@@ -382,6 +403,24 @@ public class BatchPipelineJobService {
     private void persistJobToDb(JobLaunchRequest req) {
         if (jdbcTemplate == null || req == null) return;
         try {
+            // Resolve full absolute path for XML file
+            String xmlPath = req.getSourceXmlPath();
+            if (xmlPath == null || xmlPath.trim().isEmpty()) {
+                xmlPath = req.getXmlFilePath();
+            }
+            if (xmlPath != null && !xmlPath.trim().isEmpty()) {
+                try {
+                    File resolved = xmlSchemaDiscoveryService.resolvePath(xmlPath, null);
+                    xmlPath = resolved.getAbsolutePath();
+                } catch (Exception ignored) {
+                    try {
+                        xmlPath = new File(xmlPath).getAbsolutePath();
+                    } catch (Exception ignored2) {}
+                }
+                req.setXmlFilePath(xmlPath);
+                req.setSourceXmlPath(xmlPath);
+            }
+
             String dbCfgJson = null;
             if (req.getDbConfig() != null) {
                 dbCfgJson = objectMapper.writeValueAsString(req.getDbConfig());
@@ -545,6 +584,18 @@ public class BatchPipelineJobService {
         if (req == null) {
             throw new IllegalArgumentException("JobLaunchRequest cannot be null.");
         }
+        if (req.getSourceXmlPath() != null || req.getXmlFilePath() != null) {
+            String path = req.getSourceXmlPath() != null && !req.getSourceXmlPath().trim().isEmpty()
+                    ? req.getSourceXmlPath() : req.getXmlFilePath();
+            try {
+                File res = xmlSchemaDiscoveryService.resolvePath(path, null);
+                path = res.getAbsolutePath();
+            } catch (Exception ignored) {
+                try { path = new File(path).getAbsolutePath(); } catch (Exception ignored2) {}
+            }
+            req.setSourceXmlPath(path);
+            req.setXmlFilePath(path);
+        }
         if (req.getJobId() == null || req.getJobId().trim().isEmpty()) {
             req.setJobId("JOB-" + System.currentTimeMillis() + "-" + idSequence.incrementAndGet());
         }
@@ -594,8 +645,42 @@ public class BatchPipelineJobService {
             }
         }
         List<JobLaunchRequest> result = new ArrayList<>(byId.values());
+        for (JobLaunchRequest job : result) {
+            enrichJobWithTelemetry(job);
+        }
         result.sort((a, b) -> Long.compare(b.getId() != null ? b.getId() : 0, a.getId() != null ? a.getId() : 0));
         return result;
+    }
+
+    private void enrichJobWithTelemetry(JobLaunchRequest job) {
+        if (job == null) return;
+        String execId = job.getJobExecutionId();
+        if (execId == null || execId.trim().isEmpty()) {
+            execId = job.getJobId();
+        }
+        if (execId == null || execId.trim().isEmpty()) return;
+
+        try {
+            JobTelemetryResponse telem = getTelemetry(execId);
+            if (telem != null) {
+                if (telem.getTotalRead() > 0) job.setTotalRead(telem.getTotalRead());
+                if (telem.getTotalWritten() > 0) job.setTotalWritten(telem.getTotalWritten());
+                job.setTotalErrors(telem.getRecordsFailed() + telem.getRecordsSkipped());
+                if (telem.getStartTime() != null) job.setStartTime(telem.getStartTime());
+                if (telem.getEndTime() != null) job.setEndTime(telem.getEndTime());
+                if (telem.getDuration() != null) job.setDuration(telem.getDuration());
+                if (telem.getTableWriteCounts() != null && !telem.getTableWriteCounts().isEmpty()) {
+                    job.setTableWriteCounts(telem.getTableWriteCounts());
+                }
+                if (telem.getTargetTables() != null && !telem.getTargetTables().isEmpty()) {
+                    job.setTargetTables(telem.getTargetTables());
+                }
+                if (telem.getStatus() != null && !telem.getStatus().equalsIgnoreCase("UNKNOWN") && !telem.getStatus().trim().isEmpty()) {
+                    job.setStatus(telem.getStatus());
+                    job.setLastRunStatus(telem.getStatus());
+                }
+            }
+        } catch (Exception ignored) {}
     }
 
     public boolean deleteJob(String jobId) {
@@ -930,88 +1015,71 @@ public class BatchPipelineJobService {
     }
 
     public JobTelemetryResponse getTelemetry(String execId) {
-        JobTelemetryResponse telem = telemetryStore.get(execId);
-        if (telem == null) {
-            telem = xmlStreamingParserService.getTelemetry(execId);
+        if (execId == null || execId.trim().isEmpty()) {
+            return new JobTelemetryResponse();
         }
+        final String inputId = execId.trim();
+
+        // 1. Direct lookup in in-memory telemetryStore
+        JobTelemetryResponse telem = telemetryStore.get(inputId);
         if (telem == null) {
-            telem = new JobTelemetryResponse();
-            telem.setJobExecutionId(execId);
-            telem.setExecutionId(execId);
-            String jobId = executionToJobMap.get(execId);
-            if (jobId == null) {
+            telem = xmlStreamingParserService.getTelemetry(inputId);
+        }
+
+        // 2. Identify the JobLaunchRequest matching inputId (by jobId, executionId, jobExecutionId, or id)
+        JobLaunchRequest req = jobStore.get(inputId);
+        if (req == null) {
+            for (JobLaunchRequest r : jobStore.values()) {
+                if (inputId.equalsIgnoreCase(r.getJobId())
+                        || inputId.equalsIgnoreCase(r.getExecutionId())
+                        || inputId.equalsIgnoreCase(r.getJobExecutionId())
+                        || inputId.equals(String.valueOf(r.getId()))) {
+                    req = r;
+                    break;
+                }
+            }
+        }
+        if (req == null) {
+            loadJobsFromDatabase();
+            req = jobStore.get(inputId);
+            if (req == null) {
                 for (JobLaunchRequest r : jobStore.values()) {
-                    if (execId.equals(r.getJobExecutionId())) {
-                        jobId = r.getJobId();
+                    if (inputId.equalsIgnoreCase(r.getJobId())
+                            || inputId.equalsIgnoreCase(r.getExecutionId())
+                            || inputId.equalsIgnoreCase(r.getJobExecutionId())
+                            || inputId.equals(String.valueOf(r.getId()))) {
+                        req = r;
                         break;
                     }
                 }
             }
-            if (jobId != null) {
-                telem.setJobId(jobId);
-                JobLaunchRequest req = jobStore.get(jobId);
-                if (req != null) {
-                    telem.setStatus(req.getStatus());
-                    telem.setStreamingState(req.getStatus());
-                    telem.setStartTime(req.getStartTime());
-                    telem.setEndTime(req.getEndTime());
-                    telem.setDuration(req.getDuration());
-                    telem.setTotalWritten(req.getTotalWritten() != null ? req.getTotalWritten() : 0L);
-                    telem.setTotalRead(req.getTotalRead() != null ? req.getTotalRead() : 0L);
-                    telem.setRecordsWritten(telem.getTotalWritten());
-                    telem.setRecordsRead(telem.getTotalRead());
-                    telem.setTotalRecords(telem.getTotalWritten());
-                    telem.setTableWriteCounts(req.getTableWriteCounts());
-                    telem.setTableCounts(req.getTableWriteCounts());
-                    telem.setTableRowCounts(req.getTableWriteCounts());
-                    telem.setTargetTables(req.getTargetTables());
+        }
 
-                    // If table counts are empty but target tables exist, try querying database
-                    if (telem.getTableWriteCounts().isEmpty() && req.getDbConfig() != null && !telem.getTargetTables().isEmpty()) {
-                        Map<String, Long> dbCounts = new HashMap<>();
-                        for (String tbl : telem.getTargetTables()) {
-                            try {
-                                Long cnt = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + tbl, Long.class);
-                                if (cnt != null && cnt > 0) {
-                                    dbCounts.put(tbl, cnt);
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                        if (!dbCounts.isEmpty()) {
-                            telem.setTableWriteCounts(dbCounts);
-                            telem.setTableCounts(dbCounts);
-                            telem.setTableRowCounts(dbCounts);
-                            long sum = dbCounts.values().stream().mapToLong(Long::longValue).sum();
-                            if (telem.getTotalWritten() == 0) {
-                                telem.setTotalWritten(sum);
-                                telem.setTotalRead(sum);
-                                telem.setRecordsWritten(sum);
-                                telem.setRecordsRead(sum);
-                                telem.setTotalRecords(sum);
-                            }
-                        }
-                    }
-
-                    // Pull error logs if any
-                    if (req.getDbConfig() != null) {
-                        try {
-                            List<ErrorLogRecord> errLogs = auditGovernanceService.listErrorLogs(req.getDbConfig(), execId, 50);
-                            if (errLogs != null && !errLogs.isEmpty()) {
-                                telem.setErrorLogs(errLogs);
-                                if ("FAILED".equalsIgnoreCase(req.getStatus()) && telem.getErrorMessage() == null) {
-                                    telem.setErrorMessage(errLogs.get(0).getErrorMessage());
-                                    telem.setMessage(errLogs.get(0).getErrorMessage());
-                                }
-                            }
-                        } catch (Exception ignored) {}
-                    }
+        // 3. Try looking up in telemetryStore using alternative keys (jobExecutionId or jobId)
+        if (telem == null && req != null) {
+            if (req.getJobExecutionId() != null) {
+                telem = telemetryStore.get(req.getJobExecutionId());
+                if (telem == null) {
+                    telem = xmlStreamingParserService.getTelemetry(req.getJobExecutionId());
                 }
             }
+            if (telem == null && req.getJobId() != null) {
+                telem = telemetryStore.get(req.getJobId());
+            }
+        }
+
+        // 4. If telem is null or contains all 0s for a completed job, reconstruct from DB
+        boolean needsDbHydration = (telem == null)
+                || (telem.getTotalWritten() == 0 && req != null && "COMPLETED".equalsIgnoreCase(req.getStatus()));
+
+        if (needsDbHydration) {
+            telem = buildTelemetryFromDb(inputId, req, telem);
         }
 
         // Live streaming telemetry update while Spring Batch is running
         if (dynamicBatchJobService != null) {
-            DynamicJdbcBatchWriter writer = dynamicBatchJobService.getActiveWriter(execId);
+            String checkExecId = req != null && req.getJobExecutionId() != null ? req.getJobExecutionId() : inputId;
+            DynamicJdbcBatchWriter writer = dynamicBatchJobService.getActiveWriter(checkExecId);
             if (writer != null) {
                 long totalWritten = writer.getTotalRowsWritten();
                 Map<String, Long> writeCounts = writer.getTableWriteCounts();
@@ -1033,7 +1101,7 @@ public class BatchPipelineJobService {
                 telem.setWriteThroughput(throughput);
                 telem.setReadThroughput(throughput);
             }
-            DatabaseErrorSkipListener listener = dynamicBatchJobService.getActiveSkipListener(execId);
+            DatabaseErrorSkipListener listener = dynamicBatchJobService.getActiveSkipListener(checkExecId);
             if (listener != null) {
                 List<MigrationErrorRecord> errs = listener.getRecentErrors();
                 if (errs != null && !errs.isEmpty()) {
@@ -1042,20 +1110,174 @@ public class BatchPipelineJobService {
             }
         }
 
-        // Fallback for target tables if still empty
-        String jId = telem.getJobId() != null ? telem.getJobId() : executionToJobMap.get(execId);
-        if (jId != null) {
-            JobLaunchRequest req = jobStore.get(jId);
-            if (req != null) {
-                if (telem.getTargetTables() == null || telem.getTargetTables().isEmpty()) {
-                    telem.setTargetTables(req.getTargetTables());
-                }
-                if (telem.getTableWriteCounts().isEmpty() && !req.getTableWriteCounts().isEmpty()) {
-                    telem.setTableWriteCounts(req.getTableWriteCounts());
-                    telem.setTableCounts(req.getTableWriteCounts());
-                    telem.setTableRowCounts(req.getTableWriteCounts());
-                }
+        if (telem != null && req != null) {
+            if (telem.getJobId() == null) telem.setJobId(req.getJobId());
+            if (telem.getTargetTables() == null || telem.getTargetTables().isEmpty()) {
+                List<String> tbls = req.getTableOrder() != null && !req.getTableOrder().isEmpty()
+                        ? req.getTableOrder()
+                        : (req.getTargetTables() != null ? req.getTargetTables() : Collections.emptyList());
+                telem.setTargetTables(tbls);
             }
+            // Cache enriched telemetry under both keys
+            telemetryStore.put(inputId, telem);
+            if (req.getJobExecutionId() != null) telemetryStore.put(req.getJobExecutionId(), telem);
+            if (req.getJobId() != null) telemetryStore.put(req.getJobId(), telem);
+        }
+
+        return telem != null ? telem : new JobTelemetryResponse();
+    }
+
+    private JobTelemetryResponse buildTelemetryFromDb(String inputId, JobLaunchRequest req, JobTelemetryResponse existing) {
+        JobTelemetryResponse telem = existing != null ? existing : new JobTelemetryResponse();
+        String execId = req != null && req.getJobExecutionId() != null ? req.getJobExecutionId() : inputId;
+        telem.setJobExecutionId(execId);
+        telem.setExecutionId(execId);
+
+        if (req != null) {
+            telem.setJobId(req.getJobId());
+            String status = req.getStatus();
+            if (status == null || "UNKNOWN".equalsIgnoreCase(status) || status.trim().isEmpty()) {
+                status = req.getLastRunStatus() != null ? req.getLastRunStatus() : "COMPLETED";
+            }
+            telem.setStatus(status);
+            telem.setStreamingState(status);
+            telem.setStartTime(req.getStartTime() != null ? req.getStartTime() : req.getLastRunAt());
+            telem.setEndTime(req.getEndTime());
+            telem.setDuration(req.getDuration());
+            List<String> tbls = req.getTableOrder() != null && !req.getTableOrder().isEmpty()
+                    ? req.getTableOrder()
+                    : (req.getTargetTables() != null ? req.getTargetTables() : Collections.emptyList());
+            telem.setTargetTables(tbls);
+        } else {
+            telem.setStatus("COMPLETED");
+        }
+
+        // 1. Query Spring Batch tables in application DB
+        if (jdbcTemplate != null) {
+            try {
+                String searchId = req != null && req.getJobExecutionId() != null ? req.getJobExecutionId() : inputId;
+                List<Map<String, Object>> batchRows = jdbcTemplate.queryForList("""
+                    SELECT 
+                        e.job_execution_id,
+                        e.start_time,
+                        e.end_time,
+                        e.status,
+                        COALESCE(SUM(s.read_count), 0) AS total_read,
+                        COALESCE(SUM(s.write_count), 0) AS total_write,
+                        COALESCE(SUM(s.read_skip_count + s.write_skip_count), 0) AS total_errors
+                    FROM batch_job_execution e
+                    LEFT JOIN batch_job_execution_params p ON e.job_execution_id = p.job_execution_id
+                    LEFT JOIN batch_step_execution s ON e.job_execution_id = s.job_execution_id
+                    WHERE p.parameter_value = ? 
+                       OR CAST(e.job_execution_id AS VARCHAR(64)) = ?
+                       OR p.parameter_value = ?
+                    GROUP BY e.job_execution_id, e.start_time, e.end_time, e.status
+                    ORDER BY e.job_execution_id DESC LIMIT 1
+                """, searchId, searchId, (req != null ? req.getJobId() : searchId));
+
+                if (!batchRows.isEmpty()) {
+                    Map<String, Object> r = batchRows.get(0);
+                    long readCnt = ((Number) r.get("total_read")).longValue();
+                    long writeCnt = ((Number) r.get("total_write")).longValue();
+                    long errCnt = ((Number) r.get("total_errors")).longValue();
+                    String bStatus = (String) r.get("status");
+                    Object stObj = r.get("start_time");
+                    Object etObj = r.get("end_time");
+
+                    telem.setTotalRead(readCnt);
+                    telem.setRecordsRead(readCnt);
+                    telem.setTotalWritten(writeCnt);
+                    telem.setRecordsWritten(writeCnt);
+                    telem.setTotalRecords(writeCnt);
+                    telem.setRecordsFailed(errCnt);
+                    if (bStatus != null && !bStatus.trim().isEmpty()) {
+                        telem.setStatus(bStatus);
+                        telem.setStreamingState(bStatus);
+                    }
+                    if (stObj != null) {
+                        String stStr = stObj.toString();
+                        telem.setStartTime(stStr.substring(0, Math.min(19, stStr.length())));
+                    }
+                    if (etObj != null) {
+                        String etStr = etObj.toString();
+                        telem.setEndTime(etStr.substring(0, Math.min(19, etStr.length())));
+                        if (stObj != null && telem.getStartTime() != null) {
+                            try {
+                                Timestamp st = Timestamp.valueOf(telem.getStartTime());
+                                Timestamp et = Timestamp.valueOf(telem.getEndTime());
+                                long diffMs = Math.max(0, et.getTime() - st.getTime());
+                                telem.setDuration(diffMs < 1000 ? (diffMs + "ms") : String.format("%.1fs", diffMs / 1000.0));
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Could not query Spring Batch tables for telemetry: {}", ex.getMessage());
+            }
+        }
+
+        // 2. Query target tables in target database via dataSourceService
+        if (req != null && req.getDbConfig() != null) {
+            try {
+                javax.sql.DataSource targetDs = dataSourceService.getOrCreateDataSource(req.getDbConfig());
+                org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDs);
+                String schema = req.getDbConfig().getSchema();
+                List<String> candidateTables = new ArrayList<>();
+                if (req.getTableOrder() != null && !req.getTableOrder().isEmpty()) {
+                    candidateTables.addAll(req.getTableOrder());
+                } else if (req.getTargetTables() != null && !req.getTargetTables().isEmpty()) {
+                    candidateTables.addAll(req.getTargetTables());
+                } else if (req.getMappings() != null) {
+                    for (FieldMapping m : req.getMappings()) {
+                        if (m.getTargetTable() != null && !candidateTables.contains(m.getTargetTable())) {
+                            candidateTables.add(m.getTargetTable());
+                        }
+                    }
+                }
+
+                Map<String, Long> writeCounts = new LinkedHashMap<>();
+                for (String tbl : candidateTables) {
+                    try {
+                        String fullTblName = (schema != null && !schema.trim().isEmpty()) ? (schema + "." + tbl) : tbl;
+                        Long cnt = targetJdbc.queryForObject("SELECT COUNT(*) FROM " + fullTblName, Long.class);
+                        if (cnt != null && cnt > 0) {
+                            writeCounts.put(tbl, cnt);
+                        }
+                    } catch (Exception ignored) {}
+                }
+
+                if (!writeCounts.isEmpty()) {
+                    telem.setTableWriteCounts(writeCounts);
+                    telem.setTableCounts(writeCounts);
+                    telem.setTableRowCounts(writeCounts);
+                    telem.setTargetTables(new ArrayList<>(writeCounts.keySet()));
+                    telem.setCompletedTables(writeCounts.size());
+                    long sum = writeCounts.values().stream().mapToLong(Long::longValue).sum();
+                    if (telem.getTotalWritten() == 0) {
+                        telem.setTotalWritten(sum);
+                        telem.setTotalRead(sum);
+                        telem.setRecordsWritten(sum);
+                        telem.setRecordsRead(sum);
+                        telem.setTotalRecords(sum);
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Could not query target table counts for telemetry: {}", ex.getMessage());
+            }
+        }
+
+        // Pull error logs if any
+        if (req != null && req.getDbConfig() != null) {
+            try {
+                List<ErrorLogRecord> errLogs = auditGovernanceService.listErrorLogs(req.getDbConfig(), execId, 50);
+                if (errLogs != null && !errLogs.isEmpty()) {
+                    telem.setErrorLogs(errLogs);
+                    if ("FAILED".equalsIgnoreCase(req.getStatus()) && telem.getErrorMessage() == null) {
+                        telem.setErrorMessage(errLogs.get(0).getErrorMessage());
+                        telem.setMessage(errLogs.get(0).getErrorMessage());
+                    }
+                }
+            } catch (Exception ignored) {}
         }
 
         return telem;

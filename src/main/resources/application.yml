@@ -29,7 +29,7 @@ spring:
       initialize-schema: never
       table-prefix: BATCH_
     job:
-      enabled: false  
+      enabled: true  
 
   servlet:
     multipart:

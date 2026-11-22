@@ -36,33 +36,45 @@ public class XmlSchemaDiscoveryService {
         fileName = fileName.trim().replaceAll("^\"|\"$", "").replaceAll("^'|'$", "");
 
         File f = new File(fileName);
-        if (f.exists() && f.isFile()) return f;
+        if (f.exists() && f.isFile()) return f.getAbsoluteFile();
 
         if (hintPath != null && !hintPath.trim().isEmpty()) {
             File hint = new File(hintPath.trim().replaceAll("^\"|\"$", ""));
-            if (hint.exists() && hint.isFile()) return hint;
+            if (hint.exists() && hint.isFile()) return hint.getAbsoluteFile();
             if (hint.isDirectory()) {
                 File nested = new File(hint, fileName);
-                if (nested.exists() && nested.isFile()) return nested;
+                if (nested.exists() && nested.isFile()) return nested.getAbsoluteFile();
             }
         }
 
         File uploads = new File("uploads", fileName);
-        if (uploads.exists() && uploads.isFile()) return uploads;
+        if (uploads.exists() && uploads.isFile()) return uploads.getAbsoluteFile();
 
         File sample = new File("sample-data", fileName);
-        if (sample.exists() && sample.isFile()) return sample;
+        if (sample.exists() && sample.isFile()) return sample.getAbsoluteFile();
 
         Path ws = Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
         Path p = ws.resolve(fileName);
-        if (Files.exists(p) && Files.isRegularFile(p)) return p.toFile();
+        if (Files.exists(p) && Files.isRegularFile(p)) return p.toFile().getAbsoluteFile();
 
         // Search in uploads or sample-data by base name
         String baseName = Paths.get(fileName).getFileName().toString();
         File uBase = new File("uploads", baseName);
-        if (uBase.exists() && uBase.isFile()) return uBase;
+        if (uBase.exists() && uBase.isFile()) return uBase.getAbsoluteFile();
         File sBase = new File("sample-data", baseName);
-        if (sBase.exists() && sBase.isFile()) return sBase;
+        if (sBase.exists() && sBase.isFile()) return sBase.getAbsoluteFile();
+
+        // Search in user home and Downloads
+        String userHome = System.getProperty("user.home");
+        if (userHome != null) {
+            File hFile = new File(userHome, baseName);
+            if (hFile.exists() && hFile.isFile()) return hFile.getAbsoluteFile();
+            File dFile = new File(new File(userHome, "Downloads"), baseName);
+            if (dFile.exists() && dFile.isFile()) return dFile.getAbsoluteFile();
+        }
+
+        File tmpFile = new File("/tmp", baseName);
+        if (tmpFile.exists() && tmpFile.isFile()) return tmpFile.getAbsoluteFile();
 
         throw new IllegalArgumentException("Could not find file on local filesystem: " + fileName);
     }
@@ -220,5 +232,117 @@ public class XmlSchemaDiscoveryService {
     private String capitalize(String s) {
         if (s == null || s.isEmpty()) return s;
         return s.substring(0, 1).toUpperCase() + s.substring(1);
+    }
+
+    public Map<String, Object> validateXmlTags(String xmlFilePath, List<FieldMapping> mappings) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<String> mismatches = new ArrayList<>();
+        Set<String> allXmlTags = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        Set<String> allXmlAttributes = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        Map<String, Set<String>> elementAttributes = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        Set<String> allPaths = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+
+        File file;
+        try {
+            file = resolvePath(xmlFilePath, null);
+        } catch (Exception ex) {
+            result.put("success", false);
+            result.put("matched", false);
+            result.put("message", "Could not locate XML file: " + ex.getMessage());
+            result.put("mismatches", List.of("XML file not found: " + xmlFilePath));
+            return result;
+        }
+
+        XMLInputFactory factory = XMLInputFactory.newFactory();
+        factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+        factory.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(Files.newInputStream(file.toPath()), StandardCharsets.UTF_8))) {
+            XMLStreamReader reader = factory.createXMLStreamReader(br);
+            Deque<String> stack = new ArrayDeque<>();
+            long nodeCount = 0;
+            while (reader.hasNext() && nodeCount < 50000) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    nodeCount++;
+                    String localName = reader.getLocalName();
+                    allXmlTags.add(localName);
+                    stack.push(localName);
+
+                    String currentPath = String.join("/", reverseDeque(stack));
+                    allPaths.add(currentPath);
+
+                    int attrCount = reader.getAttributeCount();
+                    Set<String> elemAttrs = elementAttributes.computeIfAbsent(localName, k -> new TreeSet<>(String.CASE_INSENSITIVE_ORDER));
+                    for (int i = 0; i < attrCount; i++) {
+                        String attrName = reader.getAttributeLocalName(i);
+                        allXmlAttributes.add(attrName);
+                        elemAttrs.add(attrName);
+                        allPaths.add(currentPath + "/@" + attrName);
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    if (!stack.isEmpty()) {
+                        stack.pop();
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("Error scanning XML file {}: {}", xmlFilePath, ex.getMessage());
+            result.put("success", false);
+            result.put("matched", false);
+            result.put("message", "Error reading XML: " + ex.getMessage());
+            result.put("mismatches", List.of("Failed to parse XML file: " + ex.getMessage()));
+            return result;
+        }
+
+        if (mappings != null) {
+            for (FieldMapping m : mappings) {
+                if (m == null || m.getXmlField() == null) continue;
+                String xmlField = m.getXmlField().trim();
+                if (com.bnpp.batch.DynamicXmlItemProcessor.isAutogenerated(xmlField)) {
+                    // Requirement 4: ignore autogenerated columns
+                    continue;
+                }
+
+                String clean = xmlField.replaceAll("^/+", "").replaceAll("/+$", "");
+                String[] parts = clean.split("/");
+
+                // Check if full path matched directly
+                boolean matched = false;
+                for (String p : allPaths) {
+                    if (p.equalsIgnoreCase(clean) || p.toLowerCase().endsWith("/" + clean.toLowerCase())) {
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched) continue;
+
+                // If full path didn't match directly, verify each element and attribute part
+                for (int i = 0; i < parts.length; i++) {
+                    String part = parts[i];
+                    if (part.startsWith("@")) {
+                        String attrName = part.substring(1);
+                        String parentElem = i > 0 ? parts[i - 1] : null;
+                        if (parentElem != null && elementAttributes.containsKey(parentElem)) {
+                            if (!elementAttributes.get(parentElem).contains(attrName)) {
+                                mismatches.add(String.format("Attribute '@%s' not found on element <%s> (field: %s)", attrName, parentElem, xmlField));
+                            }
+                        } else if (!allXmlAttributes.contains(attrName)) {
+                            mismatches.add(String.format("Attribute '@%s' not found in XML file (field: %s)", attrName, xmlField));
+                        }
+                    } else {
+                        if (!allXmlTags.contains(part)) {
+                            mismatches.add(String.format("XML tag '<%s>' not found in XML file (field: %s)", part, xmlField));
+                        }
+                    }
+                }
+            }
+        }
+
+        result.put("success", true);
+        result.put("matched", mismatches.isEmpty());
+        result.put("mismatches", mismatches);
+        result.put("detectedTags", allXmlTags);
+        return result;
     }
 }

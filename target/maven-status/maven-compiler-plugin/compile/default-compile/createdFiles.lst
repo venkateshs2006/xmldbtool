@@ -51,6 +51,7 @@ com/bnpp/service/DynamicBatchJobService.class
 com/bnpp/model/TableRelationship.class
 com/bnpp/controller/ConnectionController.class
 com/bnpp/model/LoginRequest.class
+com/bnpp/controller/SchemaDiscoveryController$2.class
 com/bnpp/service/BatchPipelineJobService$2.class
 com/bnpp/batch/DynamicXmlUnmarshaller$ElementFrame.class
 com/bnpp/batch/DynamicJdbcBatchWriter$1.class
