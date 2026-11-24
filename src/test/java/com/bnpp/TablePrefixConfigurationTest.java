@@ -135,6 +135,43 @@ public class TablePrefixConfigurationTest {
     }
 
     @Test
+    public void testProvisionTablesWithCfgDjAndEmptyCanonical() throws Exception {
+        TablePrefixConfig customConfig = new TablePrefixConfig("cfg_dj_", "");
+        SchemaProvisioningService provisioningService = new SchemaProvisioningService(
+                dataSourceService, auditGovernanceService, objectMapper, customConfig
+        );
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("person/@id", "Person", "id", "PK", "NONE"),
+                new FieldMapping("person/name", "Person", "name", "NONE", "NONE")
+        );
+
+        provisioningService.provisionAllTables(testDbConfig, mappings);
+
+        DataSource ds = dataSourceService.getOrCreateDataSource(testDbConfig);
+        try (Connection conn = ds.getConnection();
+             Statement stmt = conn.createStatement()) {
+
+            // Golden source table must be cfg_dj_person
+            try (ResultSet rs = stmt.executeQuery("SELECT * FROM cfg_dj_person")) {
+                assertNotNull(rs);
+            }
+
+            // Canonical table must be person (no gs_ prefix!)
+            try (ResultSet rs = stmt.executeQuery("SELECT * FROM person")) {
+                assertNotNull(rs);
+            }
+
+            // Ensure gs_person does NOT exist
+            assertThrows(Exception.class, () -> {
+                try (ResultSet rs = stmt.executeQuery("SELECT * FROM gs_person")) {
+                    // should fail because gs_person does not exist
+                }
+            });
+        }
+    }
+
+    @Test
     public void testTablePrefixApiEndpoint() {
         ResponseEntity<Map> response = restTemplate.getForEntity("/api/schema/table-prefixes", Map.class);
         assertEquals(200, response.getStatusCode().value());

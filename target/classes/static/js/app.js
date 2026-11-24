@@ -2234,8 +2234,8 @@ function updateTableSequenceBanner() {
 
     let html = '';
     sortedTables.forEach((tbl, idx) => {
-        const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-        const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : (cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl);
+        const cleanTbl = window.cleanEntityName(tbl).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+        const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : cleanTbl;
         html += `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white border border-gray-300 text-gray-800 text-[11px] font-bold shadow-xs">
                 <span class="w-4 h-4 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${idx + 1}</span>
@@ -2249,7 +2249,8 @@ function updateTableSequenceBanner() {
     });
 
     badgesContainer.innerHTML = html;
-    summaryText.textContent = `${rows.length} mappings configured across ${sortedTables.length} tables from ingestion.json (Canonical & gs_<entity> pairs)`;
+    const gsPfx = window.getGsPrefix();
+    summaryText.textContent = `${rows.length} mappings configured across ${sortedTables.length} tables from ingestion.json (Canonical & ${gsPfx}<entity> pairs)`;
 }
 
 function sortTablesByFkDependencies(tables, mappedColsByTable) {
@@ -2424,14 +2425,14 @@ function showJobConfigurationOverview() {
         const flatTableNames = new Set();
         if (mappedTables.length > 0) {
             mappedTables.forEach(mt => {
-                const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
+                const clean = window.cleanEntityName(mt).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : clean);
             });
         } else {
             const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
             rootTokens.forEach(rt => {
-                const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
+                const clean = window.cleanEntityName(rt).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : clean);
             });
         }
 
@@ -2721,12 +2722,13 @@ function updateStep2IngestionStatus() {
     if (flatList) {
         if (distinctTables.length > 0) {
             flatList.innerHTML = distinctTables.map(t => {
-                const clean = t.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                const gsName = window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean);
+                const clean = window.cleanEntityName(t).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+                const gsName = window.toGsTable ? window.toGsTable(clean) : clean;
                 return `<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 font-bold">${escapeHtml(gsName)}</span>`;
             }).join(' ');
         } else {
-            flatList.innerHTML = '<span class="text-gray-400 italic">Defined in ingestion.json (e.g. gs_&lt;entity&gt;)</span>';
+            const gsPfx = window.getGsPrefix();
+            flatList.innerHTML = `<span class="text-gray-400 italic">Defined in ingestion.json (e.g. ${escapeHtml(gsPfx)}&lt;entity&gt;)</span>`;
         }
     }
 

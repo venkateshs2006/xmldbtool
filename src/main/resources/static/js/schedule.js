@@ -1219,13 +1219,14 @@ function renderDiscoveredSchema() {
                 .split(',')
                 .map(s => s.trim().toLowerCase())
                 .filter(Boolean);
-            const isRootEntity = rootTags.includes(tName) || rootTags.includes(tName.replace(/^gs_/, '')) || tName === 'records' || tName === 'items';
-            const isChildOfRoot = rootTags.some(r => tName.startsWith('gs_' + r + '_') || tName.startsWith(r + '_') || (tName.startsWith(r) && tName !== r));
+            const cleanTName = window.cleanEntityName(tName);
+            const isRootEntity = rootTags.includes(tName) || rootTags.includes(cleanTName) || tName === 'records' || tName === 'items';
+            const isChildOfRoot = rootTags.some(r => cleanTName.startsWith(r + '_') || (cleanTName.startsWith(r) && cleanTName !== r));
 
             let tableBadge = '';
             if (tName.endsWith('list') || tName.endsWith('lists')) {
                 tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-amber-100 text-amber-800 border border-amber-200">LOOKUP</span>';
-            } else if (isChildOfRoot || tName === 'gs_address' || tName === 'gs_personname' || tName === 'address' || tName === 'personname') {
+            } else if (isChildOfRoot || cleanTName === 'address' || cleanTName === 'personname') {
                 tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">FK LINKED</span>';
             } else {
                 tableBadge = '<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">GOLDEN SOURCE</span>';
@@ -1534,7 +1535,7 @@ function resolveBestXmlField(xmlField, targetTable, targetCol) {
         return xmlField;
     }
     const colClean = (targetCol || '').toLowerCase().replace(/^@/, '');
-    const tblClean = (targetTable || '').toLowerCase().replace(/^gs_/, '');
+    const tblClean = window.cleanEntityName(targetTable || '').toLowerCase();
 
     // 1. Match tag that has both entity name and column name in path
     const fullMatch = AppState.schema.xmlTags.find(t => {
@@ -1562,11 +1563,7 @@ function autoAlignMappings() {
     if (AppState.mapping.fieldMappings && AppState.mapping.fieldMappings.length > 0) {
         AppState.mapping.fieldMappings.forEach(m => {
             if (m.targetTable) {
-                let clean = m.targetTable.trim();
-                if (clean.toLowerCase().startsWith('gs_')) {
-                    clean = clean.substring(3);
-                }
-                m.targetTable = clean;
+                m.targetTable = window.cleanEntityName(m.targetTable.trim());
             }
         });
         const distinctTables = Array.from(new Set(AppState.mapping.fieldMappings.map(m => m.targetTable).filter(Boolean)));
@@ -1601,8 +1598,7 @@ function autoAlignMappings() {
             if (mappings.length > 0) {
                 mappings.forEach(m => {
                     if (m.targetTable) {
-                        const clean = m.targetTable.trim().toLowerCase().replaceAll(/[^a-zA-Z0-9_]/g, '_');
-                        m.targetTable = clean.startsWith('gs_') ? clean : 'gs_' + clean;
+                        m.targetTable = window.cleanEntityName(m.targetTable.trim().replaceAll(/[^a-zA-Z0-9_]/g, '_'));
                     }
                 });
                 AppState.mapping.fieldMappings = mappings;
@@ -1620,7 +1616,7 @@ function autoAlignMappings() {
                 });
                 updateTableSequenceBanner();
                 updateIngestionJsonStatusBanner();
-                showToast(`Auto-assigned ${mappings.length} mappings strictly to gs_<entity> tables.`, 'success', 'Auto-Assign Complete');
+                showToast(`Auto-assigned ${mappings.length} mappings strictly from ingestion.json.`, 'success', 'Auto-Assign Complete');
                 return;
             }
         } catch (ignored) {}
@@ -1657,10 +1653,7 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
     row.className = 'mapping-row grid grid-cols-12 gap-2.5 items-center p-2.5 rounded-lg bg-white border border-gray-200 hover:border-bnp-emerald transition shadow-xs text-xs';
 
     // Canonical table (final landing)
-    let normTable = selectedTable ? selectedTable.trim() : '';
-    if (normTable.toLowerCase().startsWith('gs_')) {
-        normTable = normTable.substring(3);
-    }
+    let normTable = selectedTable ? window.cleanEntityName(selectedTable) : '';
 
     // Auto-resolve best XML field if current is empty or mismatched
     const effectiveXml = resolveBestXmlField(selectedXml, normTable, selectedCol);
@@ -1682,17 +1675,14 @@ function addMappingRow(selectedXml = '', selectedTable = '', selectedCol = '', s
     let matchedTable = false;
     const availableTables = [];
     (AppState.schema.tables || []).forEach(tbl => {
-        let tName = tbl.tableName;
-        if (tName.toLowerCase().startsWith('gs_')) {
-            tName = tName.substring(3);
-        }
+        let tName = window.cleanEntityName(tbl.tableName);
         if (!availableTables.some(at => at.toLowerCase() === tName.toLowerCase())) {
             availableTables.push(tName);
         }
     });
     (AppState.mapping.fieldMappings || []).forEach(m => {
         if (m.targetTable) {
-            let t = m.targetTable.replace(/^gs_/i, '');
+            let t = window.cleanEntityName(m.targetTable);
             if (!availableTables.some(at => at.toLowerCase() === t.toLowerCase())) {
                 availableTables.push(t);
             }
@@ -1881,8 +1871,8 @@ function updateTableSequenceBanner() {
 
     let html = '';
     sortedTables.forEach((tbl, idx) => {
-        const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-        const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : (cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl);
+        const cleanTbl = window.cleanEntityName(tbl).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+        const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : cleanTbl;
         html += `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white border border-gray-300 text-gray-800 text-[11px] font-bold shadow-xs">
                 <span class="w-4 h-4 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${idx + 1}</span>
@@ -1896,7 +1886,8 @@ function updateTableSequenceBanner() {
     });
 
     badgesContainer.innerHTML = html;
-    summaryText.textContent = `${rows.length} mappings configured across ${sortedTables.length} tables from ingestion.json (Canonical & gs_<entity> pairs)`;
+    const gsPfx = window.getGsPrefix();
+    summaryText.textContent = `${rows.length} mappings configured across ${sortedTables.length} tables from ingestion.json (Canonical & ${gsPfx}<entity> pairs)`;
 }
 
 function sortTablesByFkDependencies(tables, mappedColsByTable) {
@@ -2071,14 +2062,14 @@ function showJobConfigurationOverview() {
         const flatTableNames = new Set();
         if (mappedTables.length > 0) {
             mappedTables.forEach(mt => {
-                const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
+                const clean = window.cleanEntityName(mt).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : clean);
             });
         } else {
             const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
             rootTokens.forEach(rt => {
-                const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
+                const clean = window.cleanEntityName(rt).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : clean);
             });
         }
 
@@ -2495,12 +2486,13 @@ function updateStep2IngestionStatus() {
     if (flatList) {
         if (distinctTables.length > 0) {
             flatList.innerHTML = distinctTables.map(t => {
-                const clean = t.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                const gsName = window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean);
+                const clean = window.cleanEntityName(t).replaceAll(/[^a-zA-Z0-9_]/g, '_');
+                const gsName = window.toGsTable ? window.toGsTable(clean) : clean;
                 return `<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 font-bold">${escapeHtml(gsName)}</span>`;
             }).join(' ');
         } else {
-            flatList.innerHTML = '<span class="text-gray-400 italic">Historical data tracking tables (e.g. gs_person)</span>';
+            const gsPfx = window.getGsPrefix();
+            flatList.innerHTML = `<span class="text-gray-400 italic">Historical data tracking tables (e.g. ${escapeHtml(gsPfx)}person)</span>`;
         }
     }
 

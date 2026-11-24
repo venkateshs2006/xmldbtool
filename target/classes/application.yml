@@ -3,7 +3,7 @@ server:
 app:
   table-prefix:
     golden-source: "cfg_dj_"
-    canonical: "gs_"
+    canonical: ""
 
 spring:
   application:
