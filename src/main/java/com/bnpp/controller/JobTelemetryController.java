@@ -3,6 +3,7 @@ package com.bnpp.controller;
 import com.bnpp.model.*;
 import com.bnpp.service.AuditGovernanceService;
 import com.bnpp.service.BatchPipelineJobService;
+import com.bnpp.service.DynamicDataSourceService;
 import com.bnpp.service.SystemMetricsService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @RestController
 @RequestMapping
@@ -18,13 +20,16 @@ public class JobTelemetryController {
     private final BatchPipelineJobService batchPipelineJobService;
     private final SystemMetricsService systemMetricsService;
     private final AuditGovernanceService auditGovernanceService;
+    private final DynamicDataSourceService dynamicDataSourceService;
 
     public JobTelemetryController(BatchPipelineJobService batchPipelineJobService,
                                   SystemMetricsService systemMetricsService,
-                                  AuditGovernanceService auditGovernanceService) {
+                                  AuditGovernanceService auditGovernanceService,
+                                  DynamicDataSourceService dynamicDataSourceService) {
         this.batchPipelineJobService = batchPipelineJobService;
         this.systemMetricsService = systemMetricsService;
         this.auditGovernanceService = auditGovernanceService;
+        this.dynamicDataSourceService = dynamicDataSourceService;
     }
 
     @GetMapping("/api/system/metrics")
@@ -75,54 +80,47 @@ public class JobTelemetryController {
         }
     }
 
+    private DbConnectionConfig resolveValidDbConfig() {
+        try {
+            List<JobLaunchRequest> jobs = batchPipelineJobService.getAllJobs();
+            for (JobLaunchRequest j : jobs) {
+                if (j.getDbConfig() != null && j.getDbConfig().getUrl() != null && !j.getDbConfig().getUrl().trim().isEmpty()) {
+                    return j.getDbConfig();
+                }
+            }
+        } catch (Exception ignored) {}
+        return dynamicDataSourceService.getDefaultDbConfig();
+    }
+
     @GetMapping("/api/jobs/file-history")
     public ResponseEntity<List<FileHistoryRecord>> getFileHistory(@RequestParam(value = "limit", defaultValue = "50") int limit) {
-        // Find most recent database configuration from submitted jobs
-        List<JobLaunchRequest> jobs = batchPipelineJobService.getAllJobs();
-        DbConnectionConfig config = null;
-        for (JobLaunchRequest j : jobs) {
-            if (j.getDbConfig() != null) {
-                config = j.getDbConfig();
-                break;
-            }
-        }
-        if (config != null) {
+        DbConnectionConfig config = resolveValidDbConfig();
+        try {
             return ResponseEntity.ok(auditGovernanceService.listFileHistory(config, limit));
+        } catch (Exception ex) {
+            return ResponseEntity.ok(Collections.emptyList());
         }
-        return ResponseEntity.ok(Collections.emptyList());
     }
 
     @GetMapping("/api/jobs/audit-log")
     public ResponseEntity<List<AuditLogRecord>> getAuditLogs(@RequestParam(value = "jobExecutionId", required = false) String execId,
                                                              @RequestParam(value = "limit", defaultValue = "100") int limit) {
-        List<JobLaunchRequest> jobs = batchPipelineJobService.getAllJobs();
-        DbConnectionConfig config = null;
-        for (JobLaunchRequest j : jobs) {
-            if (j.getDbConfig() != null) {
-                config = j.getDbConfig();
-                break;
-            }
-        }
-        if (config != null) {
+        DbConnectionConfig config = resolveValidDbConfig();
+        try {
             return ResponseEntity.ok(auditGovernanceService.listAuditLogs(config, execId, limit));
+        } catch (Exception ex) {
+            return ResponseEntity.ok(Collections.emptyList());
         }
-        return ResponseEntity.ok(Collections.emptyList());
     }
 
     @GetMapping("/api/jobs/error-log")
     public ResponseEntity<List<ErrorLogRecord>> getErrorLogs(@RequestParam(value = "jobExecutionId", required = false) String execId,
                                                              @RequestParam(value = "limit", defaultValue = "100") int limit) {
-        List<JobLaunchRequest> jobs = batchPipelineJobService.getAllJobs();
-        DbConnectionConfig config = null;
-        for (JobLaunchRequest j : jobs) {
-            if (j.getDbConfig() != null) {
-                config = j.getDbConfig();
-                break;
-            }
-        }
-        if (config != null) {
+        DbConnectionConfig config = resolveValidDbConfig();
+        try {
             return ResponseEntity.ok(auditGovernanceService.listErrorLogs(config, execId, limit));
+        } catch (Exception ex) {
+            return ResponseEntity.ok(Collections.emptyList());
         }
-        return ResponseEntity.ok(Collections.emptyList());
     }
 }

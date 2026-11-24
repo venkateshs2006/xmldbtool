@@ -77,6 +77,58 @@ public class SchemaDiscoveryController {
         }
     }
 
+    @PostMapping("/api/schema/generate-ingestion-json")
+    public ResponseEntity<?> generateIngestionJson(@RequestBody Map<String, String> body) {
+        String path = body.get("xmlFilePath");
+        if (path == null) path = body.get("sourceXmlPath");
+        if (path == null) path = body.get("path");
+        if (path == null) path = body.get("xmlContent");
+        if (path == null) path = body.get("xml");
+        if (path == null || path.trim().isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", "xmlFilePath or xmlContent is required."));
+        }
+        try {
+            List<FieldMapping> mappings = xmlSchemaDiscoveryService.generateIngestionJson(path);
+            String json = new com.fasterxml.jackson.databind.ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(mappings);
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "mappings", mappings,
+                    "count", mappings.size(),
+                    "json", json
+            ));
+        } catch (Exception ex) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", ex.getMessage()));
+        }
+    }
+
+    @PostMapping("/api/schema/generate-ingestion-json-upload")
+    public ResponseEntity<?> generateIngestionJsonUpload(@RequestParam("file") org.springframework.web.multipart.MultipartFile file) {
+        try {
+            if (file == null || file.isEmpty()) {
+                return ResponseEntity.badRequest().body(Map.of("success", false, "message", "Uploaded XML file is empty."));
+            }
+            File uploadDir = new File("uploads");
+            if (!uploadDir.exists()) uploadDir.mkdirs();
+            String originalName = file.getOriginalFilename();
+            if (originalName == null || originalName.isBlank()) originalName = "uploaded_" + System.currentTimeMillis() + ".xml";
+            File dest = new File(uploadDir, new File(originalName).getName()).getAbsoluteFile();
+            file.transferTo(dest);
+
+            List<FieldMapping> mappings = xmlSchemaDiscoveryService.generateIngestionJson(dest.getAbsolutePath());
+            String json = new com.fasterxml.jackson.databind.ObjectMapper().writerWithDefaultPrettyPrinter().writeValueAsString(mappings);
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "filePath", dest.getAbsolutePath(),
+                    "fileName", dest.getName(),
+                    "mappings", mappings,
+                    "count", mappings.size(),
+                    "json", json
+            ));
+        } catch (Exception ex) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", ex.getMessage()));
+        }
+    }
+
     @PostMapping("/api/schema/validate-tags")
     public ResponseEntity<?> validateTags(@RequestBody Map<String, Object> body) {
         try {
@@ -174,8 +226,47 @@ public class SchemaDiscoveryController {
                     "discoveredTables", discoveredTables,
                     "createdFlatTables", createdFlatTables,
                     "stagingTables", stagingTables,
+                    "relationships", preview.getRelationships() != null ? preview.getRelationships() : List.of(),
                     "goldenSourcePrefix", cfg.getGoldenSource(),
                     "canonicalPrefix", cfg.getCanonical()
+            ));
+        } catch (Exception ex) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", ex.getMessage()));
+        }
+    }
+
+    @PostMapping("/api/schema/create-foreign-keys")
+    public ResponseEntity<?> createForeignKeys(@RequestBody Map<String, Object> body) {
+        try {
+            Object dbObj = body.get("dbConfig");
+            DbConnectionConfig dbConfig = new com.fasterxml.jackson.databind.ObjectMapper().convertValue(dbObj, DbConnectionConfig.class);
+
+            Object mapObj = body.get("mappings");
+            List<FieldMapping> mappings;
+            if (mapObj instanceof String s) {
+                mappings = schemaProvisioningService.parseMappings(s);
+            } else {
+                mappings = new com.fasterxml.jackson.databind.ObjectMapper().convertValue(mapObj,
+                        new com.fasterxml.jackson.core.type.TypeReference<List<FieldMapping>>() {});
+            }
+
+            com.bnpp.batch.ForeignKeyConstraintTasklet tasklet = new com.bnpp.batch.ForeignKeyConstraintTasklet(
+                    schemaProvisioningService,
+                    dbConfig,
+                    mappings,
+                    "API-" + System.currentTimeMillis(),
+                    "API-FILE",
+                    null,
+                    "api-user"
+            );
+            tasklet.execute(null, null);
+            List<String> created = tasklet.getCreatedConstraints();
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "message", "Successfully applied " + created.size() + " foreign key constraints via Tasklet.",
+                    "createdConstraints", created,
+                    "count", created.size()
             ));
         } catch (Exception ex) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", ex.getMessage()));

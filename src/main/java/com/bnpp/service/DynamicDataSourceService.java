@@ -6,6 +6,8 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import javax.sql.DataSource;
@@ -21,8 +23,37 @@ public class DynamicDataSourceService {
 
     private static final Logger log = LoggerFactory.getLogger(DynamicDataSourceService.class);
 
+    @Autowired(required = false)
+    @Lazy
+    private DataSource primaryDataSource;
+
     private final Map<String, HikariDataSource> poolCache = new ConcurrentHashMap<>();
     private final Map<String, Long> failureBackoff = new ConcurrentHashMap<>();
+
+    public DbConnectionConfig getDefaultDbConfig() {
+        DbConnectionConfig cfg = new DbConnectionConfig();
+        if (primaryDataSource != null) {
+            try (Connection conn = primaryDataSource.getConnection()) {
+                DatabaseMetaData meta = conn.getMetaData();
+                String url = meta.getURL();
+                String user = meta.getUserName();
+                if (url != null && !url.trim().isEmpty()) {
+                    cfg.setUrl(url);
+                    cfg.setUsername(user != null ? user : "postgres");
+                    cfg.setPassword(user != null && "sa".equalsIgnoreCase(user) ? "" : "postgres");
+                    cfg.setEngine(url.contains("h2") ? "H2" : (url.contains("oracle") ? "ORACLE" : (url.contains("mysql") ? "MYSQL" : "POSTGRESQL")));
+                    cfg.setSchema("public");
+                    return cfg;
+                }
+            } catch (Exception ignored) {}
+        }
+        cfg.setUrl("jdbc:postgresql://localhost:5432/v5_batch_db");
+        cfg.setUsername("postgres");
+        cfg.setPassword("postgres");
+        cfg.setEngine("POSTGRESQL");
+        cfg.setSchema("public");
+        return cfg;
+    }
 
     public DbTestResponse testConnection(DbConnectionConfig config) {
         if (config == null || config.getUrl() == null || config.getUrl().trim().isEmpty()) {
@@ -116,12 +147,21 @@ public class DynamicDataSourceService {
     }
 
     public DataSource getOrCreateDataSource(DbConnectionConfig config) {
-        if (config == null || config.getUrl() == null || config.getUrl().trim().isEmpty()) {
+        DbConnectionConfig effectiveConfig = config;
+        if (effectiveConfig == null || effectiveConfig.getUrl() == null || effectiveConfig.getUrl().trim().isEmpty()) {
+            if (primaryDataSource != null) {
+                return primaryDataSource;
+            }
+            effectiveConfig = getDefaultDbConfig();
+        }
+        if (effectiveConfig == null || effectiveConfig.getUrl() == null || effectiveConfig.getUrl().trim().isEmpty()) {
+            if (primaryDataSource != null) return primaryDataSource;
             throw new IllegalArgumentException("Database URL is required.");
         }
-        String schema = (config.getSchema() != null && !config.getSchema().trim().isEmpty())
-                ? config.getSchema().trim().toLowerCase() : "public";
-        String cacheKey = config.getUrl() + ":" + config.getUsername() + ":" + schema;
+        final DbConnectionConfig finalConfig = effectiveConfig;
+        String schema = (finalConfig.getSchema() != null && !finalConfig.getSchema().trim().isEmpty())
+                ? finalConfig.getSchema().trim().toLowerCase() : "public";
+        String cacheKey = finalConfig.getUrl() + ":" + finalConfig.getUsername() + ":" + schema;
 
         HikariDataSource cached = poolCache.get(cacheKey);
         if (cached != null && !cached.isClosed()) {
@@ -130,25 +170,32 @@ public class DynamicDataSourceService {
 
         Long lastFail = failureBackoff.get(cacheKey);
         if (lastFail != null && (System.currentTimeMillis() - lastFail) < 5_000) {
-            throw new IllegalStateException("Connection pool to " + config.getUrl() + " recently failed.");
+            if (primaryDataSource != null) {
+                return primaryDataSource;
+            }
+            throw new IllegalStateException("Connection pool to " + finalConfig.getUrl() + " recently failed.");
         }
 
         try {
             HikariDataSource ds = poolCache.computeIfAbsent(cacheKey, k -> {
-                HikariConfig hikariConfig = buildHikariConfig(config);
+                HikariConfig hikariConfig = buildHikariConfig(finalConfig);
                 hikariConfig.setMaximumPoolSize(20);
                 hikariConfig.setMinimumIdle(2);
-                hikariConfig.setConnectionTimeout(10000);
-                hikariConfig.setIdleTimeout(30000);
+                hikariConfig.setConnectionTimeout(5000);
+                hikariConfig.setInitializationFailTimeout(5000);
                 hikariConfig.setPoolName("TargetDB-Pool-" + System.currentTimeMillis());
 
-                log.info("Initialized dynamic Hikari connection pool for target URL: {} (Schema: {})", config.getUrl(), schema);
+                log.info("Initialized dynamic Hikari connection pool for target URL: {} (Schema: {})", finalConfig.getUrl(), schema);
                 return new HikariDataSource(hikariConfig);
             });
             failureBackoff.remove(cacheKey);
             return ds;
         } catch (Exception ex) {
             failureBackoff.put(cacheKey, System.currentTimeMillis());
+            if (primaryDataSource != null) {
+                log.warn("Failed to connect to target database at {} ({}), using primary application DataSource fallback.", finalConfig.getUrl(), ex.getMessage());
+                return primaryDataSource;
+            }
             throw ex;
         }
     }

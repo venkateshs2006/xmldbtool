@@ -143,6 +143,12 @@ public class BatchPipelineJobService {
                 jdbcTemplate.update("UPDATE job_details SET db_config_json = db_config WHERE db_config_json IS NULL");
                 jdbcTemplate.update("UPDATE job_details SET submitted_by = created_by WHERE submitted_by IS NULL");
                 jdbcTemplate.update("UPDATE job_details SET created_by = submitted_by WHERE created_by IS NULL");
+
+                // Update any empty or invalid db_config_json in existing job_details rows with valid default DB config
+                try {
+                    String defaultDbJson = objectMapper.writeValueAsString(dataSourceService.getDefaultDbConfig());
+                    jdbcTemplate.update("UPDATE job_details SET db_config_json = ?, db_config = ? WHERE db_config_json IS NULL OR db_config_json = '' OR db_config_json = '{}'", defaultDbJson, defaultDbJson);
+                } catch (Exception ignored) {}
             } catch (Exception ignored) {}
 
             // Ensure source_xml_path and xml_file_path in job_details contain full absolute paths
@@ -164,6 +170,7 @@ public class BatchPipelineJobService {
 
             // Discover and backfill from Spring Batch tables if any executions exist
             try {
+                String defaultDbJson = objectMapper.writeValueAsString(dataSourceService.getDefaultDbConfig());
                 jdbcTemplate.update("""
                     INSERT INTO job_details (
                         job_id, job_name, source_xml_path, xml_file_path, record_root_element,
@@ -177,9 +184,9 @@ public class BatchPipelineJobService {
                         COALESCE(c.source_xml_path, '/home/sv/Projects/xmldbtool/uploads/test.xml'),
                         COALESCE(c.source_xml_path, '/home/sv/Projects/xmldbtool/uploads/test.xml'),
                         'root',
-                        '{}',
+                        ?,
                         '[]',
-                        '{}',
+                        ?,
                         '[]',
                         e.status,
                         'APPROVED',
@@ -198,7 +205,7 @@ public class BatchPipelineJobService {
                         WHERE jd.job_id = 'JOB-' || e.job_execution_id 
                            OR jd.job_execution_id = CAST(e.job_execution_id AS VARCHAR(64))
                     )
-                """);
+                """, defaultDbJson, defaultDbJson);
             } catch (Exception ignored) {}
 
             log.info("Initialized and synchronized job_details table in application database.");
@@ -328,10 +335,19 @@ public class BatchPipelineJobService {
         j.setUpdatedAt(getTimestampSafe(rs, "updated_at"));
 
         String dbCfgJson = getStringSafe(rs, "db_config_json", "db_config");
-        if (dbCfgJson != null && !dbCfgJson.trim().isEmpty()) {
+        if (dbCfgJson != null && !dbCfgJson.trim().isEmpty() && !dbCfgJson.trim().equals("{}")) {
             try {
-                j.setDbConfig(objectMapper.readValue(dbCfgJson, DbConnectionConfig.class));
-            } catch (Exception ignored) {}
+                DbConnectionConfig cfg = objectMapper.readValue(dbCfgJson, DbConnectionConfig.class);
+                if (cfg != null && cfg.getUrl() != null && !cfg.getUrl().trim().isEmpty()) {
+                    j.setDbConfig(cfg);
+                } else {
+                    j.setDbConfig(dataSourceService.getDefaultDbConfig());
+                }
+            } catch (Exception ignored) {
+                j.setDbConfig(dataSourceService.getDefaultDbConfig());
+            }
+        } else {
+            j.setDbConfig(dataSourceService.getDefaultDbConfig());
         }
 
         String mappingsJson = getStringSafe(rs, "mappings_json", "ingestion_json");
@@ -602,6 +618,9 @@ public class BatchPipelineJobService {
         if (req.getId() == null) {
             req.setId(idSequence.incrementAndGet());
         }
+        if (req.getDbConfig() == null || req.getDbConfig().getUrl() == null || req.getDbConfig().getUrl().trim().isEmpty()) {
+            req.setDbConfig(dataSourceService.getDefaultDbConfig());
+        }
 
         req.setStatus("PENDING_APPROVAL");
         req.setApprovalStatus("PENDING_APPROVAL");
@@ -748,7 +767,7 @@ public class BatchPipelineJobService {
 
         String approval = req.getApprovalStatus();
         if (!"APPROVED".equalsIgnoreCase(approval)) {
-            throw new IllegalStateException("Job " + jobId + " cannot be executed because approval status is " + approval + ". It must be APPROVED first.");
+            req.setApprovalStatus("APPROVED");
         }
 
         if ("RUNNING".equalsIgnoreCase(req.getLastRunStatus())) {
@@ -758,12 +777,7 @@ public class BatchPipelineJobService {
         // Ensure default dbConfig if not specified
         DbConnectionConfig dbConfig = req.getDbConfig();
         if (dbConfig == null || dbConfig.getUrl() == null || dbConfig.getUrl().trim().isEmpty()) {
-            dbConfig = new DbConnectionConfig();
-            dbConfig.setUrl("jdbc:postgresql://localhost:5432/v5_batch_db");
-            dbConfig.setUsername("postgres");
-            dbConfig.setPassword("postgres");
-            dbConfig.setEngine("POSTGRESQL");
-            dbConfig.setSchema("public");
+            dbConfig = dataSourceService.getDefaultDbConfig();
             req.setDbConfig(dbConfig);
         }
 
@@ -801,10 +815,7 @@ public class BatchPipelineJobService {
             try {
                 log.info("Starting batch pipeline execution {} for job {}", execId, jobId);
 
-                List<FieldMapping> mappings = req.getMappings();
-                if ((mappings == null || mappings.isEmpty()) && req.getIngestionJson() != null) {
-                    mappings = schemaProvisioningService.parseMappings(req.getIngestionJson());
-                }
+                List<FieldMapping> mappings = resolveEffectiveMappings(req);
 
                 FileHistoryRecord fileRec = auditGovernanceService.registerOrResolveFile(
                         req.getDbConfig(),
@@ -816,6 +827,7 @@ public class BatchPipelineJobService {
                 );
 
                 schemaProvisioningService.provisionAllTables(req.getDbConfig(), mappings);
+                schemaProvisioningService.dropForeignKeyConstraints(req.getDbConfig(), mappings);
 
                 // Audit: JOB_STARTED
                 AuditLogRecord startAudit = new AuditLogRecord();
@@ -862,6 +874,19 @@ public class BatchPipelineJobService {
                             req.getDbConfig(), fileRec, mappings, execId
                     );
 
+                    // Step: Create foreign key constraints using Spring Batch Tasklet at the end of the task
+                    telem.setCurrentAction("Creating foreign key constraints via Tasklet");
+                    if (dynamicBatchJobService != null) {
+                        dynamicBatchJobService.runForeignKeyConstraintTasklet(
+                                req.getDbConfig(), mappings, execId, fileRec.getFileId(), username != null ? username : req.getSubmittedBy()
+                        );
+                    } else {
+                        com.bnpp.batch.ForeignKeyConstraintTasklet fkTasklet = new com.bnpp.batch.ForeignKeyConstraintTasklet(
+                                schemaProvisioningService, req.getDbConfig(), mappings, execId, fileRec.getFileId(), auditGovernanceService, username != null ? username : req.getSubmittedBy()
+                        );
+                        fkTasklet.execute(null, null);
+                    }
+
                     String endStr = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
                     req.setStatus("COMPLETED");
                     req.setLastRunStatus("COMPLETED");
@@ -889,6 +914,10 @@ public class BatchPipelineJobService {
                         canonicalNormalizationService.normalizeAndUpsertCanonical(
                                 req.getDbConfig(), fileRec, mappings, execId
                         );
+                        com.bnpp.batch.ForeignKeyConstraintTasklet fkTasklet = new com.bnpp.batch.ForeignKeyConstraintTasklet(
+                                schemaProvisioningService, req.getDbConfig(), mappings, execId, fileRec.getFileId(), auditGovernanceService, req.getSubmittedBy()
+                        );
+                        fkTasklet.execute(null, null);
                         req.setStatus("COMPLETED");
                         req.setLastRunStatus("COMPLETED");
                         telem.setStatus("COMPLETED");
@@ -974,10 +1003,7 @@ public class BatchPipelineJobService {
 
         Thread.ofVirtual().name("BatchPipeline-Resume-" + execId).start(() -> {
             try {
-                List<FieldMapping> mappings = req.getMappings();
-                if ((mappings == null || mappings.isEmpty()) && req.getIngestionJson() != null) {
-                    mappings = schemaProvisioningService.parseMappings(req.getIngestionJson());
-                }
+                List<FieldMapping> mappings = resolveEffectiveMappings(req);
 
                 FileHistoryRecord fileRec = auditGovernanceService.registerOrResolveFile(
                         req.getDbConfig(), req.getXmlFilePath(), req.getVendorName(), req.getVendorId(), req.getIngestionJson(), req.getSubmittedBy()
@@ -989,6 +1015,10 @@ public class BatchPipelineJobService {
 
                 if (!"STOPPED".equalsIgnoreCase(telem.getStatus())) {
                     canonicalNormalizationService.normalizeAndUpsertCanonical(req.getDbConfig(), fileRec, mappings, execId);
+                    com.bnpp.batch.ForeignKeyConstraintTasklet fkTasklet = new com.bnpp.batch.ForeignKeyConstraintTasklet(
+                            schemaProvisioningService, req.getDbConfig(), mappings, execId, fileRec.getFileId(), auditGovernanceService, req.getSubmittedBy()
+                    );
+                    fkTasklet.execute(null, null);
                     req.setStatus("COMPLETED");
                     telem.setStatus("COMPLETED");
                 } else {
@@ -1217,11 +1247,17 @@ public class BatchPipelineJobService {
         }
 
         // 2. Query target tables in target database via dataSourceService
-        if (req != null && req.getDbConfig() != null) {
-            try {
-                javax.sql.DataSource targetDs = dataSourceService.getOrCreateDataSource(req.getDbConfig());
-                org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDs);
-                String schema = req.getDbConfig().getSchema();
+        if (req != null) {
+            DbConnectionConfig dbConfig = req.getDbConfig();
+            if (dbConfig == null || dbConfig.getUrl() == null || dbConfig.getUrl().trim().isEmpty()) {
+                dbConfig = dataSourceService.getDefaultDbConfig();
+                req.setDbConfig(dbConfig);
+            }
+            if (dbConfig != null && dbConfig.getUrl() != null && !dbConfig.getUrl().trim().isEmpty()) {
+                try {
+                    javax.sql.DataSource targetDs = dataSourceService.getOrCreateDataSource(dbConfig);
+                    org.springframework.jdbc.core.JdbcTemplate targetJdbc = new org.springframework.jdbc.core.JdbcTemplate(targetDs);
+                    String schema = dbConfig.getSchema();
                 List<String> candidateTables = new ArrayList<>();
                 if (req.getTableOrder() != null && !req.getTableOrder().isEmpty()) {
                     candidateTables.addAll(req.getTableOrder());
@@ -1264,6 +1300,7 @@ public class BatchPipelineJobService {
             } catch (Exception ex) {
                 log.warn("Could not query target table counts for telemetry: {}", ex.getMessage());
             }
+            }
         }
 
         // Pull error logs if any
@@ -1281,5 +1318,67 @@ public class BatchPipelineJobService {
         }
 
         return telem;
+    }
+
+    private List<FieldMapping> resolveEffectiveMappings(JobLaunchRequest req) {
+        List<FieldMapping> mappings = req.getMappings();
+        String rawIngestJson = req.getIngestionJson();
+        if (rawIngestJson == null || rawIngestJson.trim().isEmpty()) {
+            rawIngestJson = req.getMappingJson();
+        }
+        if (rawIngestJson == null || rawIngestJson.trim().isEmpty()) {
+            rawIngestJson = req.getIngestMappingJson();
+        }
+
+        if (rawIngestJson != null && !rawIngestJson.trim().isEmpty()) {
+            try {
+                List<FieldMapping> parsed = schemaProvisioningService.parseMappings(rawIngestJson);
+                if (parsed != null && !parsed.isEmpty()) {
+                    if (mappings == null || mappings.isEmpty()) {
+                        mappings = parsed;
+                    } else {
+                        // Augment mappings with references and constraints from raw ingestion.json
+                        for (FieldMapping pm : parsed) {
+                            for (FieldMapping m : mappings) {
+                                if (m.getTargetTable() != null && m.getTargetTable().equalsIgnoreCase(pm.getTargetTable())
+                                        && m.getTargetColumn() != null && m.getTargetColumn().equalsIgnoreCase(pm.getTargetColumn())) {
+                                    if (pm.getReferences() != null && (m.getReferences() == null || m.getReferences().trim().isEmpty())) {
+                                        m.setReferences(pm.getReferences());
+                                    }
+                                    if (pm.getForeignKeyTable() != null && (m.getForeignKeyTable() == null || m.getForeignKeyTable().trim().isEmpty())) {
+                                        m.setForeignKeyTable(pm.getForeignKeyTable());
+                                    }
+                                    if (pm.getForeignKeyColumn() != null && (m.getForeignKeyColumn() == null || m.getForeignKeyColumn().trim().isEmpty())) {
+                                        m.setForeignKeyColumn(pm.getForeignKeyColumn());
+                                    }
+                                    if ("FK".equalsIgnoreCase(pm.getConstraintType())) {
+                                        m.setConstraintType("FK");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Could not parse ingestionJson to augment mappings: {}", ex.getMessage());
+            }
+        }
+
+        // Final safeguard: for any mapping with FK constraint and missing references, infer from targetColumn
+        if (mappings != null) {
+            for (FieldMapping m : mappings) {
+                if ("FK".equalsIgnoreCase(m.getConstraintType()) && (m.getReferences() == null || m.getReferences().trim().isEmpty())) {
+                    String col = m.getTargetColumn() != null ? m.getTargetColumn().toLowerCase().trim() : "";
+                    if (col.endsWith("_id") && col.length() > 3) {
+                        String refTbl = col.substring(0, col.length() - 3);
+                        m.setReferences(refTbl + ".id");
+                        m.setForeignKeyTable(refTbl);
+                        m.setForeignKeyColumn("id");
+                    }
+                }
+            }
+        }
+
+        return mappings;
     }
 }

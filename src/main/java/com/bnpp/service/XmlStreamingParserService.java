@@ -486,6 +486,13 @@ public class XmlStreamingParserService {
                     ps.setObject(idx, null);
                 }
             }
+            case "TO_DECIMAL", "TO_DOUBLE", "TO_NUMERIC" -> {
+                try {
+                    ps.setBigDecimal(idx, new java.math.BigDecimal(str.replaceAll("[^0-9.-]", "")));
+                } catch (Exception e) {
+                    ps.setObject(idx, null);
+                }
+            }
             case "TO_BOOLEAN" -> {
                 boolean b = "true".equalsIgnoreCase(str) || "1".equals(str) || "yes".equalsIgnoreCase(str);
                 ps.setBoolean(idx, b);
@@ -705,6 +712,13 @@ public class XmlStreamingParserService {
                 case "TO_LONG" -> {
                     try {
                         yield Long.parseLong(str.replaceAll("[^0-9-]", ""));
+                    } catch (Exception e) {
+                        yield null;
+                    }
+                }
+                case "TO_DECIMAL", "TO_DOUBLE", "TO_NUMERIC" -> {
+                    try {
+                        yield new java.math.BigDecimal(str.replaceAll("[^0-9.-]", ""));
                     } catch (Exception e) {
                         yield null;
                     }

@@ -486,6 +486,9 @@ public class DynamicXmlItemProcessor implements ItemProcessor<Map<String, Object
             case "TO_LONG" -> {
                 try { yield Long.parseLong(str.replaceAll("[^0-9-]", "")); } catch (Exception e) { yield null; }
             }
+            case "TO_DECIMAL", "TO_DOUBLE", "TO_NUMERIC" -> {
+                try { yield new java.math.BigDecimal(str.replaceAll("[^0-9.-]", "")); } catch (Exception e) { yield null; }
+            }
             case "TO_BOOLEAN" -> "true".equalsIgnoreCase(str) || "1".equals(str) || "yes".equalsIgnoreCase(str);
             default -> str;
         };

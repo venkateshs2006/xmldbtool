@@ -4,6 +4,7 @@ import com.bnpp.batch.DatabaseErrorSkipListener;
 import com.bnpp.batch.DynamicJdbcBatchWriter;
 import com.bnpp.batch.DynamicXmlItemProcessor;
 import com.bnpp.batch.DynamicXmlUnmarshaller;
+import com.bnpp.batch.ForeignKeyConstraintTasklet;
 import com.bnpp.batch.StaxXmlItemReader;
 import com.bnpp.config.TablePrefixConfig;
 import com.bnpp.model.*;
@@ -156,6 +157,42 @@ public class DynamicBatchJobService {
 
     public DatabaseErrorSkipListener getActiveSkipListener(String jobExecutionId) {
         return activeListeners.get(jobExecutionId);
+    }
+
+    public JobExecution runForeignKeyConstraintTasklet(DbConnectionConfig dbConfig,
+                                                       List<FieldMapping> mappings,
+                                                       String jobExecutionId,
+                                                       String fileId,
+                                                       String username) throws Exception {
+        ForeignKeyConstraintTasklet tasklet = new ForeignKeyConstraintTasklet(
+                schemaProvisioningService,
+                dbConfig,
+                mappings,
+                jobExecutionId,
+                fileId,
+                auditGovernanceService,
+                username
+        );
+
+        Step step = new StepBuilder("foreignKeyConstraintStep-" + System.currentTimeMillis(), jobRepository)
+                .tasklet(tasklet, transactionManager)
+                .build();
+
+        Job job = new JobBuilder("foreignKeyConstraintJob-" + System.currentTimeMillis(), jobRepository)
+                .start(step)
+                .build();
+
+        JobParameters params = new JobParametersBuilder()
+                .addString("jobExecutionId", jobExecutionId != null ? jobExecutionId : "EXEC-FK")
+                .addString("fileId", fileId != null ? fileId : "unknown")
+                .addString("type", "FOREIGN_KEY_TASKLET")
+                .addLong("timestamp", System.currentTimeMillis())
+                .toJobParameters();
+
+        log.info("Launching Spring Batch Tasklet step for foreign key constraints (execution: {})", jobExecutionId);
+        JobExecution execution = jobLauncher.run(job, params);
+        log.info("Spring Batch ForeignKeyConstraintTasklet finished with status: {}", execution.getStatus());
+        return execution;
     }
 
     private File resolvePhysicalFile(String rawPath) {

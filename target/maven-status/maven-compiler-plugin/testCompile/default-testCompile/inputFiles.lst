@@ -1,5 +1,7 @@
 /home/sv/Projects/xmldbtool/src/test/java/com/bnpp/AuditGovernanceTest.java
 /home/sv/Projects/xmldbtool/src/test/java/com/bnpp/DynamicIngestionIntegrationTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/bnpp/ForeignKeyConstraintCreationTest.java
+/home/sv/Projects/xmldbtool/src/test/java/com/bnpp/IngestionJsonGeneratorTest.java
 /home/sv/Projects/xmldbtool/src/test/java/com/bnpp/RoleGovernanceAndApprovalTest.java
 /home/sv/Projects/xmldbtool/src/test/java/com/bnpp/SpringBatchStaxIngestionPipelineTest.java
 /home/sv/Projects/xmldbtool/src/test/java/com/bnpp/TablePrefixConfigurationTest.java

@@ -8,9 +8,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
@@ -19,6 +26,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class XmlSchemaDiscoveryService {
@@ -343,6 +352,523 @@ public class XmlSchemaDiscoveryService {
         result.put("matched", mismatches.isEmpty());
         result.put("mismatches", mismatches);
         result.put("detectedTags", allXmlTags);
+        return result;
+    }
+
+    private static class EntityDef {
+        String table;
+        String pathStr;
+        EntityDef parent;
+        Map<String, String> attrs = new LinkedHashMap<>();
+        Map<String, FieldInfo> fields = new LinkedHashMap<>();
+        List<String> fieldOrder = new ArrayList<>();
+        boolean hasDirectText = false;
+        String directTextVal = "";
+    }
+
+    private static class FieldInfo {
+        String pathStr;
+        String sampleVal;
+        FieldInfo(String pathStr, String sampleVal) {
+            this.pathStr = pathStr;
+            this.sampleVal = sampleVal;
+        }
+    }
+
+    public List<FieldMapping> generateIngestionJson(String xmlFilePathOrContent) {
+        if (xmlFilePathOrContent == null || xmlFilePathOrContent.trim().isEmpty()) {
+            throw new IllegalArgumentException("XML input cannot be empty.");
+        }
+        String trimmed = xmlFilePathOrContent.trim();
+        if (trimmed.startsWith("<")) {
+            return generateIngestionJsonFromContent(trimmed);
+        }
+        File file = resolvePath(trimmed, null);
+        try {
+            return parseAndGenerateIngestionJson(new org.xml.sax.InputSource(new java.io.FileInputStream(file)));
+        } catch (Exception ex) {
+            log.error("Failed to generate ingestion.json from {}: {}", xmlFilePathOrContent, ex.getMessage(), ex);
+            throw new RuntimeException("Failed to generate ingestion.json: " + ex.getMessage(), ex);
+        }
+    }
+
+    public List<FieldMapping> generateIngestionJsonFromContent(String xmlContent) {
+        try {
+            return parseAndGenerateIngestionJson(new org.xml.sax.InputSource(new java.io.StringReader(xmlContent)));
+        } catch (Exception ex) {
+            log.error("Failed to generate ingestion.json from XML content: {}", ex.getMessage(), ex);
+            throw new RuntimeException("Failed to generate ingestion.json: " + ex.getMessage(), ex);
+        }
+    }
+
+    private List<FieldMapping> parseAndGenerateIngestionJson(org.xml.sax.InputSource inputSource) {
+        try {
+            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+            dbf.setNamespaceAware(false);
+            try {
+                dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+                dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+                dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            } catch (Exception ignored) {}
+
+            DocumentBuilder builder = dbf.newDocumentBuilder();
+            Document doc = builder.parse(inputSource);
+            Element root = doc.getDocumentElement();
+
+            Map<String, EntityDef> entityDefs = new LinkedHashMap<>();
+            List<String> tableOrder = new ArrayList<>();
+
+            scanElement(root, null, doc, new ArrayList<>(), null, entityDefs, tableOrder);
+
+            List<FieldMapping> mappings = new ArrayList<>();
+
+            for (String tbl : tableOrder) {
+                EntityDef edef = entityDefs.get(tbl);
+                String pkAttr = null;
+                for (String a : edef.attrs.keySet()) {
+                    if ("id".equalsIgnoreCase(a) || "code".equalsIgnoreCase(a) || (tbl + "_id").equalsIgnoreCase(a)) {
+                        pkAttr = a;
+                        break;
+                    }
+                }
+
+                String pkChildField = null;
+                if (pkAttr == null) {
+                    for (String f : edef.fieldOrder) {
+                        if ("id".equalsIgnoreCase(f) || "code".equalsIgnoreCase(f) || (tbl + "_id").equalsIgnoreCase(f) || (tbl + "id").equalsIgnoreCase(f)) {
+                            pkChildField = f;
+                            break;
+                        }
+                    }
+                }
+
+                // 1. Primary key (attribute or child field)
+                if (pkAttr != null) {
+                    FieldMapping pk = new FieldMapping();
+                    pk.setXmlField(edef.pathStr + "/@" + pkAttr);
+                    pk.setTargetTable(tbl);
+                    pk.setTargetColumn(pkAttr.toLowerCase());
+                    pk.setConstraintType("PK");
+                    pk.setTransform(detectTransform(edef.attrs.get(pkAttr)));
+                    mappings.add(pk);
+                } else if (pkChildField != null) {
+                    FieldInfo pkInfo = edef.fields.get(pkChildField);
+                    FieldMapping pk = new FieldMapping();
+                    pk.setXmlField(pkInfo.pathStr);
+                    pk.setTargetTable(tbl);
+                    pk.setTargetColumn(pkChildField.toLowerCase());
+                    pk.setConstraintType("PK");
+                    pk.setTransform(detectTransform(pkInfo.sampleVal));
+                    mappings.add(pk);
+                }
+
+                // 2. Other attributes
+                for (Map.Entry<String, String> entry : edef.attrs.entrySet()) {
+                    String a = entry.getKey();
+                    if (a.equalsIgnoreCase(pkAttr)) continue;
+                    FieldMapping m = new FieldMapping();
+                    m.setXmlField(edef.pathStr + "/@" + a);
+                    m.setTargetTable(tbl);
+                    m.setTargetColumn(a.toLowerCase());
+                    if (a.toLowerCase().endsWith("_id") && !a.equalsIgnoreCase("id")) {
+                        String refTable = a.substring(0, a.length() - 3);
+                        m.setConstraintType("FK");
+                        m.setReferences(refTable + ".id");
+                    } else {
+                        m.setConstraintType("NONE");
+                    }
+                    m.setTransform(detectTransform(entry.getValue()));
+                    mappings.add(m);
+                }
+
+                // 3. Direct text content
+                if (edef.hasDirectText) {
+                    FieldMapping m = new FieldMapping();
+                    m.setXmlField(edef.pathStr);
+                    m.setTargetTable(tbl);
+                    m.setTargetColumn("name");
+                    m.setConstraintType("NONE");
+                    m.setTransform(detectTransform(edef.directTextVal));
+                    mappings.add(m);
+                }
+
+                // 4. Parent foreign key (refer parent id as foreign key)
+                if (edef.parent != null) {
+                    EntityDef parent = edef.parent;
+                    String parentPkAttr = null;
+                    for (String pa : parent.attrs.keySet()) {
+                        if ("id".equalsIgnoreCase(pa) || "code".equalsIgnoreCase(pa) || (parent.table + "_id").equalsIgnoreCase(pa)) {
+                            parentPkAttr = pa;
+                            break;
+                        }
+                    }
+                    String parentPkChild = null;
+                    if (parentPkAttr == null) {
+                        for (String pf : parent.fieldOrder) {
+                            if ("id".equalsIgnoreCase(pf) || "code".equalsIgnoreCase(pf) || (parent.table + "_id").equalsIgnoreCase(pf)) {
+                                parentPkChild = pf;
+                                break;
+                            }
+                        }
+                    }
+
+                    String parentPkCol = parentPkAttr != null ? parentPkAttr.toLowerCase() : (parentPkChild != null ? parentPkChild.toLowerCase() : "id");
+                    String fkColName = parent.table + "_" + parentPkCol;
+
+                    if (!edef.fields.containsKey(fkColName)) {
+                        FieldMapping parentFk = new FieldMapping();
+                        if (parentPkAttr != null) {
+                            parentFk.setXmlField(parent.pathStr + "/@" + parentPkAttr);
+                            String tf = detectTransform(parent.attrs.getOrDefault(parentPkAttr, "1"));
+                            parentFk.setTransform("NONE".equals(tf) ? "TO_INT" : tf);
+                        } else if (parentPkChild != null) {
+                            FieldInfo pfi = parent.fields.get(parentPkChild);
+                            parentFk.setXmlField(pfi.pathStr);
+                            String tf = detectTransform(pfi.sampleVal);
+                            parentFk.setTransform("NONE".equals(tf) ? "TO_INT" : tf);
+                        } else {
+                            parentFk.setXmlField(parent.pathStr + "/@" + parentPkCol);
+                            parentFk.setTransform("TO_INT");
+                        }
+                        parentFk.setTargetTable(tbl);
+                        parentFk.setTargetColumn(fkColName);
+                        parentFk.setConstraintType("FK");
+                        parentFk.setReferences(parent.table + "." + parentPkCol);
+                        mappings.add(parentFk);
+                    }
+                }
+
+                // 5. Child fields
+                List<String> orderedFields = groupFields(edef.fieldOrder);
+                for (String fName : orderedFields) {
+                    if (fName.equalsIgnoreCase(pkChildField)) {
+                        // Already added as PK in step 1!
+                        continue;
+                    }
+                    FieldInfo fInfo = edef.fields.get(fName);
+                    FieldMapping fm = new FieldMapping();
+                    fm.setXmlField(fInfo.pathStr);
+                    fm.setTargetTable(tbl);
+                    fm.setTargetColumn(fName);
+
+                    if (fName.endsWith("_id") && !fName.equalsIgnoreCase("id")) {
+                        String refTable = fName.substring(0, fName.length() - 3);
+                        fm.setConstraintType("FK");
+                        fm.setReferences(refTable + ".id");
+                        fm.setTransform(detectTransform(fInfo.sampleVal));
+                    } else {
+                        fm.setConstraintType("NONE");
+                        fm.setTransform(detectTransform(fInfo.sampleVal));
+                    }
+                    mappings.add(fm);
+                }
+            }
+
+            return mappings;
+        } catch (Exception ex) {
+            log.error("Failed to generate ingestion.json: {}", ex.getMessage(), ex);
+            throw new RuntimeException("Failed to generate ingestion.json: " + ex.getMessage(), ex);
+        }
+    }
+
+    private void scanElement(Element elem, Element parent, Document doc, List<String> pathParts, EntityDef parentEntity,
+                             Map<String, EntityDef> entityDefs, List<String> tableOrder) {
+        List<String> rawPath = new ArrayList<>(pathParts);
+        rawPath.add(elem.getTagName());
+        List<String> normPath = collapseConsecutiveDuplicates(rawPath);
+        String pathStr = String.join("/", normPath);
+
+        boolean isEntity = isEntityElement(elem, parent, doc);
+        EntityDef currentEntity = parentEntity;
+
+        if (isEntity) {
+            String tbl = elem.getTagName().toLowerCase();
+            EntityDef edef = entityDefs.get(tbl);
+            if (edef == null) {
+                edef = new EntityDef();
+                edef.table = tbl;
+                edef.pathStr = pathStr;
+                edef.parent = parentEntity;
+                entityDefs.put(tbl, edef);
+                tableOrder.add(tbl);
+            }
+            NamedNodeMap attrMap = elem.getAttributes();
+            if (attrMap != null) {
+                for (int i = 0; i < attrMap.getLength(); i++) {
+                    Node attr = attrMap.item(i);
+                    String k = attr.getNodeName();
+                    String v = attr.getNodeValue() != null ? attr.getNodeValue().trim() : "";
+                    if (!edef.attrs.containsKey(k) || (edef.attrs.get(k).isEmpty() && !v.isEmpty())) {
+                        edef.attrs.put(k, v);
+                    }
+                }
+            }
+
+            List<Element> childElements = getChildElements(elem);
+            String text = getDirectTextContent(elem);
+            if (!text.isEmpty() && childElements.isEmpty()) {
+                edef.hasDirectText = true;
+                if (edef.directTextVal.isEmpty()) {
+                    edef.directTextVal = text;
+                }
+            }
+            currentEntity = edef;
+        }
+
+        List<Element> children = getChildElements(elem);
+        for (Element child : children) {
+            boolean childIsEntity = isEntityElement(child, elem, doc);
+            List<Element> grandChildren = getChildElements(child);
+            if (currentEntity != null && !childIsEntity && grandChildren.isEmpty()) {
+                List<String> cRaw = new ArrayList<>(rawPath);
+                cRaw.add(child.getTagName());
+                String cPath = String.join("/", collapseConsecutiveDuplicates(cRaw));
+                String fName = child.getTagName().toLowerCase();
+                String val = child.getTextContent() != null ? child.getTextContent().trim() : "";
+                if (!currentEntity.fields.containsKey(fName)) {
+                    currentEntity.fields.put(fName, new FieldInfo(cPath, val));
+                    currentEntity.fieldOrder.add(fName);
+                } else if (currentEntity.fields.get(fName).sampleVal.isEmpty() && !val.isEmpty()) {
+                    currentEntity.fields.get(fName).sampleVal = val;
+                }
+
+                // Also inspect leaf child attributes if any (e.g. currency, unit)
+                NamedNodeMap childAttrs = child.getAttributes();
+                if (childAttrs != null && childAttrs.getLength() > 0) {
+                    for (int i = 0; i < childAttrs.getLength(); i++) {
+                        Node cattr = childAttrs.item(i);
+                        String aName = cattr.getNodeName().toLowerCase();
+                        String aVal = cattr.getNodeValue() != null ? cattr.getNodeValue().trim() : "";
+                        String aPath = cPath + "/@" + aName;
+                        String fCol = fName + "_" + aName;
+                        if (!currentEntity.fields.containsKey(fCol)) {
+                            currentEntity.fields.put(fCol, new FieldInfo(aPath, aVal));
+                            currentEntity.fieldOrder.add(fCol);
+                        }
+                    }
+                }
+            }
+            scanElement(child, elem, doc, rawPath, currentEntity, entityDefs, tableOrder);
+        }
+    }
+
+    private boolean isLeafElement(Element e) {
+        if (e == null) return false;
+        NamedNodeMap attrs = e.getAttributes();
+        if (attrs != null && attrs.getLength() > 0) return false;
+        return getChildElements(e).isEmpty();
+    }
+
+    private boolean hasIdChild(Element elem) {
+        List<Element> children = getChildElements(elem);
+        for (Element c : children) {
+            String tag = c.getTagName();
+            if (isLeafElement(c) && ("id".equalsIgnoreCase(tag) || "code".equalsIgnoreCase(tag) || (elem.getTagName() + "_id").equalsIgnoreCase(tag) || (elem.getTagName() + "id").equalsIgnoreCase(tag))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isEntityElement(Element elem, Element parent, Document doc) {
+        if (elem == null) return false;
+
+        // 1. Root element is never an entity unless it is a single-record document (all children are leaves)
+        if (doc != null && elem == doc.getDocumentElement()) {
+            List<Element> children = getChildElements(elem);
+            if (children.isEmpty()) return false;
+            boolean allLeaves = true;
+            for (Element c : children) {
+                if (!isLeafElement(c)) {
+                    allLeaves = false;
+                    break;
+                }
+            }
+            return allLeaves && (hasIdAttribute(elem) || hasIdChild(elem));
+        }
+
+        // 2. Explicit ID or Code attribute
+        if (hasIdAttribute(elem)) {
+            return true;
+        }
+
+        // 3. Explicit ID or Code child element
+        if (hasIdChild(elem)) {
+            return true;
+        }
+
+        // 4. Repeated sibling element under parent with non-leaf content
+        if (parent != null) {
+            List<Element> siblings = getChildElements(parent);
+            int sameTagCount = 0;
+            for (Element s : siblings) {
+                if (s.getTagName().equalsIgnoreCase(elem.getTagName())) {
+                    sameTagCount++;
+                }
+            }
+            if (sameTagCount > 1 && (!getChildElements(elem).isEmpty() || (elem.getAttributes() != null && elem.getAttributes().getLength() > 0))) {
+                return true;
+            }
+
+            // 5. Parent tag name indicates a collection / list container of this element
+            String pTag = parent.getTagName().toLowerCase();
+            String eTag = elem.getTagName().toLowerCase();
+            boolean isPluralMatch = pTag.equals(eTag + "s") ||
+                                    pTag.equals(eTag + "es") ||
+                                    pTag.equals(eTag + "list") ||
+                                    pTag.equals(eTag + "lists") ||
+                                    pTag.endsWith("s") ||
+                                    pTag.endsWith("list") ||
+                                    pTag.endsWith("lists") ||
+                                    pTag.endsWith("records") ||
+                                    pTag.endsWith("items") ||
+                                    pTag.endsWith("data") ||
+                                    pTag.endsWith("collection");
+            if (isPluralMatch && (!getChildElements(elem).isEmpty() || (elem.getAttributes() != null && elem.getAttributes().getLength() > 0))) {
+                return true;
+            }
+        }
+
+        // 6. All children are leaf elements (meaning this element is a record containing columns)
+        List<Element> children = getChildElements(elem);
+        if (!children.isEmpty()) {
+            boolean allChildrenAreLeaves = true;
+            for (Element c : children) {
+                if (!isLeafElement(c)) {
+                    allChildrenAreLeaves = false;
+                    break;
+                }
+            }
+            if (allChildrenAreLeaves) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean hasIdAttribute(Element elem) {
+        NamedNodeMap attrMap = elem.getAttributes();
+        if (attrMap == null) return false;
+        for (int i = 0; i < attrMap.getLength(); i++) {
+            String name = attrMap.item(i).getNodeName();
+            if ("id".equalsIgnoreCase(name) || "code".equalsIgnoreCase(name) || (elem.getTagName() + "_id").equalsIgnoreCase(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<Element> getChildElements(Element elem) {
+        List<Element> list = new ArrayList<>();
+        NodeList nl = elem.getChildNodes();
+        if (nl == null) return list;
+        for (int i = 0; i < nl.getLength(); i++) {
+            Node n = nl.item(i);
+            if (n.getNodeType() == Node.ELEMENT_NODE) {
+                list.add((Element) n);
+            }
+        }
+        return list;
+    }
+
+    private String getDirectTextContent(Element elem) {
+        StringBuilder sb = new StringBuilder();
+        NodeList nl = elem.getChildNodes();
+        if (nl == null) return "";
+        for (int i = 0; i < nl.getLength(); i++) {
+            Node n = nl.item(i);
+            if (n.getNodeType() == Node.TEXT_NODE || n.getNodeType() == Node.CDATA_SECTION_NODE) {
+                sb.append(n.getNodeValue());
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    public static List<String> collapseConsecutiveDuplicates(List<String> pathParts) {
+        List<String> res = new ArrayList<>();
+        for (String p : pathParts) {
+            if (res.isEmpty() || !res.get(res.size() - 1).equalsIgnoreCase(p)) {
+                res.add(p);
+            }
+        }
+        return res;
+    }
+
+    public static String detectTransform(String val) {
+        if (val == null) return "NONE";
+        String s = val.trim();
+        if (s.isEmpty()) return "NONE";
+        if (s.equalsIgnoreCase("true") || s.equalsIgnoreCase("false")) {
+            return "TO_BOOLEAN";
+        }
+        if (s.matches("^-?\\d+$")) {
+            return "TO_INT";
+        }
+        if (s.matches("^-?\\d*\\.\\d+$")) {
+            return "TO_DECIMAL";
+        }
+        return "NONE";
+    }
+
+    public static List<String> groupFields(List<String> fields) {
+        Pattern pattern = Pattern.compile("^(.*?)(\\d+)(.*)$");
+        Map<String, List<int[]>> familyIndices = new LinkedHashMap<>();
+        Map<String, List<String>> familyItems = new LinkedHashMap<>();
+        Map<String, Integer> familyFirstIndex = new LinkedHashMap<>();
+        List<String[]> nonFamily = new ArrayList<>();
+
+        for (int i = 0; i < fields.size(); i++) {
+            String f = fields.get(i);
+            Matcher m = pattern.matcher(f);
+            if (m.matches()) {
+                String prefix = m.group(1);
+                int num = Integer.parseInt(m.group(2));
+                String suffix = m.group(3);
+                String famKey = prefix + "##" + suffix;
+                if (!familyFirstIndex.containsKey(famKey)) {
+                    familyFirstIndex.put(famKey, i);
+                    familyItems.put(famKey, new ArrayList<>());
+                    familyIndices.put(famKey, new ArrayList<>());
+                }
+                familyItems.get(famKey).add(f);
+                familyIndices.get(famKey).add(new int[]{num, familyItems.get(famKey).size() - 1});
+            } else {
+                nonFamily.add(new String[]{String.valueOf(i), f});
+            }
+        }
+
+        class Slot {
+            final int firstIndex;
+            final List<String> items = new ArrayList<>();
+            Slot(int firstIndex) { this.firstIndex = firstIndex; }
+        }
+
+        List<Slot> slots = new ArrayList<>();
+        for (Map.Entry<String, List<int[]>> entry : familyIndices.entrySet()) {
+            String famKey = entry.getKey();
+            int firstIdx = familyFirstIndex.get(famKey);
+            List<int[]> pairs = entry.getValue();
+            pairs.sort(Comparator.comparingInt(p -> p[0]));
+            List<String> rawList = familyItems.get(famKey);
+            Slot slot = new Slot(firstIdx);
+            for (int[] p : pairs) {
+                slot.items.add(rawList.get(p[1]));
+            }
+            slots.add(slot);
+        }
+
+        for (String[] nf : nonFamily) {
+            Slot slot = new Slot(Integer.parseInt(nf[0]));
+            slot.items.add(nf[1]);
+            slots.add(slot);
+        }
+
+        slots.sort(Comparator.comparingInt(s -> s.firstIndex));
+        List<String> result = new ArrayList<>();
+        for (Slot slot : slots) {
+            result.addAll(slot.items);
+        }
         return result;
     }
 }

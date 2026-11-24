@@ -28,16 +28,19 @@ public class CanonicalNormalizationService {
     private final AuditGovernanceService auditGovernanceService;
     private final ObjectMapper objectMapper;
     private final TablePrefixConfig tablePrefixConfig;
+    private final SchemaProvisioningService schemaProvisioningService;
 
     @Autowired
     public CanonicalNormalizationService(DynamicDataSourceService dataSourceService,
                                          AuditGovernanceService auditGovernanceService,
                                          ObjectMapper objectMapper,
-                                         @Autowired(required = false) TablePrefixConfig tablePrefixConfig) {
+                                         @Autowired(required = false) TablePrefixConfig tablePrefixConfig,
+                                         @Autowired(required = false) SchemaProvisioningService schemaProvisioningService) {
         this.dataSourceService = dataSourceService;
         this.auditGovernanceService = auditGovernanceService;
         this.objectMapper = objectMapper;
         this.tablePrefixConfig = tablePrefixConfig != null ? tablePrefixConfig : new TablePrefixConfig();
+        this.schemaProvisioningService = schemaProvisioningService;
     }
 
     private String safeCol(String col) {

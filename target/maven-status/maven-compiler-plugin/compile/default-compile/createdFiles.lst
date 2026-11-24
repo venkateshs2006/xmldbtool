@@ -1,6 +1,8 @@
+com/bnpp/service/XmlSchemaDiscoveryService$FieldInfo.class
 com/bnpp/model/ErrorLogRecord.class
 com/bnpp/service/XmlStreamingParserService.class
 com/bnpp/service/CanonicalNormalizationService$ExistingCanonical.class
+com/bnpp/batch/ForeignKeyConstraintTasklet.class
 com/bnpp/controller/SchemaDiscoveryController$1.class
 com/bnpp/model/FieldMapping.class
 com/bnpp/config/BatchConfig.class
@@ -40,6 +42,7 @@ com/bnpp/config/DatabaseConfig.class
 com/bnpp/service/XmlSchemaDiscoveryService.class
 com/bnpp/model/SchemaDiscoveryResponse.class
 com/bnpp/controller/JobConfigController.class
+com/bnpp/service/XmlSchemaDiscoveryService$EntityDef.class
 com/bnpp/model/TablePreviewData.class
 com/bnpp/XmlDbToolApplication.class
 com/bnpp/controller/UserController.class
@@ -49,7 +52,9 @@ com/bnpp/service/BatchPipelineJobService.class
 com/bnpp/service/UserService$UserRowMapper.class
 com/bnpp/batch/DynamicXmlUnmarshaller.class
 com/bnpp/service/DynamicBatchJobService.class
+com/bnpp/controller/SchemaDiscoveryController$3.class
 com/bnpp/model/TableRelationship.class
+com/bnpp/service/XmlSchemaDiscoveryService$1Slot.class
 com/bnpp/controller/ConnectionController.class
 com/bnpp/model/LoginRequest.class
 com/bnpp/controller/SchemaDiscoveryController$2.class

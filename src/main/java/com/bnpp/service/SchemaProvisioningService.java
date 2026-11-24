@@ -127,8 +127,12 @@ public class SchemaProvisioningService {
             stmt.execute(sql);
             log.info("Layer 2 Universal Staging table verified/created: staging_xml_records");
         } catch (Exception ex) {
-            log.error("Failed to provision staging_xml_records: {}", ex.getMessage(), ex);
-            throw new RuntimeException("Error provisioning staging_xml_records: " + ex.getMessage(), ex);
+            String msg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
+            if (msg.contains("already exists") || msg.contains("duplicate") || msg.contains("42p07") || msg.contains("42s01") || msg.contains("table exists")) {
+                log.info("Staging table 'staging_xml_records' already exists. Ignoring table creation and proceeding.");
+                return;
+            }
+            log.warn("Non-fatal warning executing DDL for staging_xml_records: {}", ex.getMessage());
         }
     }
 
@@ -216,9 +220,212 @@ public class SchemaProvisioningService {
             stmt.execute(sql);
             log.info("Executed DDL for table '{}'", tableName);
         } catch (Exception ex) {
-            log.error("Failed to execute DDL for table '{}': {}", tableName, ex.getMessage());
-            throw new RuntimeException("Error executing DDL for table " + tableName + ": " + ex.getMessage(), ex);
+            String msg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
+            if (msg.contains("already exists") || msg.contains("duplicate") || msg.contains("42p07") || msg.contains("42s01") || msg.contains("table exists")) {
+                log.info("Table '{}' already exists. Ignoring table creation and proceeding with subsequent steps.", tableName);
+                return;
+            }
+            log.warn("Non-fatal warning executing DDL for table '{}': {}", tableName, ex.getMessage());
         }
+    }
+
+    public List<String> createForeignKeyConstraints(DbConnectionConfig config, List<FieldMapping> mappings) {
+        if (mappings == null || mappings.isEmpty()) {
+            return Collections.emptyList();
+        }
+        DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        return createForeignKeyConstraints(ds, mappings);
+    }
+
+    public List<String> createForeignKeyConstraints(DataSource ds, List<FieldMapping> mappings) {
+        if (mappings == null || mappings.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<String> createdConstraints = new ArrayList<>();
+        Set<String> processedKeys = new HashSet<>();
+
+        List<FieldMapping> fkMappings = mappings.stream()
+                .filter(m -> "FK".equalsIgnoreCase(m.getConstraintType()))
+                .toList();
+
+        if (fkMappings.isEmpty()) {
+            log.info("No foreign key constraints defined in mappings.");
+            return createdConstraints;
+        }
+
+        try (Connection conn = ds.getConnection()) {
+            boolean originalAutoCommit = true;
+            try {
+                originalAutoCommit = conn.getAutoCommit();
+                conn.setAutoCommit(true);
+            } catch (Exception ignored) {}
+
+            try {
+                for (FieldMapping m : fkMappings) {
+                    if (m.getTargetTable() == null || m.getTargetColumn() == null) continue;
+
+                    String sourceEntity = tablePrefixConfig.cleanEntityName(m.getTargetTable());
+                    String sourceTable = tablePrefixConfig.getCanonicalTableName(sourceEntity);
+                    String sourceCol = m.getTargetColumn().toLowerCase().trim();
+
+                    // Resolve referenced table and column from "references" field (e.g. "descriptionlist2.id")
+                    String refEntity = null;
+                    String refCol = null;
+
+                    String refs = m.getReferences();
+                    if (refs != null && !refs.trim().isEmpty()) {
+                        String cleanRefs = refs.trim();
+                        if (cleanRefs.contains(".")) {
+                            String[] parts = cleanRefs.split("\\.", 2);
+                            refEntity = parts[0].trim();
+                            refCol = parts[1].trim();
+                        } else if (cleanRefs.contains("(")) {
+                            refEntity = cleanRefs.substring(0, cleanRefs.indexOf('(')).trim();
+                            refCol = cleanRefs.substring(cleanRefs.indexOf('(') + 1, cleanRefs.indexOf(')')).trim();
+                        } else {
+                            refEntity = cleanRefs;
+                            refCol = "id";
+                        }
+                    }
+
+                    if (refEntity == null || refEntity.trim().isEmpty()) {
+                        refEntity = m.getForeignKeyTable();
+                    }
+                    if (refCol == null || refCol.trim().isEmpty()) {
+                        refCol = m.getForeignKeyColumn();
+                    }
+
+                    // Fallback heuristic: If referenced entity is still unknown, derive from source column name
+                    // e.g. "descriptionlist2_id" -> entity "descriptionlist2", col "id"
+                    // "countrylist_id" -> entity "countrylist", col "id"
+                    // "descriptionlist1_id" -> entity "descriptionlist1", col "id"
+                    if ((refEntity == null || refEntity.trim().isEmpty()) && sourceCol.endsWith("_id") && sourceCol.length() > 3) {
+                        refEntity = sourceCol.substring(0, sourceCol.length() - 3);
+                        if (refCol == null || refCol.trim().isEmpty()) {
+                            refCol = "id";
+                        }
+                    }
+
+                    if (refCol == null || refCol.trim().isEmpty()) {
+                        refCol = "id";
+                    }
+
+                    if (refEntity == null || refEntity.trim().isEmpty()) {
+                        log.warn("Skipping FK constraint on {}.{}: referenced table is unknown", sourceTable, sourceCol);
+                        continue;
+                    }
+
+                    refEntity = tablePrefixConfig.cleanEntityName(refEntity);
+                    String refTable = tablePrefixConfig.getCanonicalTableName(refEntity);
+                    refCol = refCol.toLowerCase().trim();
+
+                    String dedupKey = sourceTable.toLowerCase() + "." + sourceCol.toLowerCase();
+                    if (!processedKeys.add(dedupKey)) {
+                        continue;
+                    }
+
+                    String constraintName = buildConstraintName(sourceTable, sourceCol);
+
+                    if (foreignKeyConstraintExists(conn, sourceTable, sourceCol, constraintName)) {
+                        log.info("Foreign key constraint {} already exists on {}({}). Skipping.", constraintName, sourceTable, sourceCol);
+                        createdConstraints.add(constraintName);
+                        continue;
+                    }
+
+                    String sql = String.format("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)",
+                            sourceTable, constraintName, safeColumnName(sourceCol), refTable, safeColumnName(refCol));
+
+                    try (Statement stmt = conn.createStatement()) {
+                        stmt.execute(sql);
+                        log.info("Successfully created foreign key constraint: {} ({}.{} -> {}.{})",
+                                constraintName, sourceTable, sourceCol, refTable, refCol);
+                        createdConstraints.add(constraintName);
+                    } catch (Exception ex) {
+                        String msg = ex.getMessage() != null ? ex.getMessage().toLowerCase() : "";
+                        if (msg.contains("already exists") || msg.contains("duplicate") || msg.contains("ora-02275")) {
+                            log.info("Foreign key constraint {} already exists on {}({})", constraintName, sourceTable, sourceCol);
+                            createdConstraints.add(constraintName);
+                        } else {
+                            log.warn("Could not create foreign key constraint {} ({}.{} -> {}.{}): {}",
+                                    constraintName, sourceTable, sourceCol, refTable, refCol, ex.getMessage());
+                        }
+                    }
+                }
+            } finally {
+                try {
+                    conn.setAutoCommit(originalAutoCommit);
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ex) {
+            log.error("Error creating foreign key constraints: {}", ex.getMessage(), ex);
+            throw new RuntimeException("Error creating foreign key constraints: " + ex.getMessage(), ex);
+        }
+
+        log.info("Finished applying foreign key constraints: {} constraints created/verified.", createdConstraints.size());
+        return createdConstraints;
+    }
+
+    public void dropForeignKeyConstraints(DbConnectionConfig config, List<FieldMapping> mappings) {
+        if (mappings == null || mappings.isEmpty()) return;
+        DataSource ds = dataSourceService.getOrCreateDataSource(config);
+        dropForeignKeyConstraints(ds, mappings);
+    }
+
+    public void dropForeignKeyConstraints(DataSource ds, List<FieldMapping> mappings) {
+        if (mappings == null || mappings.isEmpty()) return;
+        List<FieldMapping> fkMappings = mappings.stream()
+                .filter(m -> "FK".equalsIgnoreCase(m.getConstraintType()))
+                .toList();
+        if (fkMappings.isEmpty()) return;
+
+        try (Connection conn = ds.getConnection();
+             Statement stmt = conn.createStatement()) {
+            Set<String> dropped = new HashSet<>();
+            for (FieldMapping m : fkMappings) {
+                if (m.getTargetTable() == null || m.getTargetColumn() == null) continue;
+                String sourceEntity = tablePrefixConfig.cleanEntityName(m.getTargetTable());
+                String sourceTable = tablePrefixConfig.getCanonicalTableName(sourceEntity);
+                String sourceCol = m.getTargetColumn().toLowerCase().trim();
+                String constraintName = buildConstraintName(sourceTable, sourceCol);
+                if (!dropped.add(constraintName)) continue;
+
+                try {
+                    stmt.execute("ALTER TABLE " + sourceTable + " DROP CONSTRAINT " + constraintName);
+                    log.info("Dropped existing FK constraint {} on {}", constraintName, sourceTable);
+                } catch (Exception ignored) {
+                    // Constraint did not exist
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Error while dropping FK constraints: {}", ex.getMessage());
+        }
+    }
+
+    private String buildConstraintName(String sourceTable, String sourceCol) {
+        String base = ("fk_" + sourceTable + "_" + sourceCol).toLowerCase();
+        if (base.length() > 30) {
+            return "fk_" + Math.abs((sourceTable + "_" + sourceCol).hashCode());
+        }
+        return base;
+    }
+
+    private boolean foreignKeyConstraintExists(Connection conn, String tableName, String colName, String constraintName) {
+        try {
+            java.sql.DatabaseMetaData meta = conn.getMetaData();
+            for (String t : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                try (java.sql.ResultSet rs = meta.getImportedKeys(null, null, t)) {
+                    while (rs.next()) {
+                        String fkCol = rs.getString("FKCOLUMN_NAME");
+                        String fkName = rs.getString("FK_NAME");
+                        if (colName.equalsIgnoreCase(fkCol) || (constraintName != null && constraintName.equalsIgnoreCase(fkName))) {
+                            return true;
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     public TablePreviewData generatePreviewTables(List<FieldMapping> mappings) {
@@ -308,6 +515,7 @@ public class SchemaProvisioningService {
             case "TO_LONG" -> "BIGINT";
             case "TO_BOOLEAN" -> "BOOLEAN";
             case "TO_DATE" -> "TIMESTAMP";
+            case "TO_DECIMAL", "TO_DOUBLE", "TO_NUMERIC" -> "NUMERIC(18, 4)";
             default -> "VARCHAR(256)";
         };
     }

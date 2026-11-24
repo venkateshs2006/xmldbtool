@@ -3,6 +3,7 @@
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/batch/DynamicJdbcBatchWriter.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/batch/DynamicXmlItemProcessor.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/batch/DynamicXmlUnmarshaller.java
+/home/sv/Projects/xmldbtool/src/main/java/com/bnpp/batch/ForeignKeyConstraintTasklet.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/batch/StaxXmlItemReader.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/config/BatchConfig.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/config/DatabaseConfig.java
