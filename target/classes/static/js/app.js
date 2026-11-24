@@ -3,6 +3,67 @@
  * Theme: BNP Paribas Emerald (#00965e) & Dark Grey (#333333) matching workflow.html
  */
 
+window.TablePrefixes = window.TablePrefixes || { goldenSource: 'gs_', canonical: '' };
+
+window.getGsPrefix = function() {
+    return (window.TablePrefixes && window.TablePrefixes.goldenSource !== undefined) ? window.TablePrefixes.goldenSource : 'gs_';
+};
+
+window.getCanonicalPrefix = function() {
+    return (window.TablePrefixes && window.TablePrefixes.canonical !== undefined) ? window.TablePrefixes.canonical : '';
+};
+
+window.cleanEntityName = function(name) {
+    if (!name) return '';
+    let lower = name.toLowerCase().trim();
+    const gs = window.getGsPrefix().toLowerCase();
+    if (gs && lower.startsWith(gs)) {
+        lower = lower.substring(gs.length);
+    } else if (lower.startsWith('gs_')) {
+        lower = lower.substring(3);
+    }
+    const can = window.getCanonicalPrefix().toLowerCase();
+    if (can && lower.startsWith(can)) {
+        lower = lower.substring(can.length);
+    }
+    return lower;
+};
+
+window.toGsTable = function(name) {
+    const clean = window.cleanEntityName(name);
+    return window.getGsPrefix() + clean;
+};
+
+window.toCanonicalTable = function(name) {
+    const clean = window.cleanEntityName(name);
+    return window.getCanonicalPrefix() + clean;
+};
+
+window.isGsTable = function(name) {
+    if (!name) return false;
+    const lower = name.toLowerCase();
+    const gs = window.getGsPrefix().toLowerCase();
+    return (gs && lower.startsWith(gs)) || lower.startsWith('gs_');
+};
+
+async function loadTablePrefixes() {
+    try {
+        const resp = await fetch('/api/schema/table-prefixes');
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.goldenSourcePrefix !== undefined) {
+                window.TablePrefixes = {
+                    goldenSource: data.goldenSourcePrefix,
+                    canonical: data.canonicalPrefix || ''
+                };
+            }
+        }
+    } catch (e) {
+        console.warn('Could not load table prefixes from server:', e);
+    }
+}
+loadTablePrefixes();
+
 // Application State Store
 const AppState = {
     // Current authenticated user session
@@ -1813,6 +1874,12 @@ async function createTargetTablesInDb() {
         });
         const result = await response.json();
         if (response.ok && result.success) {
+            if (result.goldenSourcePrefix !== undefined) {
+                window.TablePrefixes = {
+                    goldenSource: result.goldenSourcePrefix,
+                    canonical: result.canonicalPrefix || ''
+                };
+            }
             AppState.schema.tables = (result.discoveredTables || []).filter(t => !isInternalStagingTable(t.tableName));
             AppState.schema.createdFlatTables = result.createdFlatTables || [];
             AppState.schema.stagingTables = result.stagingTables || [];
@@ -1821,7 +1888,8 @@ async function createTargetTablesInDb() {
             updateStep2IngestionStatus();
             const count = AppState.schema.tables.length;
             const flatCount = (result.createdFlatTables || []).length;
-            showToast(`Successfully created ${count} canonical tables and ${flatCount} matching gs_<entity> flat tables strictly from ingestion.json.`, 'success', 'Tables Provisioned');
+            const gsPfx = window.getGsPrefix();
+            showToast(`Successfully created ${count} canonical tables and ${flatCount} matching ${gsPfx}<entity> flat tables strictly from ingestion.json.`, 'success', 'Tables Provisioned');
         } else {
             showToast(result.message || 'Failed to create tables.', 'error', 'Creation Error');
         }
@@ -2167,7 +2235,7 @@ function updateTableSequenceBanner() {
     let html = '';
     sortedTables.forEach((tbl, idx) => {
         const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-        const gsName = cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl;
+        const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : (cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl);
         html += `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white border border-gray-300 text-gray-800 text-[11px] font-bold shadow-xs">
                 <span class="w-4 h-4 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${idx + 1}</span>
@@ -2357,13 +2425,13 @@ function showJobConfigurationOverview() {
         if (mappedTables.length > 0) {
             mappedTables.forEach(mt => {
                 const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
             });
         } else {
             const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
             rootTokens.forEach(rt => {
                 const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
             });
         }
 
@@ -2654,7 +2722,7 @@ function updateStep2IngestionStatus() {
         if (distinctTables.length > 0) {
             flatList.innerHTML = distinctTables.map(t => {
                 const clean = t.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                const gsName = clean.startsWith('gs_') ? clean : 'gs_' + clean;
+                const gsName = window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean);
                 return `<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 font-bold">${escapeHtml(gsName)}</span>`;
             }).join(' ');
         } else {
@@ -3489,7 +3557,7 @@ function openReviewModal(job) {
     if (job.tableOrder && job.tableOrder.length > 0) {
         tableOrderDiv.innerHTML = job.tableOrder.map((tbl, i) => {
             const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-            const gsName = cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl;
+            const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : (cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl);
             return `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-bnp-emerald font-bold text-xs">
                 <span class="w-3.5 h-3.5 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${i + 1}</span>
@@ -4619,9 +4687,10 @@ function updateTableBreakdown(data) {
         const pct = totalWrittenAll > 0 ? Math.min(100, Math.round((written / totalWrittenAll) * 100)) : 0;
         const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
         const streamState = data.streamingState || (isRunning ? 'STREAMING' : (data.status || 'COMMITTED'));
-        const isGs = tableName.startsWith('gs_');
+        const isGs = (window.isGsTable ? window.isGsTable(tableName) : tableName.startsWith('gs_'));
+        const gsPfx = (window.getGsPrefix ? window.getGsPrefix() : 'gs_');
         const entityBadge = isGs
-            ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">HISTORICAL gs_</span>`
+            ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">HISTORICAL ${escapeHtml(gsPfx)}</span>`
             : `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">CANONICAL</span>`;
 
         html += `

@@ -9,6 +9,8 @@ public class TablePreviewData {
     private List<TableMetadata> tables = new ArrayList<>();
     private List<TableRelationship> relationships = new ArrayList<>();
     private String combinedDdl;
+    private String goldenSourcePrefix = "gs_";
+    private String canonicalPrefix = "";
 
     public TablePreviewData() {}
 
@@ -16,6 +18,30 @@ public class TablePreviewData {
         this.tables = tables;
         this.relationships = relationships;
         this.combinedDdl = combinedDdl;
+    }
+
+    public TablePreviewData(List<TableMetadata> tables, List<TableRelationship> relationships, String combinedDdl, String goldenSourcePrefix, String canonicalPrefix) {
+        this.tables = tables;
+        this.relationships = relationships;
+        this.combinedDdl = combinedDdl;
+        this.goldenSourcePrefix = goldenSourcePrefix;
+        this.canonicalPrefix = canonicalPrefix;
+    }
+
+    public String getGoldenSourcePrefix() {
+        return goldenSourcePrefix;
+    }
+
+    public void setGoldenSourcePrefix(String goldenSourcePrefix) {
+        this.goldenSourcePrefix = goldenSourcePrefix;
+    }
+
+    public String getCanonicalPrefix() {
+        return canonicalPrefix;
+    }
+
+    public void setCanonicalPrefix(String canonicalPrefix) {
+        this.canonicalPrefix = canonicalPrefix;
     }
 
     public List<TableMetadata> getTables() {

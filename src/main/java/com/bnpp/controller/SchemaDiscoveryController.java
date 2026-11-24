@@ -117,6 +117,18 @@ public class SchemaDiscoveryController {
         }
     }
 
+    @GetMapping("/api/schema/table-prefixes")
+    public ResponseEntity<?> getTablePrefixes() {
+        var cfg = schemaProvisioningService.getTablePrefixConfig();
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "goldenSource", cfg.getGoldenSource(),
+                "canonical", cfg.getCanonical(),
+                "goldenSourcePrefix", cfg.getGoldenSource(),
+                "canonicalPrefix", cfg.getCanonical()
+        ));
+    }
+
     @PostMapping("/api/schema/preview-tables")
     public ResponseEntity<?> previewTables(@RequestBody Map<String, Object> body) {
         try {
@@ -155,12 +167,15 @@ public class SchemaDiscoveryController {
                     .toList();
             List<String> stagingTables = List.of("staging_xml_records");
 
+            var cfg = schemaProvisioningService.getTablePrefixConfig();
             return ResponseEntity.ok(Map.of(
                     "success", true,
                     "message", "Target database tables successfully provisioned across all 4 layers.",
                     "discoveredTables", discoveredTables,
                     "createdFlatTables", createdFlatTables,
-                    "stagingTables", stagingTables
+                    "stagingTables", stagingTables,
+                    "goldenSourcePrefix", cfg.getGoldenSource(),
+                    "canonicalPrefix", cfg.getCanonical()
             ));
         } catch (Exception ex) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", ex.getMessage()));

@@ -1089,9 +1089,10 @@ function updateTableBreakdown(data) {
         const pct = totalWrittenAll > 0 ? Math.min(100, Math.round((written / totalWrittenAll) * 100)) : 0;
         const isRunning = data.status === 'RUNNING' || data.status === 'STARTED';
         const streamState = data.streamingState || (isRunning ? 'STREAMING' : (data.status || 'COMMITTED'));
-        const isGs = tableName.startsWith('gs_');
+        const isGs = (window.isGsTable ? window.isGsTable(tableName) : tableName.startsWith('gs_'));
+        const gsPfx = (window.getGsPrefix ? window.getGsPrefix() : 'gs_');
         const entityBadge = isGs
-            ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">HISTORICAL gs_</span>`
+            ? `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-blue-100 text-blue-800 border border-blue-200">HISTORICAL ${escapeHtml(gsPfx)}</span>`
             : `<span class="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">CANONICAL</span>`;
 
         html += `

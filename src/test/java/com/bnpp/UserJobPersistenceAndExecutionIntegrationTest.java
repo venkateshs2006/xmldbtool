@@ -44,8 +44,8 @@ public class UserJobPersistenceAndExecutionIntegrationTest {
     private DbConnectionConfig testConfig;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private static final String USER_XML_PATH = "/home/sv/.gemini/antigravity/brain/136ee828-3ae4-4df2-81b5-723a65db935d/.user_uploaded/media_1795276891892_d1941684.xml";
-    private static final String USER_JSON_PATH = "/home/sv/.gemini/antigravity/brain/136ee828-3ae4-4df2-81b5-723a65db935d/.user_uploaded/media_1795276891892_78e1079a.json";
+    private static final String USER_XML_PATH = new File("sample-data/test.xml").getAbsolutePath();
+    private static final String USER_JSON_PATH = new File("src/test/resources/user-test-mappings.json").getAbsolutePath();
 
     @BeforeEach
     public void setup() {

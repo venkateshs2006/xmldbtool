@@ -1,0 +1,104 @@
+[
+  {
+    "xmlField": "person/@id",
+    "targetTable": "Person",
+    "targetColumn": "id",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "person/@status",
+    "targetTable": "Person",
+    "targetColumn": "status",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "person/name",
+    "targetTable": "Person",
+    "targetColumn": "name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "person/age",
+    "targetTable": "Person",
+    "targetColumn": "age",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "person/addresses/address/@id",
+    "targetTable": "Address",
+    "targetColumn": "id",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "person/@id",
+    "targetTable": "Address",
+    "targetColumn": "person_id",
+    "constraintType": "FK",
+    "foreignKeyTable": "Person",
+    "foreignKeyColumn": "id",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "person/addresses/address/street",
+    "targetTable": "Address",
+    "targetColumn": "street",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "person/addresses/address/city",
+    "targetTable": "Address",
+    "targetColumn": "city",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "country/@id",
+    "targetTable": "Country",
+    "targetColumn": "id",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "country/countrylist_id",
+    "targetTable": "Country",
+    "targetColumn": "countrylist_id",
+    "constraintType": "FK",
+    "foreignKeyTable": "CountryList",
+    "foreignKeyColumn": "id",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "country/name",
+    "targetTable": "Country",
+    "targetColumn": "name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "countrylist/@id",
+    "targetTable": "CountryList",
+    "targetColumn": "id",
+    "constraintType": "PK",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "countrylist/@action",
+    "targetTable": "CountryList",
+    "targetColumn": "action",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  },
+  {
+    "xmlField": "countrylist",
+    "targetTable": "CountryList",
+    "targetColumn": "name",
+    "constraintType": "NONE",
+    "transform": "NONE"
+  }
+]

@@ -5,6 +5,7 @@ import com.bnpp.batch.DynamicJdbcBatchWriter;
 import com.bnpp.batch.DynamicXmlItemProcessor;
 import com.bnpp.batch.DynamicXmlUnmarshaller;
 import com.bnpp.batch.StaxXmlItemReader;
+import com.bnpp.config.TablePrefixConfig;
 import com.bnpp.model.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +42,7 @@ public class DynamicBatchJobService {
     private final DynamicDataSourceService dataSourceService;
     private final AuditGovernanceService auditGovernanceService;
     private final SchemaProvisioningService schemaProvisioningService;
+    private final TablePrefixConfig tablePrefixConfig;
 
     private final Map<String, DynamicJdbcBatchWriter> activeWriters = new ConcurrentHashMap<>();
     private final Map<String, DatabaseErrorSkipListener> activeListeners = new ConcurrentHashMap<>();
@@ -51,7 +53,8 @@ public class DynamicBatchJobService {
                                  DynamicXmlUnmarshaller dynamicXmlUnmarshaller,
                                  DynamicDataSourceService dataSourceService,
                                  AuditGovernanceService auditGovernanceService,
-                                 SchemaProvisioningService schemaProvisioningService) {
+                                 SchemaProvisioningService schemaProvisioningService,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false) TablePrefixConfig tablePrefixConfig) {
         this.jobRepository = jobRepository;
         this.jobLauncher = jobLauncher;
         this.transactionManager = transactionManager;
@@ -59,6 +62,7 @@ public class DynamicBatchJobService {
         this.dataSourceService = dataSourceService;
         this.auditGovernanceService = auditGovernanceService;
         this.schemaProvisioningService = schemaProvisioningService;
+        this.tablePrefixConfig = tablePrefixConfig != null ? tablePrefixConfig : (schemaProvisioningService != null ? schemaProvisioningService.getTablePrefixConfig() : new TablePrefixConfig());
     }
 
     public JobExecution launchSpringBatchIngestion(JobLaunchRequest request,
@@ -101,7 +105,8 @@ public class DynamicBatchJobService {
                 fileRecord.getFileVersionNumber(),
                 fileRecord.getVendorId(),
                 jobExecutionId,
-                request.getTargetTable()
+                request.getTargetTable(),
+                tablePrefixConfig
         );
 
         // 3. Skip Listener

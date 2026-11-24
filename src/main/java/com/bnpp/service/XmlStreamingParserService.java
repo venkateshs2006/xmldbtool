@@ -1,6 +1,7 @@
 package com.bnpp.service;
 
 import com.bnpp.batch.DynamicXmlItemProcessor;
+import com.bnpp.config.TablePrefixConfig;
 import com.bnpp.model.*;
 import com.bnpp.util.BnppIdGenerator;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,10 +34,17 @@ public class XmlStreamingParserService {
 
     private static final Logger log = LoggerFactory.getLogger(XmlStreamingParserService.class);
 
+    private static final Set<String> RESERVED_KEYWORDS = Set.of(
+            "year", "month", "day", "user", "order", "group", "table", "select", "from",
+            "where", "values", "value", "key", "offset", "limit", "date", "time", "timestamp",
+            "primary", "foreign", "check", "column", "constraint", "index", "references"
+    );
+
     private final DynamicDataSourceService dataSourceService;
     private final AuditGovernanceService auditGovernanceService;
     private final SchemaProvisioningService schemaProvisioningService;
     private final ObjectMapper objectMapper;
+    private final TablePrefixConfig tablePrefixConfig;
 
     private final Map<String, AtomicBoolean> stopRequests = new ConcurrentHashMap<>();
     private final Map<String, JobTelemetryResponse> telemetryStore = new ConcurrentHashMap<>();
@@ -44,11 +52,22 @@ public class XmlStreamingParserService {
     public XmlStreamingParserService(DynamicDataSourceService dataSourceService,
                                      AuditGovernanceService auditGovernanceService,
                                      SchemaProvisioningService schemaProvisioningService,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     @org.springframework.beans.factory.annotation.Autowired(required = false) TablePrefixConfig tablePrefixConfig) {
         this.dataSourceService = dataSourceService;
         this.auditGovernanceService = auditGovernanceService;
         this.schemaProvisioningService = schemaProvisioningService;
         this.objectMapper = objectMapper;
+        this.tablePrefixConfig = tablePrefixConfig != null ? tablePrefixConfig : (schemaProvisioningService != null ? schemaProvisioningService.getTablePrefixConfig() : new TablePrefixConfig());
+    }
+
+    private String safeCol(String col) {
+        if (col == null) return null;
+        String lower = col.trim().toLowerCase();
+        if (RESERVED_KEYWORDS.contains(lower)) {
+            return "\"" + lower + "\"";
+        }
+        return lower;
     }
 
     public void requestStop(String jobExecutionId) {
@@ -114,8 +133,9 @@ public class XmlStreamingParserService {
         AtomicLong totalWritten = new AtomicLong(0);
         Map<String, AtomicLong> tableCounts = new ConcurrentHashMap<>();
         for (String entity : entityDefs.keySet()) {
-            tableCounts.put(entity.toLowerCase(), new AtomicLong(0));
-            tableCounts.put("gs_" + entity.toLowerCase(), new AtomicLong(0));
+            String entityClean = tablePrefixConfig.cleanEntityName(entity);
+            tableCounts.put(tablePrefixConfig.getCanonicalTableName(entityClean), new AtomicLong(0));
+            tableCounts.put(tablePrefixConfig.getGoldenSourceTableName(entityClean), new AtomicLong(0));
         }
 
         // Virtual threads executor for concurrent JDBC writes throttled by semaphore
@@ -234,7 +254,9 @@ public class XmlStreamingParserService {
                                     );
                                     gsBuffers.computeIfAbsent(def.entityName, k -> Collections.synchronizedList(new ArrayList<>())).add(gsRow);
 
-                                    tableCounts.get("gs_" + def.entityName.toLowerCase()).incrementAndGet();
+                                    String gsTbl = tablePrefixConfig.getGoldenSourceTableName(def.entityName);
+                                    AtomicLong tblCount = tableCounts.get(gsTbl);
+                                    if (tblCount != null) tblCount.incrementAndGet();
 
                                     // Periodic flush when buffers hit CHUNK_SIZE
                                     if (stagingBuffer.size() >= CHUNK_SIZE) {
@@ -404,13 +426,13 @@ public class XmlStreamingParserService {
     }
 
     private void insertGoldenSourceBatch(Connection conn, EntityDefinition def, List<GoldenSourceRow> rows) throws Exception {
-        String tableName = "gs_" + def.entityName.toLowerCase();
+        String tableName = tablePrefixConfig.getGoldenSourceTableName(def.entityName);
         List<FieldMapping> mappings = def.mappings;
 
         StringBuilder sql = new StringBuilder();
         sql.append("INSERT INTO ").append(tableName).append(" (bnpp_id, ");
         for (FieldMapping m : mappings) {
-            sql.append(m.getTargetColumn().toLowerCase()).append(", ");
+            sql.append(safeCol(m.getTargetColumn())).append(", ");
         }
         sql.append("file_id, file_version, vendor_id, job_execution_id, staging_bnpp_id, raw_payload, tag_name, tag_type, created_at, updated_at) VALUES (");
 

@@ -6,6 +6,7 @@
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/batch/StaxXmlItemReader.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/config/BatchConfig.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/config/DatabaseConfig.java
+/home/sv/Projects/xmldbtool/src/main/java/com/bnpp/config/TablePrefixConfig.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/controller/AuthController.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/controller/ConnectionController.java
 /home/sv/Projects/xmldbtool/src/main/java/com/bnpp/controller/JobConfigController.java

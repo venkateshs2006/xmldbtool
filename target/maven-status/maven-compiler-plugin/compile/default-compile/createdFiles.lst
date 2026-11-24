@@ -28,6 +28,7 @@ com/bnpp/model/DiscoveredElement.class
 com/bnpp/model/LoginResponse.class
 com/bnpp/batch/DatabaseErrorSkipListener.class
 com/bnpp/model/ColumnMetadata.class
+com/bnpp/config/TablePrefixConfig.class
 com/bnpp/batch/DynamicJdbcBatchWriter.class
 com/bnpp/model/MigrationErrorRecord.class
 com/bnpp/model/DbTestResponse.class

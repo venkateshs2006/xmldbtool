@@ -2,10 +2,71 @@
  * XMLDbTool Enterprise - Job Specification & Mapping Wizard (schedule.js)
  */
 
+window.TablePrefixes = window.TablePrefixes || { goldenSource: 'gs_', canonical: '' };
+
+window.getGsPrefix = function() {
+    return (window.TablePrefixes && window.TablePrefixes.goldenSource !== undefined) ? window.TablePrefixes.goldenSource : 'gs_';
+};
+
+window.getCanonicalPrefix = function() {
+    return (window.TablePrefixes && window.TablePrefixes.canonical !== undefined) ? window.TablePrefixes.canonical : '';
+};
+
+window.cleanEntityName = function(name) {
+    if (!name) return '';
+    let lower = name.toLowerCase().trim();
+    const gs = window.getGsPrefix().toLowerCase();
+    if (gs && lower.startsWith(gs)) {
+        lower = lower.substring(gs.length);
+    } else if (lower.startsWith('gs_')) {
+        lower = lower.substring(3);
+    }
+    const can = window.getCanonicalPrefix().toLowerCase();
+    if (can && lower.startsWith(can)) {
+        lower = lower.substring(can.length);
+    }
+    return lower;
+};
+
+window.toGsTable = function(name) {
+    const clean = window.cleanEntityName(name);
+    return window.getGsPrefix() + clean;
+};
+
+window.toCanonicalTable = function(name) {
+    const clean = window.cleanEntityName(name);
+    return window.getCanonicalPrefix() + clean;
+};
+
+window.isGsTable = function(name) {
+    if (!name) return false;
+    const lower = name.toLowerCase();
+    const gs = window.getGsPrefix().toLowerCase();
+    return (gs && lower.startsWith(gs)) || lower.startsWith('gs_');
+};
+
+async function loadTablePrefixes() {
+    try {
+        const resp = await fetch('/api/schema/table-prefixes');
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.goldenSourcePrefix !== undefined) {
+                window.TablePrefixes = {
+                    goldenSource: data.goldenSourcePrefix,
+                    canonical: data.canonicalPrefix || ''
+                };
+            }
+        }
+    } catch (e) {
+        console.warn('Could not load table prefixes from server:', e);
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const user = checkAuthSession(['PLANNER', 'ADMIN']);
     if (!user) return;
 
+    loadTablePrefixes();
     initHeader('schedule');
     initStepHandlers();
     initPresets();
@@ -957,7 +1018,8 @@ async function createTargetDatabaseSchema() {
 function isInternalStagingTable(tableName) {
     if (!tableName) return false;
     const lower = tableName.toLowerCase();
-    return lower.startsWith('gs_') || lower.endsWith('_stage') || lower.endsWith('_flat') || lower.endsWith('flat')
+    const isGs = window.isGsTable ? window.isGsTable(lower) : lower.startsWith('gs_');
+    return isGs || lower.endsWith('_stage') || lower.endsWith('_flat') || lower.endsWith('flat')
         || lower.endsWith('_gs') || lower === 'staging_xml_records' || lower === 'migration_errors'
         || lower === 'gs_error_records' || lower === 'file_history'
         || lower === 'audit_log' || lower === 'error_log'
@@ -1390,6 +1452,12 @@ async function createTargetTablesInDb() {
         });
         const result = await response.json();
         if (response.ok && result.success) {
+            if (result.goldenSourcePrefix !== undefined) {
+                window.TablePrefixes = {
+                    goldenSource: result.goldenSourcePrefix,
+                    canonical: result.canonicalPrefix || ''
+                };
+            }
             AppState.schema.tables = (result.discoveredTables || []).filter(t => !isInternalStagingTable(t.tableName));
             AppState.schema.createdFlatTables = result.createdFlatTables || [];
             AppState.schema.stagingTables = result.stagingTables || [];
@@ -1397,7 +1465,8 @@ async function createTargetTablesInDb() {
             renderDiscoveredSchema();
             updateStep2IngestionStatus();
             const count = AppState.schema.tables.length;
-            showToast(`Successfully provisioned ${count} canonical tables & historical gs_<entity> tables.`, 'success', 'Tables Provisioned');
+            const gsPfx = window.getGsPrefix();
+            showToast(`Successfully provisioned ${count} canonical tables & historical ${gsPfx}<entity> tables.`, 'success', 'Tables Provisioned');
         } else {
             showToast(result.message || 'Failed to create tables.', 'error', 'Creation Error');
         }
@@ -1813,7 +1882,7 @@ function updateTableSequenceBanner() {
     let html = '';
     sortedTables.forEach((tbl, idx) => {
         const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-        const gsName = cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl;
+        const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : (cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl);
         html += `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white border border-gray-300 text-gray-800 text-[11px] font-bold shadow-xs">
                 <span class="w-4 h-4 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${idx + 1}</span>
@@ -2003,13 +2072,13 @@ function showJobConfigurationOverview() {
         if (mappedTables.length > 0) {
             mappedTables.forEach(mt => {
                 const clean = mt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
             });
         } else {
             const rootTokens = rawRoots.split(/[,;\s]+/).filter(Boolean);
             rootTokens.forEach(rt => {
                 const clean = rt.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                flatTableNames.add(clean.startsWith('gs_') ? clean : 'gs_' + clean);
+                flatTableNames.add(window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean));
             });
         }
 
@@ -2427,7 +2496,7 @@ function updateStep2IngestionStatus() {
         if (distinctTables.length > 0) {
             flatList.innerHTML = distinctTables.map(t => {
                 const clean = t.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-                const gsName = clean.startsWith('gs_') ? clean : 'gs_' + clean;
+                const gsName = window.toGsTable ? window.toGsTable(clean) : (clean.startsWith('gs_') ? clean : 'gs_' + clean);
                 return `<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 border border-blue-200 font-bold">${escapeHtml(gsName)}</span>`;
             }).join(' ');
         } else {

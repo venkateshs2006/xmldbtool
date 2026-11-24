@@ -40,6 +40,12 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
     private static final Logger log = LoggerFactory.getLogger(DynamicJdbcBatchWriter.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    private static final java.util.Set<String> RESERVED_KEYWORDS = java.util.Set.of(
+            "year", "month", "day", "user", "order", "group", "table", "select", "from",
+            "where", "values", "value", "key", "offset", "limit", "date", "time", "timestamp",
+            "primary", "foreign", "check", "column", "constraint", "index", "references"
+    );
+
     private final DataSource dataSource;
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final AtomicLong totalRowsWritten = new AtomicLong(0);
@@ -49,6 +55,15 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
     private List<String> tableOrder = new ArrayList<>();
     private DatabaseErrorSkipListener skipListener;
     private List<com.bnpp.model.FieldMapping> mappings = new ArrayList<>();
+
+    private String safeCol(String col) {
+        if (col == null) return null;
+        String lower = col.trim().toLowerCase();
+        if (RESERVED_KEYWORDS.contains(lower)) {
+            return "\"" + lower + "\"";
+        }
+        return lower;
+    }
 
     public DynamicJdbcBatchWriter(DataSource dataSource) {
         this(dataSource, Collections.emptyList(), null, null);
@@ -187,7 +202,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
         List<String> cols = new ArrayList<>(sample.keySet());
 
         StringBuilder sql = new StringBuilder("INSERT INTO ").append(tableName).append(" (");
-        sql.append(String.join(", ", cols));
+        sql.append(cols.stream().map(this::safeCol).collect(java.util.stream.Collectors.joining(", ")));
         sql.append(") VALUES (");
         sql.append("?, ".repeat(cols.size() - 1)).append("?)");
 
@@ -230,7 +245,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
             }
 
             String selectSql = "SELECT starting_bnpp_id, current_bnpp_id, historical_bnpp_ids FROM "
-                    + tableName + " WHERE " + pkCol + " = ?";
+                    + tableName + " WHERE " + safeCol(pkCol) + " = ?";
 
             String startingBnpp = null;
             String currentBnpp = (String) r.get("current_bnpp_id");
@@ -250,7 +265,7 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
                 // New record: INSERT
                 List<String> cols = new ArrayList<>(r.keySet());
                 StringBuilder insertSql = new StringBuilder("INSERT INTO ").append(tableName).append(" (");
-                insertSql.append(String.join(", ", cols)).append(") VALUES (");
+                insertSql.append(cols.stream().map(this::safeCol).collect(java.util.stream.Collectors.joining(", "))).append(") VALUES (");
                 insertSql.append("?, ".repeat(cols.size() - 1)).append("?)");
 
                 try (PreparedStatement ps = conn.prepareStatement(insertSql.toString())) {
@@ -283,9 +298,9 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
 
                 StringBuilder updateSql = new StringBuilder("UPDATE ").append(tableName).append(" SET ");
                 for (String c : updateCols) {
-                    updateSql.append(c).append(" = ?, ");
+                    updateSql.append(safeCol(c)).append(" = ?, ");
                 }
-                updateSql.append("historical_bnpp_ids = ?, updated_at = CURRENT_TIMESTAMP WHERE ").append(pkCol).append(" = ?");
+                updateSql.append("historical_bnpp_ids = ?, updated_at = CURRENT_TIMESTAMP WHERE ").append(safeCol(pkCol)).append(" = ?");
 
                 try (PreparedStatement ps = conn.prepareStatement(updateSql.toString())) {
                     int idx = 1;

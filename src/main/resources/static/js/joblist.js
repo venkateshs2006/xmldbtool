@@ -402,7 +402,7 @@ function openReviewModal(job) {
     if (job.tableOrder && job.tableOrder.length > 0) {
         tableOrderDiv.innerHTML = job.tableOrder.map((tbl, i) => {
             const cleanTbl = tbl.replaceAll(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-            const gsName = cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl;
+            const gsName = window.toGsTable ? window.toGsTable(cleanTbl) : (cleanTbl.startsWith('gs_') ? cleanTbl : 'gs_' + cleanTbl);
             return `
             <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-bnp-emerald font-bold text-xs">
                 <span class="w-3.5 h-3.5 rounded-full bg-bnp-emerald text-white text-[9px] flex items-center justify-center font-bold">${i + 1}</span>

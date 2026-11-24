@@ -1,11 +1,13 @@
 package com.bnpp.service;
 
+import com.bnpp.config.TablePrefixConfig;
 import com.bnpp.model.*;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import javax.sql.DataSource;
@@ -18,16 +20,39 @@ public class SchemaProvisioningService {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaProvisioningService.class);
 
+    private static final Set<String> RESERVED_KEYWORDS = Set.of(
+            "year", "month", "day", "user", "order", "group", "table", "select", "from",
+            "where", "values", "value", "key", "offset", "limit", "date", "time", "timestamp",
+            "primary", "foreign", "check", "column", "constraint", "index", "references"
+    );
+
     private final DynamicDataSourceService dataSourceService;
     private final AuditGovernanceService auditGovernanceService;
     private final ObjectMapper objectMapper;
+    private final TablePrefixConfig tablePrefixConfig;
 
+    @Autowired
     public SchemaProvisioningService(DynamicDataSourceService dataSourceService,
                                      AuditGovernanceService auditGovernanceService,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper,
+                                     @Autowired(required = false) TablePrefixConfig tablePrefixConfig) {
         this.dataSourceService = dataSourceService;
         this.auditGovernanceService = auditGovernanceService;
         this.objectMapper = objectMapper;
+        this.tablePrefixConfig = tablePrefixConfig != null ? tablePrefixConfig : new TablePrefixConfig();
+    }
+
+    public TablePrefixConfig getTablePrefixConfig() {
+        return tablePrefixConfig;
+    }
+
+    public String safeColumnName(String col) {
+        if (col == null) return null;
+        String lower = col.trim().toLowerCase();
+        if (RESERVED_KEYWORDS.contains(lower)) {
+            return "\"" + lower + "\"";
+        }
+        return lower;
     }
 
     public List<FieldMapping> parseMappings(String ingestionJson) {
@@ -58,19 +83,20 @@ public class SchemaProvisioningService {
         // 2. Layer 2: Universal Staging table
         provisionStagingTable(ds);
 
-        // 3. Layer 3 & 4: Golden Source (gs_<entity>) and Canonical (<entity>) tables
+        // 3. Layer 3 & 4: Golden Source and Canonical tables
         Map<String, List<FieldMapping>> tableMap = groupMappingsByTable(mappings);
 
         for (Map.Entry<String, List<FieldMapping>> entry : tableMap.entrySet()) {
             String rawTable = entry.getKey();
-            String entityName = rawTable.toLowerCase();
+            String entityName = tablePrefixConfig.cleanEntityName(rawTable);
             List<FieldMapping> cols = entry.getValue();
 
             provisionGoldenSourceTable(ds, entityName, cols);
             provisionCanonicalTable(ds, entityName, cols);
         }
 
-        log.info("Successfully provisioned all database layers for {} entities.", tableMap.size());
+        log.info("Successfully provisioned all database layers for {} entities with prefixes (GS: '{}', Canonical: '{}').",
+                tableMap.size(), tablePrefixConfig.getGoldenSource(), tablePrefixConfig.getCanonical());
     }
 
     private void provisionStagingTable(DataSource ds) {
@@ -107,7 +133,7 @@ public class SchemaProvisioningService {
     }
 
     private void provisionGoldenSourceTable(DataSource ds, String entityName, List<FieldMapping> mappings) {
-        String tableName = "gs_" + entityName;
+        String tableName = tablePrefixConfig.getGoldenSourceTableName(entityName);
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE TABLE IF NOT EXISTS ").append(tableName).append(" (\n");
         sb.append("    bnpp_id VARCHAR(64) PRIMARY KEY,\n");
@@ -119,7 +145,7 @@ public class SchemaProvisioningService {
             String col = m.getTargetColumn().toLowerCase();
             if (addedCols.add(col)) {
                 String dType = determineSqlType(m);
-                sb.append("    ").append(col).append(" ").append(dType).append(",\n");
+                sb.append("    ").append(safeColumnName(col)).append(" ").append(dType).append(",\n");
             }
         }
 
@@ -142,7 +168,7 @@ public class SchemaProvisioningService {
     }
 
     private void provisionCanonicalTable(DataSource ds, String entityName, List<FieldMapping> mappings) {
-        String tableName = entityName; // Clean canonical entity name
+        String tableName = tablePrefixConfig.getCanonicalTableName(entityName);
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE TABLE IF NOT EXISTS ").append(tableName).append(" (\n");
 
@@ -155,7 +181,7 @@ public class SchemaProvisioningService {
         String pkCol = pkMapping != null ? pkMapping.getTargetColumn().toLowerCase() : "id";
         String pkType = pkMapping != null ? determineSqlType(pkMapping) : "VARCHAR(128)";
 
-        sb.append("    ").append(pkCol).append(" ").append(pkType).append(" PRIMARY KEY,\n");
+        sb.append("    ").append(safeColumnName(pkCol)).append(" ").append(pkType).append(" PRIMARY KEY,\n");
 
         Set<String> addedCols = new HashSet<>();
         addedCols.add(pkCol);
@@ -164,7 +190,7 @@ public class SchemaProvisioningService {
             String col = m.getTargetColumn().toLowerCase();
             if (addedCols.add(col)) {
                 String dType = determineSqlType(m);
-                sb.append("    ").append(col).append(" ").append(dType).append(",\n");
+                sb.append("    ").append(safeColumnName(col)).append(" ").append(dType).append(",\n");
             }
         }
 
@@ -225,11 +251,13 @@ public class SchemaProvisioningService {
         // 3. Mapped Entities
         Map<String, List<FieldMapping>> tableMap = groupMappingsByTable(mappings);
         for (Map.Entry<String, List<FieldMapping>> entry : tableMap.entrySet()) {
-            String entityName = entry.getKey().toLowerCase();
+            String rawTable = entry.getKey();
+            String entityName = tablePrefixConfig.cleanEntityName(rawTable);
             List<FieldMapping> cols = entry.getValue();
 
             // Golden Source
-            TableMetadata gsTable = new TableMetadata("gs_" + entityName, "GOLDEN_SOURCE", entityName);
+            String gsTableName = tablePrefixConfig.getGoldenSourceTableName(entityName);
+            TableMetadata gsTable = new TableMetadata(gsTableName, "GOLDEN_SOURCE", entityName);
             gsTable.setPrimaryKeyColumn("bnpp_id");
             for (FieldMapping m : cols) {
                 gsTable.getColumns().add(new ColumnMetadata(m.getTargetColumn().toLowerCase(), determineSqlType(m), "PK".equalsIgnoreCase(m.getConstraintType())));
@@ -237,7 +265,8 @@ public class SchemaProvisioningService {
             tables.add(gsTable);
 
             // Canonical
-            TableMetadata canTable = new TableMetadata(entityName, "CANONICAL", entityName);
+            String canTableName = tablePrefixConfig.getCanonicalTableName(entityName);
+            TableMetadata canTable = new TableMetadata(canTableName, "CANONICAL", entityName);
             FieldMapping pkMapping = cols.stream().filter(m -> "PK".equalsIgnoreCase(m.getConstraintType())).findFirst().orElse(null);
             canTable.setPrimaryKeyColumn(pkMapping != null ? pkMapping.getTargetColumn().toLowerCase() : "id");
             for (FieldMapping m : cols) {
@@ -252,13 +281,14 @@ public class SchemaProvisioningService {
                         m.getForeignKeyColumn()
                 ));
                 if (isFk && m.getForeignKeyTable() != null) {
-                    rels.add(new TableRelationship(entityName, m.getTargetColumn().toLowerCase(), m.getForeignKeyTable().toLowerCase(), m.getForeignKeyColumn() != null ? m.getForeignKeyColumn().toLowerCase() : "id"));
+                    String fkTable = tablePrefixConfig.getCanonicalTableName(m.getForeignKeyTable());
+                    rels.add(new TableRelationship(canTableName, m.getTargetColumn().toLowerCase(), fkTable, m.getForeignKeyColumn() != null ? m.getForeignKeyColumn().toLowerCase() : "id"));
                 }
             }
             tables.add(canTable);
         }
 
-        return new TablePreviewData(tables, rels, combinedDdl.toString());
+        return new TablePreviewData(tables, rels, combinedDdl.toString(), tablePrefixConfig.getGoldenSource(), tablePrefixConfig.getCanonical());
     }
 
     private Map<String, List<FieldMapping>> groupMappingsByTable(List<FieldMapping> mappings) {
