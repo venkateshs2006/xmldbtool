@@ -146,9 +146,6 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
             for (Map.Entry<String, List<Map<String, Object>>> entry : canBatch.entrySet()) {
                 String tableName = entry.getKey();
                 List<Map<String, Object>> rows = entry.getValue();
-                System.out.println("==========================================");
-                System.out.println(rows.toString());
-                System.out.println("==========================================");
                 writeCanonicalRows(conn, tableName, rows);
                 tableWriteCounts.compute(tableName, (k, v) -> (v == null ? 0L : v) + rows.size());
             }
@@ -321,10 +318,20 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
             return cached;
         }
 
-        // 1. Explicit PK from mappings
+        // Collect FK columns for this table so we never accidentally treat an FK column as the PK
+        java.util.Set<String> fkCols = new java.util.HashSet<>();
         if (mappings != null && !mappings.isEmpty()) {
             for (com.bnpp.model.FieldMapping m : mappings) {
-                if (tableName.equalsIgnoreCase(m.getTargetTable()) && "PK".equalsIgnoreCase(m.getConstraintType())) {
+                if (matchesTableName(tableName, m.getTargetTable()) && "FK".equalsIgnoreCase(m.getConstraintType()) && m.getTargetColumn() != null) {
+                    fkCols.add(m.getTargetColumn().toLowerCase());
+                }
+            }
+        }
+
+        // 1. Explicit PK from mappings (handles both raw entity names and prefixed canonical table names)
+        if (mappings != null && !mappings.isEmpty()) {
+            for (com.bnpp.model.FieldMapping m : mappings) {
+                if (matchesTableName(tableName, m.getTargetTable()) && "PK".equalsIgnoreCase(m.getConstraintType())) {
                     String col = m.getTargetColumn().toLowerCase();
                     if (sampleRow != null) {
                         for (String k : sampleRow.keySet()) {
@@ -349,21 +356,27 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
                     schema = conn.getSchema();
                 } catch (Throwable ignored) {}
 
-                for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
-                    try (ResultSet rs = meta.getPrimaryKeys(null, schema, tName)) {
-                        if (rs.next()) {
-                            String pk = rs.getString("COLUMN_NAME");
-                            if (pk != null && !pk.isEmpty()) {
-                                if (sampleRow != null) {
-                                    for (String k : sampleRow.keySet()) {
-                                        if (k.equalsIgnoreCase(pk)) {
-                                            pkColumnCache.put(tableName.toLowerCase(), k);
-                                            return k;
+                List<String> schemasToTry = new ArrayList<>();
+                if (schema != null) schemasToTry.add(schema);
+                schemasToTry.add(null);
+
+                for (String s : schemasToTry) {
+                    for (String tName : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
+                        try (ResultSet rs = meta.getPrimaryKeys(null, s, tName)) {
+                            if (rs.next()) {
+                                String pk = rs.getString("COLUMN_NAME");
+                                if (pk != null && !pk.isEmpty()) {
+                                    if (sampleRow != null) {
+                                        for (String k : sampleRow.keySet()) {
+                                            if (k.equalsIgnoreCase(pk)) {
+                                                pkColumnCache.put(tableName.toLowerCase(), k);
+                                                return k;
+                                            }
                                         }
                                     }
+                                    pkColumnCache.put(tableName.toLowerCase(), pk.toLowerCase());
+                                    return pk.toLowerCase();
                                 }
-                                pkColumnCache.put(tableName.toLowerCase(), pk.toLowerCase());
-                                return pk.toLowerCase();
                             }
                         }
                     }
@@ -372,17 +385,17 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
             }
         }
 
-        // 3. Fallback: match sampleRow keys for entity-specific PK, then 'id'
+        // 3. Fallback: match sampleRow keys for entity-specific PK, then 'id' (never pick an FK column)
         if (sampleRow != null) {
             String entityId = tableName.toLowerCase() + "_id";
             for (String k : sampleRow.keySet()) {
-                if (k.equalsIgnoreCase(entityId)) {
+                if (k.equalsIgnoreCase(entityId) && !fkCols.contains(k.toLowerCase())) {
                     pkColumnCache.put(tableName.toLowerCase(), k);
                     return k;
                 }
             }
             for (String k : sampleRow.keySet()) {
-                if (k.equalsIgnoreCase("id")) {
+                if (k.equalsIgnoreCase("id") && !fkCols.contains(k.toLowerCase())) {
                     pkColumnCache.put(tableName.toLowerCase(), k);
                     return k;
                 }
@@ -391,6 +404,13 @@ public class DynamicJdbcBatchWriter implements ItemWriter<DatabaseRowPayload>, S
 
         pkColumnCache.put(tableName.toLowerCase(), "id");
         return "id";
+    }
+
+    private boolean matchesTableName(String tableName, String targetTable) {
+        if (tableName == null || targetTable == null) return false;
+        String t = tableName.trim().toLowerCase();
+        String target = targetTable.trim().toLowerCase();
+        return t.equals(target) || t.endsWith("_" + target);
     }
 
     public long getTotalRowsWritten() {

@@ -374,6 +374,95 @@ public class ForeignKeyConstraintCreationTest {
         }
     }
 
+    @Test
+    void testParentChildSameAttributeIdForeignKeyCreation() throws Exception {
+        String xml = """
+                <Records>
+                    <Person id="101" status="active">
+                        <name>Alice</name>
+                        <Addresses>
+                            <Address id="ADDR-1">
+                                <street>100 Main St</street>
+                            </Address>
+                            <Address id="ADDR-2">
+                                <street>200 Broadway</street>
+                            </Address>
+                        </Addresses>
+                    </Person>
+                    <Person id="102" status="active">
+                        <name>Bob</name>
+                        <Addresses>
+                            <Address id="ADDR-3">
+                                <street>300 Elm St</street>
+                            </Address>
+                        </Addresses>
+                    </Person>
+                </Records>
+                """;
+        File xmlFile = File.createTempFile("fk_same_attr_", ".xml");
+        try (var fw = new java.io.FileWriter(xmlFile)) {
+            fw.write(xml);
+        }
+
+        FieldMapping fkMapping = new FieldMapping("Records/Person/@id", "Address", "person_id", "FK", "NONE");
+        fkMapping.setForeignKeyTable("Person");
+        fkMapping.setForeignKeyColumn("id");
+
+        List<FieldMapping> mappings = List.of(
+                new FieldMapping("Records/Person/@id", "Person", "id", "PK", "NONE"),
+                new FieldMapping("Records/Person/@status", "Person", "status", "NONE", "NONE"),
+                new FieldMapping("Records/Person/name", "Person", "name", "NONE", "NONE"),
+                new FieldMapping("Records/Person/Addresses/Address/@id", "Address", "id", "PK", "NONE"),
+                fkMapping,
+                new FieldMapping("Records/Person/Addresses/Address/street", "Address", "street", "NONE", "NONE")
+        );
+
+        schemaProvisioningService.provisionAllTables(testConfig, mappings);
+        FileHistoryRecord fileRec = auditGovernanceService.registerOrResolveFile(
+                testConfig, xmlFile.getAbsolutePath(), "FK_SAME_ATTR", "VND-FKATTR", null, "TEST_USER"
+        );
+
+        JobLaunchRequest req = new JobLaunchRequest();
+        req.setJobId("JOB-FK-ATTR-" + System.currentTimeMillis());
+        req.setDbConfig(testConfig);
+        req.setXmlFilePath(xmlFile.getAbsolutePath());
+        req.setMappings(mappings);
+        req.setRecordRootElement("Person");
+        req.setChunkSize(10);
+
+        String execId = "EXEC-FK-ATTR-001";
+        var exec = dynamicBatchJobService.launchSpringBatchIngestion(req, fileRec, mappings, execId);
+        assertEquals("COMPLETED", exec.getStatus().name());
+
+        // Create FK constraints via Tasklet
+        var fkExec = dynamicBatchJobService.runForeignKeyConstraintTasklet(testConfig, mappings, execId, fileRec.getFileId(), "TEST_USER");
+        assertEquals("COMPLETED", fkExec.getStatus().name());
+
+        DataSource ds = dataSourceService.getOrCreateDataSource(testConfig);
+        try (Connection conn = ds.getConnection();
+             Statement stmt = conn.createStatement()) {
+            try (ResultSet rs = stmt.executeQuery("SELECT id, person_id FROM address ORDER BY id")) {
+                assertTrue(rs.next());
+                assertEquals("ADDR-1", rs.getString("id"));
+                assertEquals("101", rs.getString("person_id"), "person_id must be parent Person id 101, not ADDR-1");
+
+                assertTrue(rs.next());
+                assertEquals("ADDR-2", rs.getString("id"));
+                assertEquals("101", rs.getString("person_id"), "person_id must be parent Person id 101, not ADDR-2");
+
+                assertTrue(rs.next());
+                assertEquals("ADDR-3", rs.getString("id"));
+                assertEquals("102", rs.getString("person_id"), "person_id must be parent Person id 102, not ADDR-3");
+            }
+
+            Map<String, String> addressFks = getImportedFks(conn.getMetaData(), "address");
+            assertTrue(addressFks.containsKey("person_id"), "FK constraint on address.person_id must be created");
+            assertEquals("person", addressFks.get("person_id").toLowerCase());
+        } finally {
+            xmlFile.delete();
+        }
+    }
+
     private Map<String, String> getImportedFks(DatabaseMetaData meta, String tableName) throws SQLException {
         Map<String, String> map = new HashMap<>();
         for (String t : List.of(tableName, tableName.toUpperCase(), tableName.toLowerCase())) {
